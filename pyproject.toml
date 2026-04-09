@@ -1,0 +1,14 @@
+[project]
+name = "RoboAgent"
+version = "0.1.0"
+description = "The Brain of an Autonomous Robot System"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.2.15",
+    "python-dotenv>=1.2.2",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
