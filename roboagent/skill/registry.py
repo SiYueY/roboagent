@@ -31,8 +31,8 @@ def _tokenize(text: str) -> set[str]:
 class SkillRegistry:
     """In-memory registry for loaded runtime skills.
 
-    The registry is responsible for indexing skills by name, applying
-    replacement policy, and providing lightweight matching over loaded skills.
+    The registry is responsible for indexing skills by name and providing
+    lightweight matching over loaded skills.
     """
 
     def __init__(
@@ -44,55 +44,54 @@ class SkillRegistry:
         self._skills: dict[str, Skill] = {}
         self._loader = loader or SkillLoader()
         if skills:
-            self.register_many(skills)
+            self.register_batch(skills)
 
-    def register(self, skill: Skill, *, replace: bool = True) -> Skill:
+    def register(self, skill: Skill) -> Skill:
         """Register a skill under its unique name.
 
         Args:
             skill: Runtime skill to register.
-            replace: Whether an existing skill with the same name may be
-                replaced.
 
         Returns:
             The registered skill.
 
         Raises:
-            DuplicateSkillError: If `replace` is false and the skill name is
-                already registered.
+            DuplicateSkillError: If the skill name is already registered.
         """
-        if not replace and skill.name in self._skills:
+        if skill.name in self._skills:
             raise DuplicateSkillError(f"Skill '{skill.name}' is already registered.")
 
         self._skills[skill.name] = skill
         logger.debug("Registered skill '%s' from source '%s'", skill.name, skill.source)
         return skill
 
-    def register_many(self, skills: Iterable[Skill], *, replace: bool = True) -> list[Skill]:
+    def register_batch(self, skills: Iterable[Skill]) -> list[Skill]:
         """Register multiple skills in order.
 
         Args:
             skills: Skills to register.
-            replace: Whether existing registrations may be replaced.
 
         Returns:
             The registered skills in input order.
+
+        Raises:
+            DuplicateSkillError: If duplicate names are present in the batch
+                or already registered.
         """
         skill_list = list(skills)
-        if not replace:
-            names = [skill.name for skill in skill_list]
-            duplicate_names = {name for name, count in Counter(names).items() if count > 1}
-            if duplicate_names:
-                duplicates = ", ".join(sorted(duplicate_names))
-                raise DuplicateSkillError(f"Duplicate skill names in batch registration: {duplicates}")
-            existing_names = sorted(name for name in names if name in self._skills)
-            if existing_names:
-                duplicates = ", ".join(existing_names)
-                raise DuplicateSkillError(f"Skill names are already registered: {duplicates}")
+        names = [skill.name for skill in skill_list]
+        duplicate_names = {name for name, count in Counter(names).items() if count > 1}
+        if duplicate_names:
+            duplicates = ", ".join(sorted(duplicate_names))
+            raise DuplicateSkillError(f"Duplicate skill names in batch registration: {duplicates}")
+        existing_names = sorted(name for name in names if name in self._skills)
+        if existing_names:
+            duplicates = ", ".join(existing_names)
+            raise DuplicateSkillError(f"Skill names are already registered: {duplicates}")
 
         registered: list[Skill] = []
         for skill in skill_list:
-            registered.append(self.register(skill, replace=replace))
+            registered.append(self.register(skill))
         return registered
 
     @property
@@ -178,25 +177,23 @@ class SkillRegistry:
         """Return enabled skills sorted by name."""
         return self.list_all(enabled_only=True)
 
-    def load_source(self, source: str | Path, *, replace: bool = True) -> list[Skill]:
+    def load_source(self, source: str | Path) -> list[Skill]:
         """Load skills from a source via the configured loader and register them.
 
         Args:
             source: Directory to load from.
-            replace: Whether existing registrations may be replaced.
 
         Returns:
             The loaded skills from the source.
         """
         skills = self._loader.load_source(source)
-        self.register_many(skills, replace=replace)
+        self.register_batch(skills)
         return skills
 
     def load_all(
         self,
         sources: Sequence[str | Path] | None = None,
         *,
-        replace: bool = True,
         clear: bool = False,
     ) -> list[Skill]:
         """Load all skills from the provided or configured sources.
@@ -204,7 +201,6 @@ class SkillRegistry:
         Args:
             sources: Optional source directories. Uses the loader's configured
                 sources when omitted.
-            replace: Whether existing registrations may be replaced.
             clear: Whether to clear the registry before loading.
 
         Returns:
@@ -213,7 +209,7 @@ class SkillRegistry:
         if clear:
             self.clear()
         skills = self._loader.load_all(sources)
-        self.register_many(skills, replace=replace)
+        self.register_batch(skills)
         return skills
 
     def match(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import cast, overload
 
 from langchain_core.tools import BaseTool as LangChainBaseTool
 
@@ -31,45 +30,42 @@ class ToolManager:
         """Expose the underlying registry for advanced integrations."""
         return self._registry
 
-    @overload
-    def register(self, base_tool: LangChainBaseTool, spec: ToolSpec, /) -> Tool:
-        ...
-
-    @overload
-    def register(self, items: Iterable[tuple[LangChainBaseTool, ToolSpec]], /) -> list[Tool]:
-        ...
-
     def register(
         self,
-        base_tool_or_items: LangChainBaseTool | Iterable[tuple[LangChainBaseTool, ToolSpec]],
+        base_tool: LangChainBaseTool,
         spec: ToolSpec | None = None,
         /,
-    ) -> Tool | list[Tool]:
-        """Register one tool or a batch of tools.
+    ) -> Tool:
+        """Register one tool.
 
         Args:
-            base_tool_or_items: Either one LangChain tool, or an iterable of
-                `(base_tool, spec)` tuples.
+            base_tool: LangChain tool instance.
             spec: Metadata schema for single-tool registration.
 
         Returns:
-            A runtime `Tool` for single registration, or a list of runtime
-            tools for batch registration.
+            Registered runtime `Tool`.
 
         Raises:
             ToolRegistrationError: If the single-tool form omits `spec`.
         """
-        if spec is not None:
-            base_tool = cast("LangChainBaseTool", base_tool_or_items)
-            tool = Tool.from_spec(base_tool, spec)
-            return self._registry.register(tool)
-
-        if isinstance(base_tool_or_items, LangChainBaseTool):
+        if spec is None:
             raise ToolRegistrationError("register(base_tool, spec) requires a ToolSpec argument.")
 
-        items = list(cast("Iterable[tuple[LangChainBaseTool, ToolSpec]]", base_tool_or_items))
+        tool = Tool.from_spec(base_tool, spec)
+        return self._registry.register(tool)
+
+    def register_batch(self, items: Iterable[tuple[LangChainBaseTool, ToolSpec]], /) -> list[Tool]:
+        """Register a batch of tools.
+
+        Args:
+            items: Iterable of `(base_tool, spec)` tuples.
+
+        Returns:
+            Registered runtime tools in input order.
+        """
+        items = list(items)
         tools = [Tool.from_spec(base_tool, item_spec) for base_tool, item_spec in items]
-        return self._registry.register(tools)
+        return self._registry.register_batch(tools)
 
     def list_tools(self, *, source: str | None = None, group: str | None = None) -> list[Tool]:
         """List registered tools with optional filtering.

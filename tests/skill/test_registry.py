@@ -23,7 +23,7 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(registry.get("nav-plan"), skill)
         self.assertEqual(registry.require("nav-plan"), skill)
 
-    def test_register_without_replace_raises_duplicate(self) -> None:
+    def test_register_duplicate_raises(self) -> None:
         registry = SkillRegistry()
         skill = Skill(
             name="nav-plan",
@@ -34,7 +34,7 @@ class SkillRegistryTests(unittest.TestCase):
         registry.register(skill)
 
         with self.assertRaises(DuplicateSkillError):
-            registry.register(skill, replace=False)
+            registry.register(skill)
 
     def test_unregister_missing_skill_can_raise(self) -> None:
         registry = SkillRegistry()
@@ -110,7 +110,7 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertEqual(registry.count(), 1)
             self.assertEqual(registry.require("nav-plan").source, "builtin")
 
-    def test_register_many_is_atomic_when_replace_is_false(self) -> None:
+    def test_batch_register_is_atomic_when_duplicates_exist(self) -> None:
         existing = Skill(
             name="nav-plan",
             description="Generate navigation plans.",
@@ -126,7 +126,7 @@ class SkillRegistryTests(unittest.TestCase):
         registry = SkillRegistry([existing])
 
         with self.assertRaises(DuplicateSkillError):
-            registry.register_many([new_skill, existing], replace=False)
+            registry.register_batch([new_skill, existing])
 
         self.assertTrue(registry.has("nav-plan"))
         self.assertFalse(registry.has("arm-control"))

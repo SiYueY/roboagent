@@ -42,7 +42,6 @@ class SkillManager:
         self,
         sources: Sequence[str | Path] | None = None,
         *,
-        replace: bool = True,
         clear: bool = False,
     ) -> list[Skill]:
         """Load skills from configured or provided sources into the registry.
@@ -50,14 +49,13 @@ class SkillManager:
         Args:
             sources: Optional source directories. Uses the manager's configured
                 sources when omitted.
-            replace: Whether existing registrations may be replaced.
             clear: Whether to clear the registry before loading.
 
         Returns:
             The loaded runtime skills.
         """
         resolved_sources = tuple(Path(source) for source in (sources or self._sources))
-        loaded = self._registry.load_all(resolved_sources, replace=replace, clear=clear)
+        loaded = self._registry.load_all(resolved_sources, clear=clear)
         logger.debug("Loaded %d skills from %d sources", len(loaded), len(resolved_sources))
         return loaded
 
@@ -69,17 +67,16 @@ class SkillManager:
         """
         return self.load(clear=True)
 
-    def register(self, skill: Skill, *, replace: bool = True) -> Skill:
+    def register(self, skill: Skill) -> Skill:
         """Register a single runtime skill.
 
         Args:
             skill: Runtime skill to register.
-            replace: Whether an existing registration may be replaced.
 
         Returns:
             The registered skill.
         """
-        return self._registry.register(skill, replace=replace)
+        return self._registry.register(skill)
 
     def unregister(self, name: str, *, missing_ok: bool = True) -> bool:
         """Remove a skill from the registry.
@@ -165,7 +162,8 @@ class SkillManager:
         """Update the enabled flag of a registered skill."""
         skill = self._registry.require(name)
         updated = replace(skill, enabled=enabled)
-        self._registry.register(updated, replace=True)
+        self._registry.unregister(name, missing_ok=False)
+        self._registry.register(updated)
         return updated
 
     def select(self, query: str, *, top_k: int = 3, enabled_only: bool = True) -> list[Skill]:

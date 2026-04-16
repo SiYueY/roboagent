@@ -41,21 +41,21 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(registry.get("map.read"), tool)
         self.assertEqual(registry.require("map.read"), tool)
 
-    def test_register_without_replace_raises_duplicate(self) -> None:
+    def test_register_duplicate_raises(self) -> None:
         registry = ToolRegistry()
         tool = build_tool("map.read")
         registry.register(tool)
 
         with self.assertRaises(DuplicateToolError):
-            registry.register(tool, replace=False)
+            registry.register(tool)
 
-    def test_batch_register_is_atomic_when_replace_is_false(self) -> None:
+    def test_batch_register_is_atomic_when_duplicates_exist(self) -> None:
         existing = build_tool("map.read")
         new_tool = build_tool("pose.read")
         registry = ToolRegistry([existing])
 
         with self.assertRaises(DuplicateToolError):
-            registry.register([new_tool, existing], replace=False)
+            registry.register_batch([new_tool, existing])
 
         self.assertTrue(registry.has("map.read"))
         self.assertFalse(registry.has("pose.read"))

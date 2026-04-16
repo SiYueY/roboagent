@@ -27,7 +27,7 @@ class ToolManagerTests(unittest.TestCase):
     def test_register_batch_tools(self) -> None:
         manager = ToolManager()
 
-        registered = manager.register(
+        registered = manager.register_batch(
             [
                 (
                     create_structured_tool("map.read"),
@@ -62,7 +62,7 @@ class ToolManagerTests(unittest.TestCase):
 
     def test_resolve_tools_and_get_tools_return_direct_tools_only(self) -> None:
         manager = ToolManager()
-        manager.register(
+        manager.register_batch(
             [
                 (
                     create_structured_tool("map.read"),
