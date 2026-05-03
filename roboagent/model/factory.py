@@ -6,7 +6,6 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
-from roboagent.config.model_config import get_model_registry
 from roboagent.model.errors import ModelProviderError
 from roboagent.model.providers import (
     DeepSeekModelConfig,
@@ -19,12 +18,18 @@ from roboagent.model.providers import (
 from roboagent.model.registry import ModelRegistry
 
 
-def create_chat_model(name: str | None = None, **kwargs: Any) -> BaseChatModel:
+def create_chat_model(
+    name: str | None = None,
+    *,
+    registry: ModelRegistry,
+    **kwargs: Any,
+) -> BaseChatModel:
     """Create one chat model from configured provider model entries.
 
     Args:
-        name: Optional configured model name. Uses default-model resolution when
-            omitted.
+        name: Optional configured model name. Uses registry default resolution
+            when omitted.
+        registry: Explicit model registry used for model resolution.
         **kwargs: Runtime keyword overrides merged on top of static params.
 
     Returns:
@@ -33,7 +38,6 @@ def create_chat_model(name: str | None = None, **kwargs: Any) -> BaseChatModel:
     Raises:
         ModelProviderError: If the provider type is unsupported.
     """
-    registry: ModelRegistry = get_model_registry()
     model_config = registry.resolve(name)
 
     if isinstance(model_config, OpenAIModelConfig):

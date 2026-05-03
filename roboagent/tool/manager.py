@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from langchain_core.tools import BaseTool as LangChainBaseTool
 
 from roboagent.tool.errors import ToolRegistrationError
 from roboagent.tool.registry import ToolRegistry
-from roboagent.tool.resolver import ResolvedToolSet, ToolResolver
+from roboagent.tool.resolver import ResolutionContext, ResolvedToolSet, ToolResolver
 from roboagent.tool.schema import ToolSpec
 from roboagent.tool.tool import Tool
 
@@ -81,20 +81,12 @@ class ToolManager:
 
     def resolve_tools(
         self,
-        agent_id: str,
-        *,
-        subagent_id: str | None = None,
-        activated_allowed_tools: Sequence[str] = (),
-        parent_allowed_tools: Sequence[str] | None = None,
+        context: ResolutionContext,
     ) -> ResolvedToolSet:
         """Resolve direct and deferred tools for the provided context.
 
         Args:
-            agent_id: Primary agent identifier.
-            subagent_id: Optional subagent identifier.
-            activated_allowed_tools: Optional allowlist from activated skills.
-            parent_allowed_tools: Optional parent allowlist for subagent
-                resolution.
+            context: Resolution context for the current agent or sub-agent.
 
         Returns:
             The resolved direct/deferred tool buckets.
@@ -102,38 +94,22 @@ class ToolManager:
         tools = self._registry.list_all()
         return self._resolver.resolve(
             tools,
-            agent_id,
-            subagent_id=subagent_id,
-            activated_allowed_tools=activated_allowed_tools,
-            parent_allowed_tools=parent_allowed_tools,
+            context,
         )
 
     def get_tools(
         self,
-        agent_id: str,
-        *,
-        subagent_id: str | None = None,
-        activated_allowed_tools: Sequence[str] = (),
-        parent_allowed_tools: Sequence[str] | None = None,
+        context: ResolutionContext,
     ) -> list[LangChainBaseTool]:
         """Return directly visible LangChain tools for the provided context.
 
         Args:
-            agent_id: Primary agent identifier.
-            subagent_id: Optional subagent identifier.
-            activated_allowed_tools: Optional allowlist from activated skills.
-            parent_allowed_tools: Optional parent allowlist for subagent
-                resolution.
+            context: Resolution context for the current agent or sub-agent.
 
         Returns:
             Directly visible LangChain `BaseTool` instances.
         """
-        resolved = self.resolve_tools(
-            agent_id,
-            subagent_id=subagent_id,
-            activated_allowed_tools=activated_allowed_tools,
-            parent_allowed_tools=parent_allowed_tools,
-        )
+        resolved = self.resolve_tools(context)
         return [tool.base_tool for tool in resolved.direct_tools]
 
 

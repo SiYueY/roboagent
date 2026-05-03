@@ -167,7 +167,7 @@ class SkillRegistry:
         """
         skills = list(self._skills.values())
         if enabled_only:
-            skills = [skill for skill in skills if skill.enabled]
+            skills = [skill for skill in skills if skill.is_active]
         if source is not None:
             skills = [skill for skill in skills if skill.source == source]
         skills.sort(key=lambda skill: skill.name)

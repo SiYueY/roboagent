@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from roboagent.skill import SkillLoader
+from roboagent.skill import SkillLoadError, SkillLoader
 
 
 class SkillLoaderTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class SkillLoaderTests(unittest.TestCase):
             self.assertEqual(skill.trigger_keywords, ("navigate", "waypoint"))
             self.assertEqual(skill.allowed_tools, ("map.read", "pose.read"))
 
-    def test_load_skill_file_warns_but_loads_for_directory_name_mismatch(self) -> None:
+    def test_load_skill_file_rejects_directory_name_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             source = Path(tmp_dir) / "builtin"
             skill_dir = source / "wrong-dir"
@@ -59,10 +59,9 @@ class SkillLoaderTests(unittest.TestCase):
             )
 
             loader = SkillLoader()
-            skill = loader.load_skill_file(skill_file, source=source)
 
-            self.assertEqual(skill.name, "nav-plan")
-            self.assertEqual(skill.source_dir, skill_dir)
+            with self.assertRaises(SkillLoadError):
+                loader.load_skill_file(skill_file, source=source)
 
     def test_load_source_skips_invalid_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

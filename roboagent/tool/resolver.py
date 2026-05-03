@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from roboagent.tool.tool import Tool
 
@@ -22,40 +23,59 @@ class ResolvedToolSet:
     deferred_tools: list[Tool]
 
 
+@dataclass(frozen=True, slots=True)
+class ResolutionContext:
+    """Inputs used to resolve tool visibility for one runtime context."""
+
+    agent_id: str
+    subagent_id: str | None = None
+    activated_allowed_tools: tuple[str, ...] = ()
+    activated_skills: tuple[Any, ...] = field(default_factory=tuple)
+    parent_allowed_tools: tuple[str, ...] | None = None
+
+    @property
+    def principal_id(self) -> str:
+        """Return the active agent or sub-agent identifier."""
+        return self.subagent_id or self.agent_id
+
+    @property
+    def effective_activated_allowed_tools(self) -> tuple[str, ...]:
+        """Return allowlisted tools from explicit context and activated skills."""
+        allowed: list[str] = list(self.activated_allowed_tools)
+        for skill in self.activated_skills:
+            allowed.extend(getattr(skill, "allowed_tools", ()) or ())
+        return tuple(dict.fromkeys(allowed))
+
+
 class ToolResolver:
     """Resolve visible tools for an agent or subagent context."""
 
     def resolve(
         self,
         tools: Sequence[Tool],
-        agent_id: str,
-        *,
-        subagent_id: str | None = None,
-        activated_allowed_tools: Sequence[str] = (),
-        parent_allowed_tools: Sequence[str] | None = None,
+        context: ResolutionContext,
     ) -> ResolvedToolSet:
         """Resolve tools for the provided context.
 
         Args:
             tools: Candidate runtime tools.
-            agent_id: Primary agent identifier.
-            subagent_id: Optional subagent identifier.
-            activated_allowed_tools: Allowlist derived from activated skills.
-            parent_allowed_tools: Optional parent allowlist used to ensure
-                subagents cannot expand capabilities.
+            context: Resolution context for the current agent or sub-agent.
 
         Returns:
             A resolved set of direct and deferred runtime tools.
         """
-        principal_id = subagent_id or agent_id
-        parent_allowed = set(parent_allowed_tools) if parent_allowed_tools is not None else None
-        activated_allowed = set(activated_allowed_tools)
+        parent_allowed = (
+            set(context.parent_allowed_tools)
+            if context.parent_allowed_tools is not None
+            else None
+        )
+        activated_allowed = set(context.effective_activated_allowed_tools)
 
         direct_tools: list[Tool] = []
         deferred_tools: list[Tool] = []
 
         for tool in tools:
-            if not tool.is_available_to(principal_id):
+            if not tool.is_available_to(context.principal_id):
                 continue
             if parent_allowed is not None and tool.name not in parent_allowed:
                 continue
@@ -70,4 +90,4 @@ class ToolResolver:
         return ResolvedToolSet(direct_tools=direct_tools, deferred_tools=deferred_tools)
 
 
-__all__ = ["ResolvedToolSet", "ToolResolver"]
+__all__ = ["ResolutionContext", "ResolvedToolSet", "ToolResolver"]

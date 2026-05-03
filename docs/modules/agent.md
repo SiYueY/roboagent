@@ -13,7 +13,8 @@
 - system prompt
 - runtime graph 或 execution pipeline
 
-当前模块中的 [agent.py](/home/siyuey/workspace/openclaw/roboagent/roboagent/agent/agent.py) 已提供 `create_roboagent()` 入口，这说明该模块目前定位为组装层而非执行层。
+当前模块中的 `create_roboagent_runtime()` 是配置驱动入口，`AgentBuilder`
+是纯参数组装入口，这说明该模块目前定位为组装层而非执行层。
 
 ## 2. 设计职责
 
@@ -36,14 +37,12 @@
 
 推荐子结构：
 
-- `agent.py`
-  对外暴露 Agent 构建入口
 - `builder.py`
-  负责复杂构建逻辑与参数归一化
+  对外暴露纯参数 Agent 构建入口，负责构建逻辑与参数归一化
 - `factory.py`
-  负责默认依赖装配
-- `types.py`
-  负责 Agent 相关类型定义
+  负责从 `AppConfig` 和 `RuntimeContext` 装配默认依赖
+- `features.py`
+  负责声明 runtime feature flags
 - `runtime.py`
   负责运行时 graph 或 execution flow 封装
 
@@ -68,18 +67,17 @@
 
 ## 5. 当前实现观察
 
-当前 `create_roboagent()` 直接调用外部 `create_agent()`，说明系统仍处于轻量封装阶段。
+当前 `AgentBuilder.build()` 调用外部 `create_agent()`，并在调用前完成 skill context 与 tool resolution。
 
 这意味着后续需要逐步补齐：
 
 - `Skill` 到 runtime prompt 或 tool schema 的转换逻辑
-- 默认 middleware 组装
 - runtime validation
-- 更清晰的 Agent factory 分层
+- runtime factory 到 middleware/runtime store 的接入
 
 ## 6. 后续演进建议
 
-- 将简单构造函数升级为 `AgentBuilder`
 - 显式区分 `tool`、`skill`、`middleware` 的注入逻辑
-- 为 `skills` 增加转换层，而不是直接透传 runtime object
+- 继续将 `skills` 的模型上下文转换逻辑放在 middleware 层
+- 通过 `RuntimeFeatures.run_journal` 接入 run/event 观测能力
 - 把 provider 相关逻辑与 Agent 核心构造解耦

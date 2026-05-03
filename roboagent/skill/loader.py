@@ -128,11 +128,8 @@ class SkillLoader:
 
         directory_name = skill_path.parent.name
         if spec.name != directory_name:
-            logger.warning(
-                "Skill name '%s' does not match directory name '%s' for %s; loading anyway for compatibility",
-                spec.name,
-                directory_name,
-                skill_path,
+            raise SkillLoadError(
+                f"Skill name '{spec.name}' does not match directory name '{directory_name}': {skill_path}"
             )
 
         return self._build_skill(spec, skill_path=skill_path, source_path=source_path)
@@ -154,7 +151,6 @@ class SkillLoader:
             source=source_path.name or str(source_path),
             source_dir=skill_path.parent,
             license=spec.license,
-            compatibility=spec.compatibility,
             version=spec.version,
             body=spec.body,
             trigger_keywords=spec.trigger_keywords,
@@ -162,6 +158,10 @@ class SkillLoader:
             allowed_tools=spec.allowed_tools,
             required_permissions=spec.required_permissions,
             entrypoint=spec.entrypoint,
+            status=spec.status,
+            replacement=spec.replacement,
+            input_schema=spec.input_schema,
+            output_schema=spec.output_schema,
             metadata=dict(spec.metadata),
             skill_file=skill_path,
             enabled=True,

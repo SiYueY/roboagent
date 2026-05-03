@@ -19,6 +19,7 @@ _ENTRYPOINT_PATTERN = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
 )
 _COMMA_SEPARATED_METADATA_FIELDS: Final = frozenset({"trigger-keywords", "tags"})
+_SUPPORTED_STATUS_VALUES: Final = frozenset({"active", "deprecated"})
 StringSplitMode = Literal["comma", "whitespace"]
 
 
@@ -77,15 +78,17 @@ class SkillSpec(BaseModel):
         "required_permissions": "required-permissions",
         "required-permissions": "required-permissions",
         "entrypoint": "entrypoint",
+        "status": "status",
+        "replacement": "replacement",
+        "input_schema": "input-schema",
+        "input-schema": "input-schema",
+        "output_schema": "output-schema",
+        "output-schema": "output-schema",
     }
 
     name: str = Field(description="Unique skill identifier in kebab-case.")
     description: str = Field(description="Short human-readable summary of the skill.")
     license: str | None = Field(default=None, description="Optional license identifier for the skill content.")
-    compatibility: str | None = Field(
-        default=None,
-        description="Optional compatibility constraint describing which RoboAgent versions can use the skill.",
-    )
     metadata: dict[str, str] = Field(
         default_factory=dict,
         description="Project-specific extension fields normalized from frontmatter.",
@@ -151,6 +154,19 @@ class SkillSpec(BaseModel):
         if entrypoint and not _ENTRYPOINT_PATTERN.fullmatch(entrypoint):
             raise ValueError("metadata.entrypoint must use the format 'module.submodule:function'.")
 
+        status = self.metadata.get("status")
+        if status and status not in _SUPPORTED_STATUS_VALUES:
+            raise ValueError("metadata.status must be one of: active, deprecated.")
+
+        replacement = self.metadata.get("replacement")
+        if replacement and not _SKILL_NAME_PATTERN.fullmatch(replacement):
+            raise ValueError("metadata.replacement must be a valid skill name.")
+
+        for schema_key in ("input-schema", "output-schema"):
+            schema_ref = self.metadata.get(schema_key)
+            if schema_ref and not _ENTRYPOINT_PATTERN.fullmatch(schema_ref):
+                raise ValueError(f"metadata.{schema_key} must use the format 'module.submodule:ClassName'.")
+
         for key, split_on in (
             ("tags", "comma"),
             ("trigger-keywords", "comma"),
@@ -180,17 +196,6 @@ class SkillSpec(BaseModel):
             raise ValueError("description is required.")
         if len(value) > 1024:
             raise ValueError("description must be 1024 characters or fewer.")
-        return value
-
-    @field_validator("compatibility")
-    @classmethod
-    def validate_compatibility(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value:
-            raise ValueError("compatibility must not be empty when provided.")
-        if len(value) > 500:
-            raise ValueError("compatibility must be 500 characters or fewer.")
         return value
 
     @field_validator("allowed_tools", mode="before")
@@ -240,6 +245,25 @@ class SkillSpec(BaseModel):
         value = self.metadata.get("entrypoint")
         return value or None
 
+    @property
+    def status(self) -> str:
+        return self.metadata.get("status", "active")
+
+    @property
+    def replacement(self) -> str | None:
+        value = self.metadata.get("replacement")
+        return value or None
+
+    @property
+    def input_schema(self) -> str | None:
+        value = self.metadata.get("input-schema")
+        return value or None
+
+    @property
+    def output_schema(self) -> str | None:
+        value = self.metadata.get("output-schema")
+        return value or None
+
     @classmethod
     def from_frontmatter(cls, data: Mapping[str, Any], body: str = "") -> SkillSpec:
         """Build a skill spec from parsed `SKILL.md` frontmatter and body.
@@ -285,8 +309,6 @@ class SkillSpec(BaseModel):
         }
         if self.license is not None:
             payload["license"] = self.license
-        if self.compatibility is not None:
-            payload["compatibility"] = self.compatibility
         return payload
 
     def to_dict(self) -> dict[str, Any]:

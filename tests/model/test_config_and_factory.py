@@ -122,10 +122,9 @@ class ModelFactoryTests(unittest.TestCase):
 
         sentinel = object()
         with (
-            patch("roboagent.model.factory.get_model_registry", return_value=registry),
             patch("roboagent.model.factory.create_openai_chat_model", return_value=sentinel) as mock_create,
         ):
-            result = create_chat_model(name="openai-main", temperature=0.1)
+            result = create_chat_model(name="openai-main", registry=registry, temperature=0.1)
 
         self.assertIs(result, sentinel)
         mock_create.assert_called_once()
@@ -149,10 +148,9 @@ class ModelFactoryTests(unittest.TestCase):
 
         sentinel = object()
         with (
-            patch("roboagent.model.factory.get_model_registry", return_value=registry),
             patch("roboagent.model.factory.create_deepseek_chat_model", return_value=sentinel),
         ):
-            result = create_chat_model(name="deepseek-main")
+            result = create_chat_model(name="deepseek-main", registry=registry)
 
         self.assertIs(result, sentinel)
 
@@ -173,10 +171,9 @@ class ModelFactoryTests(unittest.TestCase):
 
         sentinel = object()
         with (
-            patch("roboagent.model.factory.get_model_registry", return_value=registry),
             patch("roboagent.model.factory.create_tongyi_chat_model", return_value=sentinel),
         ):
-            result = create_chat_model(name="qwen-main")
+            result = create_chat_model(name="qwen-main", registry=registry)
 
         self.assertIs(result, sentinel)
 
@@ -204,12 +201,15 @@ class ModelFactoryTests(unittest.TestCase):
 
         sentinel = object()
         with (
-            patch("roboagent.model.factory.get_model_registry", return_value=registry),
             patch("roboagent.model.factory.create_openai_chat_model", return_value=sentinel),
         ):
-            result = create_chat_model()
+            result = create_chat_model(registry=registry)
 
         self.assertIs(result, sentinel)
+
+    def test_create_chat_model_requires_explicit_registry(self) -> None:
+        with self.assertRaises(TypeError):
+            create_chat_model()
 
 
 if __name__ == "__main__":

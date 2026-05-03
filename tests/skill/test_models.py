@@ -97,7 +97,6 @@ class SkillSpecTests(unittest.TestCase):
             name="nav-plan",
             description="Generate navigation plans.",
             license="MIT",
-            compatibility="roboagent>=0.1",
             version="1.0.0",
             trigger_keywords="navigate,waypoint",
         )
@@ -110,7 +109,6 @@ class SkillSpecTests(unittest.TestCase):
                 "allowed-tools": "",
                 "metadata": {"version": "1.0.0", "trigger-keywords": "navigate,waypoint"},
                 "license": "MIT",
-                "compatibility": "roboagent>=0.1",
             },
         )
 
@@ -141,7 +139,6 @@ class SkillRuntimeTests(unittest.TestCase):
                 "name": "nav-plan",
                 "description": "Generate navigation plans.",
                 "license": None,
-                "compatibility": None,
                 "version": "0.1.0",
                 "body": "",
                 "trigger_keywords": ("navigate", "waypoint"),
@@ -149,6 +146,10 @@ class SkillRuntimeTests(unittest.TestCase):
                 "allowed_tools": ("map.read", "pose.read"),
                 "required_permissions": ("tool:map.read", "tool:pose.read"),
                 "entrypoint": "roboagent.skills.handlers.nav:run",
+                "status": "active",
+                "replacement": None,
+                "input_schema": None,
+                "output_schema": None,
                 "metadata": {},
                 "source": "builtin",
                 "source_dir": "/skills/builtin/nav-plan",

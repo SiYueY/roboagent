@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from roboagent.tool import Tool, ToolResolver, ToolSpec
+from roboagent.tool import ResolutionContext, Tool, ToolResolver, ToolSpec
 
 from tests.tool._helpers import create_structured_tool
 
@@ -38,7 +38,7 @@ class ToolResolverTests(unittest.TestCase):
             build_tool("pose.read", visible_by_default=False),
         ]
 
-        resolved = resolver.resolve(tools, "lead")
+        resolved = resolver.resolve(tools, ResolutionContext(agent_id="lead"))
 
         self.assertEqual([tool.name for tool in resolved.direct_tools], ["map.read"])
         self.assertEqual(
@@ -50,7 +50,10 @@ class ToolResolverTests(unittest.TestCase):
         resolver = ToolResolver()
         tools = [build_tool("map.read"), build_tool("pose.read")]
 
-        resolved = resolver.resolve(tools, "lead", activated_allowed_tools=("pose.read",))
+        resolved = resolver.resolve(
+            tools,
+            ResolutionContext(agent_id="lead", activated_allowed_tools=("pose.read",)),
+        )
 
         self.assertEqual([tool.name for tool in resolved.direct_tools], ["pose.read"])
 
@@ -63,9 +66,11 @@ class ToolResolverTests(unittest.TestCase):
 
         resolved = resolver.resolve(
             tools,
-            "lead",
-            subagent_id="worker",
-            parent_allowed_tools=("map.read",),
+            ResolutionContext(
+                agent_id="lead",
+                subagent_id="worker",
+                parent_allowed_tools=("map.read",),
+            ),
         )
 
         self.assertEqual([tool.name for tool in resolved.direct_tools], ["map.read"])
@@ -77,7 +82,7 @@ class ToolResolverTests(unittest.TestCase):
             build_tool("pose.read", allowed_agents=("worker",)),
         ]
 
-        resolved = resolver.resolve(tools, "lead")
+        resolved = resolver.resolve(tools, ResolutionContext(agent_id="lead"))
 
         self.assertEqual([tool.name for tool in resolved.direct_tools], ["map.read"])
 

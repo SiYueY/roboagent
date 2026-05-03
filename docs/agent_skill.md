@@ -101,7 +101,7 @@
 - `Should`
   `Skill` 应优先组合已有能力，而不是复制底层逻辑
 - `Should`
-  `Skill` 应具备明确版本和兼容策略
+  `Skill` 应具备明确版本和 replacement 策略
 
 ---
 
@@ -479,7 +479,6 @@ discovery 规范：
 
 - 在 `metadata` 中标记 `status=deprecated`
 - 指定 replacement skill
-- 给出兼容说明
 - 明确移除时间点
 
 下线阶段禁止：
@@ -774,7 +773,7 @@ Skill 交付检查清单：
   描述过宽会导致 routing 误触发，损害系统稳定性。
 
 - `不做 version 管理`
-  行为语义已变但 identifier 不变，会直接破坏下游兼容性。
+  行为语义已变但 identifier 不变，会直接破坏下游调用。
 
 - `把 metadata 当垃圾桶`
   任意字段都塞入 `metadata`，会破坏 contract 清晰度与类型安全。
@@ -931,7 +930,7 @@ def skill_to_tool_schema(skill: RuntimeSkill) -> dict:
   支持 skill repository、签名校验、审核流程与 trust policy。
 
 - `Versioning`
-  提供更完善的 semver、兼容性与 migration 机制。
+  提供更完善的 semver 与 migration 机制。
 
 - `Capability Policy Layer`
   基于用户角色、环境与风险级别决定是否允许执行某个 `Skill`。

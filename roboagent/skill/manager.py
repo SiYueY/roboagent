@@ -6,7 +6,9 @@ import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
+from roboagent.skill.executor import SkillExecutionResult, SkillExecutor
 from roboagent.skill.loader import SkillLoader
 from roboagent.skill.registry import SkillRegistry
 from roboagent.skill.skill import Skill
@@ -28,15 +30,22 @@ class SkillManager:
         sources: Sequence[str | Path] = (),
         loader: SkillLoader | None = None,
         registry: SkillRegistry | None = None,
+        executor: SkillExecutor | None = None,
     ) -> None:
         self._loader = loader or SkillLoader(sources=sources)
         self._registry = registry or SkillRegistry(loader=self._loader)
+        self._executor = executor or SkillExecutor()
         self._sources = tuple(Path(source) for source in sources) or tuple(self._registry.loader.sources)
 
     @property
     def registry(self) -> SkillRegistry:
         """Expose the underlying registry for advanced integrations."""
         return self._registry
+
+    @property
+    def executor(self) -> SkillExecutor:
+        """Expose the executor used for skill invocation."""
+        return self._executor
 
     def load(
         self,
@@ -178,6 +187,23 @@ class SkillManager:
             Ranked matching skills.
         """
         return self._registry.match(query, top_k=top_k, enabled_only=enabled_only)
+
+    async def execute(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        *,
+        context: dict[str, Any] | None = None,
+        allowed_permissions: Sequence[str] | None = None,
+    ) -> SkillExecutionResult:
+        """Execute one registered skill by name."""
+        skill = self._registry.require(name)
+        return await self._executor.execute(
+            skill,
+            payload,
+            context=context,
+            allowed_permissions=allowed_permissions,
+        )
 
 
 __all__ = ["SkillManager"]

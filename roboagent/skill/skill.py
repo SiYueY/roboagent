@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
+SkillSchemaRef = str | type[BaseModel]
+
 
 @dataclass(frozen=True, slots=True)
 class Skill:
@@ -25,8 +29,6 @@ class Skill:
     source_dir: Path
     # Optional license identifier copied from the declarative spec.
     license: str | None = None
-    # Optional runtime compatibility constraint copied from the declarative spec.
-    compatibility: str | None = None
     # Semantic version of the skill definition.
     version: str = "0.1.0"
     # Markdown body used as the prompt template.
@@ -41,6 +43,14 @@ class Skill:
     required_permissions: tuple[str, ...] = ()
     # Optional Python callable reference in `module.submodule:function` form.
     entrypoint: str | None = None
+    # Governance status used by routing and lifecycle management.
+    status: str = "active"
+    # Optional replacement skill name when this skill is deprecated.
+    replacement: str | None = None
+    # Optional Pydantic input schema reference in import-path or class form.
+    input_schema: SkillSchemaRef | None = None
+    # Optional Pydantic output schema reference in import-path or class form.
+    output_schema: SkillSchemaRef | None = None
     # Project-specific metadata preserved after schema normalization.
     metadata: dict[str, str] = field(default_factory=dict)
     # Absolute path to the originating `SKILL.md` file when available.
@@ -63,6 +73,11 @@ class Skill:
         """Return whether the skill declares a Python entrypoint."""
         return self.entrypoint is not None
 
+    @property
+    def is_active(self) -> bool:
+        """Return whether the skill is enabled and eligible for routing."""
+        return self.enabled and self.status == "active"
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the runtime skill into a Python dictionary.
 
@@ -74,7 +89,6 @@ class Skill:
             "name": self.name,
             "description": self.description,
             "license": self.license,
-            "compatibility": self.compatibility,
             "version": self.version,
             "body": self.body,
             "trigger_keywords": self.trigger_keywords,
@@ -82,6 +96,10 @@ class Skill:
             "allowed_tools": self.allowed_tools,
             "required_permissions": self.required_permissions,
             "entrypoint": self.entrypoint,
+            "status": self.status,
+            "replacement": self.replacement,
+            "input_schema": _serialize_schema_ref(self.input_schema),
+            "output_schema": _serialize_schema_ref(self.output_schema),
             "metadata": dict(self.metadata),
             "source": self.source,
             "source_dir": str(self.source_dir),
@@ -93,4 +111,12 @@ class Skill:
         return self.identity
 
 
-__all__ = ["Skill"]
+def _serialize_schema_ref(schema_ref: SkillSchemaRef | None) -> str | None:
+    if schema_ref is None:
+        return None
+    if isinstance(schema_ref, str):
+        return schema_ref
+    return f"{schema_ref.__module__}:{schema_ref.__qualname__}"
+
+
+__all__ = ["Skill", "SkillSchemaRef"]
