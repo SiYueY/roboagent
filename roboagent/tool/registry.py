@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 
-from roboagent.tool.errors import DuplicateToolError, ToolNotFoundError, ToolRegistrationError
+from roboagent.tool.errors import DuplicateToolError, ToolNotFoundError
 from roboagent.tool.tool import Tool
 
 
@@ -27,15 +27,8 @@ class ToolRegistry:
             The registered tool.
 
         Raises:
-            ToolRegistrationError: If the runtime tool name does not match the
-                underlying LangChain tool name.
             DuplicateToolError: If the tool name is already registered.
         """
-        base_tool_name = getattr(tool.base_tool, "name", None)
-        if base_tool_name != tool.name:
-            raise ToolRegistrationError(
-                f"Tool '{tool.name}' must match BaseTool name '{base_tool_name}'."
-            )
         if tool.name in self._tools:
             raise DuplicateToolError(f"Tool '{tool.name}' is already registered.")
         self._tools[tool.name] = tool

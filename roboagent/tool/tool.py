@@ -1,11 +1,15 @@
-"""Runtime tool value object."""
+"""Native tools: schema, validation, and execution only."""
 
 from __future__ import annotations
 
+import inspect
+import json
 from dataclasses import dataclass
+from typing import Any, Callable
 
-from langchain_core.tools import BaseTool as LangChainBaseTool
+from pydantic import BaseModel, ValidationError
 
+from roboagent.runtime import CancellationToken, ModelContext, ToolCall, ToolDefinition, ToolExecutionResult
 from roboagent.tool.errors import ToolRegistrationError
 from roboagent.tool.schema import ToolSpec
 
@@ -15,7 +19,6 @@ class Tool:
     """Runtime representation of one managed tool.
 
     Attributes:
-        base_tool: Backing LangChain tool instance.
         name: Unique tool identifier.
         description: Human-readable summary for operators and the model.
         group: Logical grouping used for filtering.
@@ -25,9 +28,10 @@ class Tool:
         allowed_agents: Optional allowlist of agent or subagent identifiers.
     """
 
-    base_tool: LangChainBaseTool
     name: str
     description: str
+    parameters: type[BaseModel]
+    handler: Callable[[BaseModel, "ToolInvocation"], Any]
     group: str
     source: str
     visible_by_default: bool = True
@@ -35,32 +39,28 @@ class Tool:
     allowed_agents: tuple[str, ...] = ()
 
     @classmethod
-    def from_spec(cls, base_tool: LangChainBaseTool, spec: ToolSpec) -> Tool:
-        """Build a runtime tool from a LangChain tool and validated spec.
+    def from_spec(cls, spec: ToolSpec, parameters: type[BaseModel], handler: Callable[[BaseModel, "ToolInvocation"], Any]) -> Tool:
+        """Build a runtime tool from a schema and validated spec.
 
         Args:
-            base_tool: Backing LangChain tool instance.
             spec: Validated metadata schema.
 
         Returns:
             A runtime `Tool` instance.
 
         Raises:
-            ToolRegistrationError: If the LangChain tool is missing a valid
-                name, or if its name does not match the supplied schema.
+            ToolRegistrationError: If parameters or handler are invalid.
         """
-        tool_name = getattr(base_tool, "name", None)
-        if not isinstance(tool_name, str) or not tool_name:
-            raise ToolRegistrationError("BaseTool must define a non-empty 'name'.")
-        if tool_name != spec.name:
-            raise ToolRegistrationError(
-                f"Tool spec name '{spec.name}' must match BaseTool name '{tool_name}'."
-            )
+        if not inspect.isclass(parameters) or not issubclass(parameters, BaseModel):
+            raise ToolRegistrationError("Tool parameters must be a Pydantic BaseModel subclass.")
+        if not callable(handler):
+            raise ToolRegistrationError("Tool handler must be callable.")
 
         return cls(
-            base_tool=base_tool,
             name=spec.name,
             description=spec.description,
+            parameters=parameters,
+            handler=handler,
             group=spec.group,
             source=spec.source,
             visible_by_default=spec.visible_by_default,
@@ -84,5 +84,38 @@ class Tool:
         """Return whether the tool should be directly bound to the model."""
         return self.visible_by_default and not self.deferred
 
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(self.name, self.description, self.parameters.model_json_schema())
 
-__all__ = ["Tool"]
+    def validate(self, arguments: dict[str, Any] | None) -> BaseModel | str:
+        try:
+            return self.parameters.model_validate(arguments)
+        except ValidationError as exc:
+            return str(exc)
+
+    async def execute(self, params: BaseModel, invocation: "ToolInvocation") -> ToolExecutionResult:
+        if invocation.cancellation.cancelled:
+            return ToolExecutionResult(f"Tool '{self.name}' was cancelled before execution.", is_error=True)
+        try:
+            value = self.handler(params, invocation)
+            if inspect.isawaitable(value):
+                value = await value
+            if isinstance(value, ToolExecutionResult):
+                return value
+            details = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+            return ToolExecutionResult(value if isinstance(value, str) else json.dumps(details, ensure_ascii=False, default=str), details)
+        except Exception as exc:
+            return ToolExecutionResult(f"Tool '{self.name}' failed: {exc}", is_error=True)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocation:
+    run_id: str
+    turn: int
+    tool_call: ToolCall
+    context: ModelContext
+    cancellation: CancellationToken
+
+
+__all__ = ["Tool", "ToolInvocation"]

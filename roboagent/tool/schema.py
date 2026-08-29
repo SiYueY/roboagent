@@ -38,7 +38,7 @@ class ToolSpec(BaseModel):
     """Declarative schema for one managed tool.
 
     This schema only models tool-management metadata. It intentionally does
-    not own execution behavior or argument schemas from LangChain `BaseTool`.
+    not own execution behavior or argument schemas from the native `Tool`.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)

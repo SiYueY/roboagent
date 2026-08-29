@@ -4,12 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from langchain_core.tools import BaseTool as LangChainBaseTool
-
-from roboagent.tool.errors import ToolRegistrationError
 from roboagent.tool.registry import ToolRegistry
 from roboagent.tool.resolver import ResolutionContext, ResolvedToolSet, ToolResolver
-from roboagent.tool.schema import ToolSpec
 from roboagent.tool.tool import Tool
 
 
@@ -32,14 +28,13 @@ class ToolManager:
 
     def register(
         self,
-        base_tool: LangChainBaseTool,
-        spec: ToolSpec | None = None,
+        tool: Tool,
         /,
     ) -> Tool:
         """Register one tool.
 
         Args:
-            base_tool: LangChain tool instance.
+            tool: Native runtime tool instance.
             spec: Metadata schema for single-tool registration.
 
         Returns:
@@ -48,13 +43,9 @@ class ToolManager:
         Raises:
             ToolRegistrationError: If the single-tool form omits `spec`.
         """
-        if spec is None:
-            raise ToolRegistrationError("register(base_tool, spec) requires a ToolSpec argument.")
-
-        tool = Tool.from_spec(base_tool, spec)
         return self._registry.register(tool)
 
-    def register_batch(self, items: Iterable[tuple[LangChainBaseTool, ToolSpec]], /) -> list[Tool]:
+    def register_batch(self, tools: Iterable[Tool], /) -> list[Tool]:
         """Register a batch of tools.
 
         Args:
@@ -63,9 +54,7 @@ class ToolManager:
         Returns:
             Registered runtime tools in input order.
         """
-        items = list(items)
-        tools = [Tool.from_spec(base_tool, item_spec) for base_tool, item_spec in items]
-        return self._registry.register_batch(tools)
+        return self._registry.register_batch(list(tools))
 
     def list_tools(self, *, source: str | None = None, group: str | None = None) -> list[Tool]:
         """List registered tools with optional filtering.
@@ -100,17 +89,17 @@ class ToolManager:
     def get_tools(
         self,
         context: ResolutionContext,
-    ) -> list[LangChainBaseTool]:
-        """Return directly visible LangChain tools for the provided context.
+    ) -> list[Tool]:
+        """Return directly visible native tools for the provided context.
 
         Args:
             context: Resolution context for the current agent or sub-agent.
 
         Returns:
-            Directly visible LangChain `BaseTool` instances.
+            Directly visible native tools.
         """
         resolved = self.resolve_tools(context)
-        return [tool.base_tool for tool in resolved.direct_tools]
+        return resolved.direct_tools
 
 
 __all__ = ["ToolManager"]
