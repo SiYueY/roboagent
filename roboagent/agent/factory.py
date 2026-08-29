@@ -5,18 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware
-from langchain_core.messages import SystemMessage
-from langgraph.graph.state import CompiledStateGraph
-
 from roboagent.agent.builder import AgentBuilder
+from roboagent.agent.agent import Agent
+from roboagent.agent.hooks import ContextTransform
 from roboagent.agent.features import RuntimeFeatures
 from roboagent.config import AppConfig
-from roboagent.middleware import build_runtime_middlewares
 from roboagent.model.factory import create_chat_model
 from roboagent.runtime import MemoryRunEventStore, RunEventStore, RunManager, RunRecord
 from roboagent.runtime.runs import RunStatus
-from roboagent.tool import ToolManager
+from roboagent.tool import Tool, ToolManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,12 +22,14 @@ class RuntimeContext:
 
     agent_id: str = "roboagent"
     model_name: str | None = None
-    system_prompt: str | SystemMessage | None = None
+    system_prompt: str | None = None
     name: str | None = None
     thread_id: str = "default"
     run_id: str | None = None
     model_overrides: dict[str, Any] = field(default_factory=dict)
-    extra_middlewares: list[AgentMiddleware] | None = None
+    tools: tuple[Tool, ...] = ()
+    tool_manager: ToolManager | None = None
+    context_transforms: tuple[ContextTransform, ...] = ()
     event_store: RunEventStore | None = None
     run_manager: RunManager | None = None
 
@@ -40,7 +39,7 @@ def create_roboagent_runtime(
     *,
     runtime_context: RuntimeContext | None = None,
     features: RuntimeFeatures | None = None,
-) -> CompiledStateGraph:
+) -> Agent:
     """Create a RoboAgent runtime from an already-loaded AppConfig."""
     context = runtime_context or RuntimeContext()
     enabled_features = features or RuntimeFeatures()
@@ -59,36 +58,34 @@ def create_roboagent_runtime(
         skill_manager.load(clear=True)
         active_skills = skill_manager.list_skills(enabled_only=True)
 
-    tool_manager = ToolManager() if enabled_features.tool_resolution else None
-    run_record, event_store = _create_run_record(context, enabled_features)
-    middlewares = build_runtime_middlewares(
-        enabled_features,
-        skills=active_skills,
-        thread_id=context.thread_id,
-        run_id=run_record.run_id if run_record is not None else context.run_id or "default",
-        event_store=event_store,
-        run_manager=context.run_manager,
-        extra_middlewares=context.extra_middlewares,
-    )
-
-    return AgentBuilder(
+    run_record, event_store, run_manager = _create_run_record(context, enabled_features)
+    transforms = list(context.context_transforms)
+    if enabled_features.skill_context:
+        from roboagent.skill.context import create_skill_context_transform
+        transforms.insert(0, create_skill_context_transform(active_skills))
+    agent = AgentBuilder(
         model=model,
+        tools=list(context.tools),
         system_prompt=context.system_prompt,
-        middlewares=middlewares,
+        context_transforms=transforms,
         name=context.name,
         agent_id=context.agent_id,
         skill_manager=skill_manager,
-        tool_manager=tool_manager,
+        tool_manager=context.tool_manager if enabled_features.tool_resolution else None,
     ).build()
+    if enabled_features.run_journal:
+        from roboagent.runtime.journal import RunJournalSubscriber
+        agent.subscribe(RunJournalSubscriber(thread_id=context.thread_id, run_id=run_record.run_id, event_store=event_store, run_manager=run_manager))
+    return agent
 
 
 def _create_run_record(
     context: RuntimeContext,
     features: RuntimeFeatures,
-) -> tuple[RunRecord | None, RunEventStore | None]:
+) -> tuple[RunRecord | None, RunEventStore | None, RunManager | None]:
     """Create a run record and event store when run journaling is enabled."""
     if not features.run_journal:
-        return None, None
+        return None, None, None
 
     manager = context.run_manager or RunManager()
     event_store = context.event_store or MemoryRunEventStore()
@@ -98,7 +95,7 @@ def _create_run_record(
         run_id=context.run_id,
     )
     manager.set_status(record.run_id, RunStatus.RUNNING)
-    return record, event_store
+    return record, event_store, manager
 
 
 __all__ = ["RuntimeContext", "create_roboagent_runtime"]
