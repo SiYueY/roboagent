@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from roboagent.model.errors import ModelDependencyError
+from roboagent.model.client import OpenAICompatibleChatModel
 from roboagent.model.providers.base import BaseModelConfig, merge_model_settings
 
 
@@ -26,8 +25,6 @@ class OpenAIParams(BaseModel):
     request_timeout: float | None = Field(default=None, description="Client request timeout in seconds.")
     streaming: bool | None = Field(default=None, description="Whether to stream response chunks.")
     top_p: float | None = Field(default=None, description="Nucleus sampling probability mass.")
-    use_responses_api: bool | None = Field(default=None, description="Whether to route through the Responses API.")
-    output_version: str | None = Field(default=None, description="Responses output version, for example `responses/v1`.")
     reasoning_effort: str | None = Field(default=None, description="Reasoning effort level for capable models.")
     model_kwargs: dict[str, Any] = Field(default_factory=dict, description="Extra keyword arguments forwarded to the model.")
     extra_body: dict[str, Any] | None = Field(default=None, description="Additional request body fields for OpenAI-compatible gateways.")
@@ -60,8 +57,8 @@ class OpenAIModelConfig(BaseModelConfig):
     params: OpenAIParams = Field(description="OpenAI runtime parameter set.")
 
 
-def create_openai_chat_model(config: OpenAIModelConfig, **overrides: Any) -> BaseChatModel:
-    """Create a LangChain `ChatOpenAI` model from validated configuration.
+def create_openai_chat_model(config: OpenAIModelConfig, **overrides: Any) -> OpenAICompatibleChatModel:
+    """Create an OpenAI-compatible model from validated configuration.
 
     Args:
         config: Validated OpenAI model configuration entry.
@@ -71,18 +68,13 @@ def create_openai_chat_model(config: OpenAIModelConfig, **overrides: Any) -> Bas
         A configured OpenAI chat model instance.
 
     Raises:
-        ModelDependencyError: If `langchain-openai` is not installed.
+        ValueError: If invalid runtime settings are supplied.
     """
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError as exc:
-        raise ModelDependencyError(
-            "Missing dependency for OpenAI provider. Install with `uv add langchain-openai`."
-        ) from exc
-
     base_settings = config.params.model_dump(exclude_none=True)
     settings = merge_model_settings(base_settings, overrides)
-    return ChatOpenAI(**settings)
+    settings["model_name"] = settings.pop("model")
+    settings.pop("streaming", None)
+    return OpenAICompatibleChatModel(**settings)
 
 
 __all__ = ["OpenAIModelConfig", "OpenAIParams", "create_openai_chat_model"]

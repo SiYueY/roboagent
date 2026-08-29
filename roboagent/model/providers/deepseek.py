@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from roboagent.model.errors import ModelDependencyError
+from roboagent.model.client import OpenAICompatibleChatModel
 from roboagent.model.providers.base import BaseModelConfig, merge_model_settings
 
 
@@ -57,8 +56,8 @@ class DeepSeekModelConfig(BaseModelConfig):
     params: DeepSeekParams = Field(description="DeepSeek runtime parameter set.")
 
 
-def create_deepseek_chat_model(config: DeepSeekModelConfig, **overrides: Any) -> BaseChatModel:
-    """Create a LangChain `ChatDeepSeek` model from validated configuration.
+def create_deepseek_chat_model(config: DeepSeekModelConfig, **overrides: Any) -> OpenAICompatibleChatModel:
+    """Create a DeepSeek-compatible model from validated configuration.
 
     Args:
         config: Validated DeepSeek model configuration entry.
@@ -68,18 +67,14 @@ def create_deepseek_chat_model(config: DeepSeekModelConfig, **overrides: Any) ->
         A configured DeepSeek chat model instance.
 
     Raises:
-        ModelDependencyError: If `langchain-deepseek` is not installed.
+        ValueError: If invalid runtime settings are supplied.
     """
-    try:
-        from langchain_deepseek import ChatDeepSeek
-    except ImportError as exc:
-        raise ModelDependencyError(
-            "Missing dependency for DeepSeek provider. Install with `uv add langchain-deepseek`."
-        ) from exc
-
     base_settings = config.params.model_dump(exclude_none=True)
     settings = merge_model_settings(base_settings, overrides)
-    return ChatDeepSeek(**settings)
+    settings["model_name"] = settings.pop("model")
+    settings["base_url"] = settings.pop("api_base", None) or "https://api.deepseek.com"
+    settings.pop("streaming", None)
+    return OpenAICompatibleChatModel(**settings)
 
 
 __all__ = ["DeepSeekModelConfig", "DeepSeekParams", "create_deepseek_chat_model"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.language_models import BaseChatModel
+from roboagent.model.client import ChatModel
 
 from roboagent.model.errors import ModelProviderError
 from roboagent.model.providers import (
@@ -23,7 +23,7 @@ def create_chat_model(
     *,
     registry: ModelRegistry,
     **kwargs: Any,
-) -> BaseChatModel:
+) -> ChatModel:
     """Create one chat model from configured provider model entries.
 
     Args:

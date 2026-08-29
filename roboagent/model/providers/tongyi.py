@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from roboagent.model.errors import ModelDependencyError
+from roboagent.model.client import OpenAICompatibleChatModel
 from roboagent.model.providers.base import BaseModelConfig, merge_model_settings
 
 
@@ -27,6 +26,7 @@ class TongyiParams(BaseModel):
     max_retries: int | None = Field(default=None, description="Maximum request retry attempts.")
     streaming: bool | None = Field(default=None, description="Whether to stream response chunks.")
     request_timeout: float | None = Field(default=None, description="Client request timeout in seconds.")
+    base_url: str | None = Field(default=None, description="OpenAI-compatible endpoint override.")
     model_kwargs: dict[str, Any] = Field(default_factory=dict, description="Extra keyword arguments forwarded to the model.")
 
     @field_validator("model")
@@ -55,8 +55,8 @@ class TongyiModelConfig(BaseModelConfig):
     params: TongyiParams = Field(description="Tongyi runtime parameter set.")
 
 
-def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> BaseChatModel:
-    """Create a LangChain `ChatTongyi` model from validated configuration.
+def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> OpenAICompatibleChatModel:
+    """Create a Tongyi OpenAI-compatible model from validated configuration.
 
     Args:
         config: Validated Tongyi model configuration entry.
@@ -66,18 +66,14 @@ def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> Bas
         A configured Tongyi chat model instance.
 
     Raises:
-        ModelDependencyError: If `langchain-community` or `dashscope` is missing.
+        ValueError: If invalid runtime settings are supplied.
     """
-    try:
-        from langchain_community.chat_models.tongyi import ChatTongyi
-    except ImportError as exc:
-        raise ModelDependencyError(
-            "Missing dependency for Tongyi provider. Install with `uv add langchain-community dashscope`."
-        ) from exc
-
     base_settings = config.params.model_dump(exclude_none=True)
     settings = merge_model_settings(base_settings, overrides)
-    return ChatTongyi(**settings)
+    settings["model_name"] = settings.pop("model")
+    settings["base_url"] = settings.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    settings.pop("streaming", None)
+    return OpenAICompatibleChatModel(**settings)
 
 
 __all__ = ["TongyiModelConfig", "TongyiParams", "create_tongyi_chat_model"]
