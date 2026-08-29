@@ -21,6 +21,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    MAX_TURNS = "max_turns"
 
 
 @dataclass(slots=True)
