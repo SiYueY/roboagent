@@ -13,7 +13,6 @@
 
 - [agent.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/agent.md)
 - [config.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/config.md)
-- [middleware.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/middleware.md)
 - [runtime.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/runtime.md)
 - [skill.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/skill.md)
 - [tool.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/tool.md)

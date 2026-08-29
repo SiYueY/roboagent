@@ -99,10 +99,10 @@ with Pydantic-validated input and output.
 `create_roboagent_runtime(...)` is the configuration-driven runtime factory.
 `AgentBuilder` is the pure-argument assembly API. It resolves active skills,
 filters out disabled or deprecated skills, asks `ToolManager` for tools allowed
-by the active skills, and passes middleware into LangChain `create_agent(...)`.
+by the active skills, and assembles native context transforms and event subscribers.
 
-Skill routing context is provided by `SkillContextMiddleware`, and tool failures
-are normalized by `ToolErrorHandlingMiddleware`.
+Skill routing context is supplied by a native context transform, and tool failures
+are normalized by the agent loop.
 
 Enable lightweight run journaling with `RuntimeFeatures(run_journal=True)`:
 
