@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from typing import Any
 
-from roboagent.agent.hooks import AfterToolCall, BeforeToolCall, ContextTransform, ToolCallDecision
+from roboagent.agent.types import AfterToolCall, BeforeToolCall, ContextTransform, ToolCallDecision
 from roboagent.model.client import ChatModel
 from roboagent.runtime import (
     AgentEvent, AssistantMessage, CancellationToken, Message, MessageEvent, ModelContext, ModelRequest,
