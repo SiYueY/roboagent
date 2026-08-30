@@ -38,3 +38,8 @@ short-circuits the remaining calls in that batch.
 request does not itself stop external robot hardware: a tool handler must
 cancel and await its own external operation. Set `Agent(..., run_timeout=...)`
 to use the same cooperative path with `reason="timeout"`.
+
+## Examples
+
+Runnable examples live in [examples](examples/README.md). Optional integrations
+such as Gradio are deliberately not part of RoboAgent's core dependencies.

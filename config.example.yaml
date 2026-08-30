@@ -1,12 +1,10 @@
-default_model: openai-main
+# Copy this file to config.yaml. API keys are resolved from sibling .env files.
+default_model: qwen3-7-flash
 models:
-  - name: openai-main
-    provider: openai
-    params: {model: gpt-4o-mini, api_key: ${OPENAI_API_KEY}}
-  - name: deepseek-main
-    provider: deepseek
-    params: {model: deepseek-chat, api_key: ${DEEPSEEK_API_KEY}}
-  - name: qwen-main
+  - name: qwen3-7-flash
+    display_name: Qwen3.7-Flash
     provider: tongyi
-    params: {model: qwen-plus, dashscope_api_key: ${DASHSCOPE_API_KEY}}
+    params:
+      model: qwen3.7-flash
+      dashscope_api_key: ${DASHSCOPE_API_KEY}
 skills: {sources: []}

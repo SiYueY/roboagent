@@ -7,13 +7,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from roboagent.config.model_config import resolve_model_config_path
+from roboagent.config.model_config import load_yaml_mapping, resolve_model_config_path
 from roboagent.config.skill_config import SkillConfig
 from roboagent.config.subagent_config import SubagentConfig
-from roboagent.model.errors import ModelConfigError
 from roboagent.model.providers import ProviderModelConfig
 from roboagent.model.registry import ModelRegistry
 from roboagent.skill import SkillManager
@@ -54,12 +52,7 @@ class AppConfig(BaseModel):
     @classmethod
     def from_yaml(cls, path: str | Path) -> AppConfig:
         """Load application configuration from a YAML file."""
-        resolved_path = Path(path)
-        with resolved_path.open("r", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle) or {}
-        if not isinstance(raw, Mapping):
-            raise ModelConfigError(f"App config file must be a mapping: {resolved_path}")
-        return cls.from_dict(raw)
+        return cls.from_dict(load_yaml_mapping(path))
 
     def to_model_registry(self) -> ModelRegistry:
         """Create a model registry from configured model entries."""

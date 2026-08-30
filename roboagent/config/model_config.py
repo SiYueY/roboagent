@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from roboagent.model.errors import ModelConfigError
@@ -21,6 +23,8 @@ _DEFAULT_CONFIG_PATH = Path("config.yaml")
 _registry_cache: ModelRegistry | None = None
 _registry_cache_path: Path | None = None
 _registry_cache_mtime: float | None = None
+_registry_cache_env_mtime: float | None = None
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class ModelsAppConfig(BaseModel):
@@ -127,12 +131,7 @@ class ModelsAppConfig(BaseModel):
         Raises:
             ModelConfigError: If the file content is not a YAML mapping.
         """
-        resolved_path = Path(path)
-        with resolved_path.open("r", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle) or {}
-        if not isinstance(raw, Mapping):
-            raise ModelConfigError(f"Model config file must be a mapping: {resolved_path}")
-        return cls.from_dict(raw)
+        return cls.from_dict(load_yaml_mapping(path))
 
 
 def resolve_model_config_path(config_path: str | Path | None = None) -> Path:
@@ -169,6 +168,35 @@ def _read_mtime(path: Path) -> float:
         return -1.0
 
 
+def load_yaml_mapping(path: str | Path) -> dict[str, Any]:
+    """Load a YAML mapping after loading its sibling .env and expanding ${VAR}."""
+    resolved_path = Path(path).expanduser().resolve()
+    load_dotenv(resolved_path.parent / ".env", override=False)
+    with resolved_path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    if not isinstance(raw, Mapping):
+        raise ModelConfigError(f"App config file must be a mapping: {resolved_path}")
+    return _expand_environment(dict(raw))
+
+
+def _expand_environment(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _expand_environment(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_environment(item) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    def replace(match: re.Match[str]) -> str:
+        variable = match.group(1)
+        resolved = os.getenv(variable)
+        if resolved is None:
+            raise ModelConfigError(f"Missing environment variable '{variable}' referenced by configuration.")
+        return resolved
+
+    return _ENV_REFERENCE.sub(replace, value)
+
+
 def reload_model_registry(config_path: str | Path | None = None) -> ModelRegistry:
     """Reload model configuration and rebuild the in-memory model registry.
 
@@ -178,7 +206,7 @@ def reload_model_registry(config_path: str | Path | None = None) -> ModelRegistr
     Returns:
         Newly loaded model registry instance.
     """
-    global _registry_cache, _registry_cache_path, _registry_cache_mtime
+    global _registry_cache, _registry_cache_path, _registry_cache_mtime, _registry_cache_env_mtime
 
     resolved_path = resolve_model_config_path(config_path)
     app_config = ModelsAppConfig.from_yaml(resolved_path)
@@ -186,6 +214,7 @@ def reload_model_registry(config_path: str | Path | None = None) -> ModelRegistr
     _registry_cache = app_config.to_registry()
     _registry_cache_path = resolved_path
     _registry_cache_mtime = _read_mtime(resolved_path)
+    _registry_cache_env_mtime = _read_mtime(resolved_path.parent / ".env")
     return _registry_cache
 
 
@@ -198,15 +227,17 @@ def get_model_registry(config_path: str | Path | None = None) -> ModelRegistry:
     Returns:
         Cached or newly loaded model registry instance.
     """
-    global _registry_cache, _registry_cache_path, _registry_cache_mtime
+    global _registry_cache, _registry_cache_path, _registry_cache_mtime, _registry_cache_env_mtime
 
     resolved_path = resolve_model_config_path(config_path)
     current_mtime = _read_mtime(resolved_path)
+    current_env_mtime = _read_mtime(resolved_path.parent / ".env")
 
     should_reload = (
         _registry_cache is None
         or _registry_cache_path != resolved_path
         or _registry_cache_mtime != current_mtime
+        or _registry_cache_env_mtime != current_env_mtime
     )
     if should_reload:
         return reload_model_registry(resolved_path)
@@ -216,16 +247,18 @@ def get_model_registry(config_path: str | Path | None = None) -> ModelRegistry:
 
 def reset_model_registry() -> None:
     """Clear the cached model registry and path metadata."""
-    global _registry_cache, _registry_cache_path, _registry_cache_mtime
+    global _registry_cache, _registry_cache_path, _registry_cache_mtime, _registry_cache_env_mtime
 
     _registry_cache = None
     _registry_cache_path = None
     _registry_cache_mtime = None
+    _registry_cache_env_mtime = None
 
 
 __all__ = [
     "ModelsAppConfig",
     "get_model_registry",
+    "load_yaml_mapping",
     "reload_model_registry",
     "reset_model_registry",
     "resolve_model_config_path",

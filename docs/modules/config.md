@@ -34,7 +34,15 @@
 - [skill_config.py](/home/siyuey/workspace/openclaw/roboagent/roboagent/config/skill_config.py)
 - [subagent_config.py](/home/siyuey/workspace/openclaw/roboagent/roboagent/config/subagent_config.py)
 
-这些文件目前仍基本为空，说明模块已预留职责边界，但尚未形成完整配置体系。
+配置对象已使用 Pydantic 校验；`AppConfig` 负责组合 models、skills 与
+subagents，模型 registry 由显式配置对象创建。
+
+### 文件与环境变量
+
+RoboAgent 从 `config.yaml`（或 `ROBOAGENT_CONFIG_PATH`）读取 YAML。加载器会
+读取该配置文件同目录的 `.env`，且不会覆盖终端中已存在的环境变量。YAML 字符串
+中的 `${VARIABLE}` 会递归展开；缺失变量会导致配置加载失败，避免把未解析的
+占位符传递给 provider。
 
 ## 4. 建议结构
 

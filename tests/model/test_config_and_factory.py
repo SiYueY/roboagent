@@ -49,6 +49,19 @@ class ModelsAppConfigTests(unittest.TestCase):
 
         self.assertEqual(registry.default_model, "deepseek-main")
 
+    def test_from_yaml_uses_the_shared_environment_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            config_path = directory / "config.yaml"
+            config_path.write_text(
+                "models:\n  - name: openai-main\n    provider: openai\n    params:\n      model: ${ROBOAGENT_TEST_MODEL}\n",
+                encoding="utf-8",
+            )
+            (directory / ".env").write_text("ROBOAGENT_TEST_MODEL=gpt-4o-mini\n", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                config = ModelsAppConfig.from_yaml(config_path)
+            self.assertEqual(config.models[0].params.model, "gpt-4o-mini")
+
 
 class ModelConfigRegistryLoaderTests(unittest.TestCase):
     def tearDown(self) -> None:
