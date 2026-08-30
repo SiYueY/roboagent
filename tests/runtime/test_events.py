@@ -1,75 +1,69 @@
 from __future__ import annotations
-
+import asyncio
+import tempfile
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from roboagent.runtime import (
+    AgentStartedEvent,
+    EventRecorder,
+    JsonlEventStore,
+    MemoryEventStore,
+    ToolCall,
+    ToolCompletedEvent,
+    ToolResultMessage,
+)
 
-from roboagent.runtime import JsonlRunEventStore, MemoryRunEventStore
+class EventStoreTests(unittest.TestCase):
+    def test_memory_store_preserves_event_order(self):
+        async def check():
+            store = MemoryEventStore()
+            await store.append(AgentStartedEvent(run_id="r", sequence=1, session_id="s"))
+            await store.append(AgentStartedEvent(run_id="r", sequence=2, session_id="s"))
+            self.assertEqual([event.sequence for event in await store.list("r")], [1, 2])
+        asyncio.run(check())
 
+    def test_jsonl_store_appends_serialized_events(self):
+        async def check(path: Path):
+            store = JsonlEventStore(path)
+            await store.append(AgentStartedEvent(run_id="r", sequence=1, session_id="s"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            asyncio.run(check(path))
+            self.assertIn('"event_type": "agent_started"', path.read_text())
 
-class MemoryRunEventStoreTests(unittest.TestCase):
-    def test_put_assigns_thread_local_sequence(self) -> None:
-        store = MemoryRunEventStore()
+    def test_jsonl_store_reopens_and_deserializes(self):
+        async def check(path: Path):
+            original = AgentStartedEvent(run_id="r", sequence=1, session_id="s")
+            await JsonlEventStore(path).append(original)
+            events = await JsonlEventStore(path).list("r")
+            self.assertEqual(events, (original,))
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(check(Path(directory) / "events.jsonl"))
 
-        first = store.put(thread_id="t1", run_id="r1", event_type="start", category="trace")
-        second = store.put(thread_id="t1", run_id="r1", event_type="end", category="trace")
-        other = store.put(thread_id="t2", run_id="r2", event_type="start", category="trace")
+    def test_recorder_disables_after_store_failure(self):
+        class FailingStore:
+            def __init__(self): self.calls = 0
+            async def append(self, event): self.calls += 1; raise OSError("offline")
+            async def list(self, run_id): return ()
+        async def check():
+            store = FailingStore()
+            recorder = EventRecorder(store)
+            event = AgentStartedEvent(run_id="r", sequence=1, session_id="s")
+            await recorder(event)
+            await recorder(event)
+            self.assertEqual(store.calls, 1)
+        asyncio.run(check())
 
-        self.assertEqual(first.seq, 1)
-        self.assertEqual(second.seq, 2)
-        self.assertEqual(other.seq, 1)
-
-    def test_list_events_filters_run_and_event_type(self) -> None:
-        store = MemoryRunEventStore()
-        store.put(thread_id="t1", run_id="r1", event_type="model_start", category="trace")
-        store.put(thread_id="t1", run_id="r1", event_type="model_end", category="trace")
-        store.put(thread_id="t1", run_id="r2", event_type="model_start", category="trace")
-
-        events = store.list_events("t1", "r1", event_types=["model_start"])
-
-        self.assertEqual([event.event_type for event in events], ["model_start"])
-
-    def test_list_messages_returns_message_category(self) -> None:
-        store = MemoryRunEventStore()
-        store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace")
-        store.put(thread_id="t1", run_id="r1", event_type="message", category="message")
-
-        messages = store.list_messages("t1")
-
-        self.assertEqual([event.category for event in messages], ["message"])
-
-
-class JsonlRunEventStoreTests(unittest.TestCase):
-    def test_jsonl_store_persists_and_reloads_events(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "events.jsonl"
-            store = JsonlRunEventStore(path)
-            store.put(
-                thread_id="t1",
-                run_id="r1",
-                event_type="model_start",
-                category="trace",
-                metadata={"model": "test"},
+    def test_jsonl_round_trips_nested_tool_event(self):
+        async def check(path: Path):
+            event = ToolCompletedEvent(
+                run_id="r",
+                sequence=2,
+                turn=1,
+                tool_call=ToolCall("call", "pose.read", arguments={"frame": "base"}),
+                result=ToolResultMessage("call", "pose.read", "ok", details={"x": 1}),
             )
-            reloaded = JsonlRunEventStore(path)
-            second = reloaded.put(thread_id="t1", run_id="r1", event_type="model_end", category="trace")
-
-            events = reloaded.list_events("t1", "r1")
-
-        self.assertEqual(second.seq, 2)
-        self.assertEqual([event.event_type for event in events], ["model_start", "model_end"])
-        self.assertEqual(events[0].metadata, {"model": "test"})
-
-    def test_jsonl_store_lists_messages(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            store = JsonlRunEventStore(Path(tmpdir) / "events.jsonl")
-            store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace")
-            store.put(thread_id="t1", run_id="r1", event_type="message", category="message")
-
-            messages = store.list_messages("t1")
-
-        self.assertEqual([event.category for event in messages], ["message"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+            await JsonlEventStore(path).append(event)
+            self.assertEqual(await JsonlEventStore(path).list("r"), (event,))
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(check(Path(directory) / "events.jsonl"))

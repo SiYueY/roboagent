@@ -11,8 +11,8 @@
 
 当前包含以下模块说明：
 
-- [agent.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/agent.md)
-- [config.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/config.md)
-- [runtime.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/runtime.md)
-- [skill.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/skill.md)
-- [tool.md](/home/siyuey/workspace/openclaw/roboagent/docs/modules/tool.md)
+- [agent.md](agent.md)
+- [config.md](config.md)
+- [runtime.md](runtime.md)
+- [skill.md](skill.md)
+- [tool.md](tool.md)

@@ -17,15 +17,24 @@ agent = Agent(model, tools=robot_tools, system_prompt="Operate safely.")
 session = agent.new_session()
 
 run = session.start("Report the current pose.")
-async for event in run:
+async for event in run.events():
     handle(event)
 result = await run.result()
 ```
 
 `Agent` is immutable. `AgentSession` owns a conversation transcript and accepts
 one run at a time. `AgentRun` owns cancellation, streamed events, and the final
-`AgentRunResult`. Independent sessions may run concurrently.
+`AgentRunResult`. `run.result()` completes whether or not an event stream is
+consumed. Independent sessions may run concurrently.
 
-Use `session.subscribe(...)` for optional best-effort journal or UI observers.
-Use `AgentHooks` for context transformation and tool policy. Tools execute in
-the order requested by the model.
+Use `session.subscribe(...)` for optional best-effort UI observers, or attach an
+`EventRecorder` backed by `MemoryEventStore` or `JsonlEventStore`. Subscriber
+queues are bounded: a slow subscriber is disconnected instead of stalling a
+robot action. Use `AgentHooks` for context transformation and tool policy.
+Tools execute in the order requested by the model; the first failed tool call
+short-circuits the remaining calls in that batch.
+
+`run.cancel(reason="user")` requests cooperative cancellation. A cancellation
+request does not itself stop external robot hardware: a tool handler must
+cancel and await its own external operation. Set `Agent(..., run_timeout=...)`
+to use the same cooperative path with `reason="timeout"`.

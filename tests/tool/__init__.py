@@ -1,1 +1,1 @@
-"""Tool subsystem tests."""
+"""Native tool contract tests."""

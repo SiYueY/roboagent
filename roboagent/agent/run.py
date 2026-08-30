@@ -1,45 +1,187 @@
-"""Single cancellable execution of an AgentSession."""
+"""A cancellable run with independent, non-blocking event subscriptions."""
 from __future__ import annotations
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import uuid4
 from roboagent.agent.loop import run_loop
-from roboagent.agent.session import AgentSession
-from roboagent.runtime import AgentEndEvent, AgentEvent, AgentRunResult, AgentStartEvent, MessageEvent, UserMessage
+from roboagent.agent.types import AgentRunResult
+from roboagent.runtime import (
+    AgentCompletedEvent,
+    AgentEvent,
+    AgentStartedEvent,
+    MessageCompletedEvent,
+    MessageDeltaEvent,
+    MessageStartedEvent,
+    RuntimeErrorEvent,
+    ToolCompletedEvent,
+    ToolStartedEvent,
+    TurnCompletedEvent,
+    TurnStartedEvent,
+    UserMessage,
+)
+
+logger = logging.getLogger(__name__)
+_SENTINEL = object()
+
+_EVENT_TYPES = {
+    "agent_started": AgentStartedEvent,
+    "agent_completed": AgentCompletedEvent,
+    "turn_started": TurnStartedEvent,
+    "turn_completed": TurnCompletedEvent,
+    "message_started": MessageStartedEvent,
+    "message_delta": MessageDeltaEvent,
+    "message_completed": MessageCompletedEvent,
+    "tool_started": ToolStartedEvent,
+    "tool_completed": ToolCompletedEvent,
+    "runtime_error": RuntimeErrorEvent,
+}
 
 class Cancellation:
-    def __init__(self) -> None: self._event=asyncio.Event()
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self._reason: str | None = None
     @property
-    def cancelled(self) -> bool: return self._event.is_set()
-    def cancel(self) -> None: self._event.set()
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    @property
+    def reason(self) -> str | None:
+        return self._reason
+
+    def cancel(self, reason: str = "user") -> None:
+        if not self._event.is_set():
+            self._reason = reason
+            self._event.set()
+
+class EventBroadcaster:
+    def __init__(self, queue_size: int = 128) -> None:
+        self._queue_size = queue_size
+        self._queues: set[asyncio.Queue[AgentEvent | object]] = set()
+        self._closed = False
+    def subscribe(self) -> AsyncIterator[AgentEvent]:
+        queue: asyncio.Queue[AgentEvent | object] = asyncio.Queue(self._queue_size)
+        if self._closed:
+            queue.put_nowait(_SENTINEL)
+        else:
+            self._queues.add(queue)
+
+        async def stream() -> AsyncIterator[AgentEvent]:
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is _SENTINEL:
+                        return
+                    yield item  # type: ignore[misc]
+            finally:
+                self._queues.discard(queue)
+
+        return stream()
+
+    def publish(self, event: AgentEvent) -> None:
+        for queue in tuple(self._queues):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                self._queues.discard(queue)
+                logger.warning("disconnecting slow agent event subscriber")
+    def close(self) -> None:
+        self._closed = True
+        for queue in tuple(self._queues):
+            try:
+                queue.put_nowait(_SENTINEL)
+            except asyncio.QueueFull:
+                pass
+        self._queues.clear()
+
 @dataclass(slots=True)
-class AgentRun(AsyncIterator[AgentEvent]):
-    session: AgentSession; prompt: UserMessage; run_id: str = field(default_factory=lambda:uuid4().hex)
-    _token: Cancellation = field(default_factory=Cancellation, init=False); _queue: asyncio.Queue[AgentEvent] = field(default_factory=lambda:asyncio.Queue(maxsize=128), init=False); _task: asyncio.Task[None] | None = field(default=None,init=False); _result: asyncio.Future[AgentRunResult] | None = field(default=None,init=False); _ended: bool = field(default=False,init=False)
-    def cancel(self) -> None:
-        self._token.cancel()
-        if self._task and not self._task.done(): self._task.cancel()
-    def __aiter__(self) -> AsyncIterator[AgentEvent]: self._start(); return self
-    async def __anext__(self) -> AgentEvent:
-        if self._ended: raise StopAsyncIteration
-        self._start(); event=await self._queue.get()
-        if isinstance(event,AgentEndEvent): self._ended=True
-        return event
+class AgentRun:
+    session: Any
+    prompt: UserMessage
+    run_id: str = field(default_factory=lambda: uuid4().hex)
+    _token: Cancellation = field(default_factory=Cancellation, init=False)
+    _broadcaster: EventBroadcaster = field(default_factory=EventBroadcaster, init=False)
+    _task: asyncio.Task[None] | None = field(default=None, init=False)
+    _result: asyncio.Future[AgentRunResult] | None = field(default=None, init=False)
+    _sequence: int = field(default=0, init=False)
+    _terminal: bool = field(default=False, init=False)
+
+    def events(self) -> AsyncIterator[AgentEvent]:
+        self._start()
+        return self._broadcaster.subscribe()
+
+    def cancel(self, reason: str = "user") -> None:
+        self._token.cancel(reason)
+
     async def result(self) -> AgentRunResult:
-        self._start(); assert self._result is not None; return await self._result
+        self._start()
+        assert self._result is not None
+        return await self._result
+
     def _start(self) -> None:
         if self._task is None:
-            self._result=asyncio.get_running_loop().create_future(); self._task=asyncio.create_task(self._execute())
-    async def _emit(self,event: AgentEvent) -> None:
-        await self._queue.put(event); await self.session._notify(event)
+            self._result = asyncio.get_running_loop().create_future()
+            self._task = asyncio.create_task(self._execute())
+
+    async def _emit(self, kind: str, payload: dict[str, Any]) -> None:
+        self._sequence += 1
+        event_type = _EVENT_TYPES[kind]
+        event = event_type(run_id=self.run_id, sequence=self._sequence, **payload)
+        self._broadcaster.publish(event)
+        self.session._notify(event)
+
     async def _execute(self) -> None:
-        working=list(self.session.messages)+[self.prompt]; final=None; status="failed"; error: str|None=None
+        agent = self.session.agent
+        messages = list(self.session.messages)
+        messages.append(self.prompt)
+        final = None
+        status = "failed"
+        error: str | None = None
+        timeout_task: asyncio.Task[None] | None = None
         try:
-            await self._emit(AgentStartEvent(self.run_id)); await self._emit(MessageEvent(self.prompt,phase="start")); await self._emit(MessageEvent(self.prompt,phase="end")); agent=self.session.agent
-            final,status,error=await run_loop(model=agent.model,system_prompt=agent.system_prompt,messages=working,tools=agent.tools,cancellation=self._token,emit=self._emit,run_id=self.run_id,max_turns=agent.max_turns,transforms=agent.hooks.context_transforms,before_tool_call=agent.hooks.before_tool_call,after_tool_call=agent.hooks.after_tool_call)
-        except asyncio.CancelledError: status,error="cancelled","Run cancelled."
-        except Exception as exc: status,error="failed",str(exc)
-        result=AgentRunResult(tuple(working),final,status,error,self.run_id); self.session.messages.extend(working[len(self.session.messages):]); assert self._result is not None; self._result.set_result(result)
-        try: await self._emit(AgentEndEvent(result))
-        finally: self.session._finish()
+            await self._emit("agent_started", {"session_id": self.session.session_id})
+            await self._emit("message_started", {"turn": None, "message": self.prompt})
+            await self._emit("message_completed", {"turn": None, "message": self.prompt})
+            if agent.run_timeout is not None:
+                timeout_task = asyncio.create_task(self._timeout_after(agent.run_timeout))
+            tools = {tool.name: tool for tool in agent.tools}
+            final, status, error = await run_loop(
+                model=agent.model,
+                system_prompt=agent.system_prompt,
+                messages=messages,
+                tools=tools,
+                definitions=tuple(tool.definition for tool in agent.tools),
+                cancellation=self._token,
+                emit=self._emit,
+                run_id=self.run_id,
+                max_turns=agent.max_turns,
+                transforms=agent.hooks.context_transforms,
+                before_tool_call=agent.hooks.before_tool_call,
+                after_tool_call=agent.hooks.after_tool_call,
+            )
+        except asyncio.CancelledError:
+            self._token.cancel("user")
+            status, error = "cancelled", "Run cancelled."
+        except Exception:
+            logger.exception("agent run failed")
+            status, error = "failed", "Agent runtime failed."
+        finally:
+            if timeout_task:
+                timeout_task.cancel()
+        if self._token.cancelled and status not in {"timed_out", "cancelled"}:
+            status = "timed_out" if self._token.reason == "timeout" else "cancelled"
+            error = "Run timed out." if status == "timed_out" else "Run cancelled."
+        result = AgentRunResult(tuple(messages), final, status, error, self.run_id)
+        self.session._commit(messages)
+        assert self._result is not None
+        self._result.set_result(result)
+        await self._emit("agent_completed", {"status": status, "error": error})
+        self._terminal = True
+        self._broadcaster.close()
+        self.session._finish(self)
+
+    async def _timeout_after(self, timeout: float) -> None:
+        await asyncio.sleep(timeout)
+        self._token.cancel("timeout")

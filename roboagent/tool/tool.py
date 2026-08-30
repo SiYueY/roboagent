@@ -96,7 +96,8 @@ class Tool:
 
     async def execute(self, params: BaseModel, invocation: "ToolInvocation") -> ToolExecutionResult:
         if invocation.cancellation.cancelled:
-            return ToolExecutionResult(f"Tool '{self.name}' was cancelled before execution.", is_error=True)
+            code = "timeout" if invocation.cancellation.reason == "timeout" else "cancelled"
+            return ToolExecutionResult("Tool execution was cancelled.", is_error=True, error_code=code)
         try:
             value = self.handler(params, invocation)
             if inspect.isawaitable(value):
@@ -105,8 +106,8 @@ class Tool:
                 return value
             details = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
             return ToolExecutionResult(value if isinstance(value, str) else json.dumps(details, ensure_ascii=False, default=str), details)
-        except Exception as exc:
-            return ToolExecutionResult(f"Tool '{self.name}' failed: {exc}", is_error=True)
+        except Exception:
+            return ToolExecutionResult("Tool execution failed.", is_error=True, error_code="execution_error")
 
 
 @dataclass(frozen=True, slots=True)

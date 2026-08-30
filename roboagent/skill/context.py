@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from roboagent.runtime import ModelContext
+from roboagent.runtime import CancellationToken, ModelContext
 from roboagent.skill.skill import Skill
 
 
@@ -23,7 +23,7 @@ def format_skill_context(skills: Sequence[Skill]) -> str:
 
 def create_skill_context_transform(skills: Sequence[Skill]):
     active = tuple(skill for skill in skills if skill.is_active)
-    def transform(context: ModelContext) -> ModelContext:
+    def transform(context: ModelContext, _cancellation: CancellationToken) -> ModelContext:
         if not (block := format_skill_context(active)): return context
         return replace(context, system_prompt=f"{context.system_prompt}\n\n{block}" if context.system_prompt else block)
     return transform
