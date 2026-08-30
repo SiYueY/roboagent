@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import unittest
-from roboagent.agent import Agent, SessionBusyError
+from roboagent.agent import Agent, AgentHooks, SessionBusyError
 from roboagent.runtime import AssistantMessage, ModelEvent
 
 class Model:
@@ -44,6 +44,15 @@ class AgentTests(unittest.TestCase):
             await run.result()
         asyncio.run(check())
 
+    def test_result_returns_after_terminal_cleanup(self):
+        async def check():
+            session = Agent(Model()).new_session()
+            first = await session.run("one")
+            self.assertEqual(first.status, "completed")
+            second = await session.run("two")
+            self.assertEqual(second.status, "completed")
+        asyncio.run(check())
+
     def test_observer_failure_does_not_fail_run(self):
         async def check():
             session = Agent(Model()).new_session()
@@ -64,6 +73,22 @@ class AgentTests(unittest.TestCase):
             run = Agent(NoisyModel()).new_session().start("hello")
             stream = run.events()
             result = await run.result()
-            await stream.aclose()
+            events = []
+            async with asyncio.timeout(0.1):
+                async for event in stream:
+                    events.append(event)
             self.assertEqual(result.status, "completed")
+            self.assertLess(len(events), 203)
         asyncio.run(check())
+
+    def test_context_transform_type_error_fails_once_without_signature_retry(self):
+        calls = 0
+        def transform(_context, _cancellation):
+            nonlocal calls
+            calls += 1
+            raise TypeError("transform bug")
+        result = asyncio.run(
+            Agent(Model(), hooks=AgentHooks(context_transforms=(transform,))).new_session().run("hello")
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(calls, 1)

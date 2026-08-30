@@ -3,7 +3,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
-from roboagent.runtime import AssistantMessage, Message, ModelContext, ToolExecutionResult
+from roboagent.runtime import (
+    AssistantMessage,
+    CancellationToken,
+    Message,
+    ModelContext,
+    ToolExecutionResult,
+)
 from roboagent.tool import ToolInvocation
 
 AgentRunStatus = Literal["completed", "failed", "cancelled", "max_turns", "timed_out"]
@@ -16,7 +22,10 @@ class AgentRunResult:
     error: str | None = None
     run_id: str = ""
 
-ContextTransform = Callable[[ModelContext, object], ModelContext | Awaitable[ModelContext]]
+ContextTransform = Callable[
+    [ModelContext, CancellationToken],
+    ModelContext | Awaitable[ModelContext],
+]
 
 @dataclass(frozen=True, slots=True)
 class ToolCallDecision:

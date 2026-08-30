@@ -22,6 +22,15 @@ class EventStoreTests(unittest.TestCase):
             self.assertEqual([event.sequence for event in await store.list("r")], [1, 2])
         asyncio.run(check())
 
+    def test_stores_sort_events_by_sequence(self):
+        async def check(store):
+            await store.append(AgentStartedEvent(run_id="r", sequence=2, session_id="s"))
+            await store.append(AgentStartedEvent(run_id="r", sequence=1, session_id="s"))
+            self.assertEqual([event.sequence for event in await store.list("r")], [1, 2])
+        asyncio.run(check(MemoryEventStore()))
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(check(JsonlEventStore(Path(directory) / "events.jsonl")))
+
     def test_jsonl_store_appends_serialized_events(self):
         async def check(path: Path):
             store = JsonlEventStore(path)

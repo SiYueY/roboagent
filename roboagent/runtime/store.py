@@ -43,7 +43,7 @@ class MemoryEventStore:
         self._events.setdefault(event.run_id, []).append(event)
 
     async def list(self, run_id: str) -> tuple[AgentEvent, ...]:
-        return tuple(self._events.get(run_id, ()))
+        return tuple(sorted(self._events.get(run_id, ()), key=lambda event: event.sequence))
 
 
 class JsonlEventStore:
@@ -80,7 +80,7 @@ class JsonlEventStore:
                 payload = json.loads(line)
                 if payload.get("run_id") == run_id:
                     events.append(_event_from_dict(payload))
-        return tuple(events)
+        return tuple(sorted(events, key=lambda event: event.sequence))
 
 
 class EventRecorder:

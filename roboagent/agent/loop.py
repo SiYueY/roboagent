@@ -24,7 +24,7 @@ async def run_loop(*, model: ChatModel, system_prompt: str | None, messages: lis
         context = ModelContext(system_prompt, tuple(messages), definitions)
         try:
             for transform in transforms:
-                context = await _await(_call_transform(transform, context, cancellation))
+                context = await _await(transform(context, cancellation))
                 if not isinstance(context, ModelContext):
                     raise TypeError("Context transforms must return ModelContext.")
         except Exception:
@@ -119,12 +119,6 @@ async def _execute_tool(call: ToolCall, finish_reason: str, tools: Mapping[str, 
                             error_code=execution.error_code if override.error_code is None else override.error_code,
                             stop_run=execution.stop_run if override.stop_run is None else override.stop_run)
     return ToolResultMessage(call.id, call.name, execution.content, execution.is_error, execution.details, execution.error_code), execution.stop_run
-
-def _call_transform(transform: ContextTransform, context: ModelContext, cancellation: CancellationToken) -> Any:
-    try:
-        return transform(context, cancellation)
-    except TypeError:
-        return transform(context)  # compatibility for a straightforward one-argument callable
 
 def _cancel_status(cancellation: CancellationToken) -> str:
     return "timed_out" if cancellation.reason == "timeout" else "cancelled"

@@ -64,6 +64,17 @@ class RuntimeContractTests(unittest.TestCase):
         result = asyncio.run(Agent(WaitingModel(), run_timeout=0.01).new_session().run("wait"))
         self.assertEqual(result.status, "timed_out")
 
+    def test_cancelled_error_preserves_timeout_reason(self):
+        class CancelledModel:
+            model_name = "test"
+            async def stream(self, request, cancellation):
+                yield ModelEvent("start")
+                while not cancellation.cancelled:
+                    await asyncio.sleep(0.001)
+                raise asyncio.CancelledError()
+        result = asyncio.run(Agent(CancelledModel(), run_timeout=0.01).new_session().run("wait"))
+        self.assertEqual(result.status, "timed_out")
+
     def test_policy_denial_has_stable_error_code(self):
         async def deny(_invocation):
             from roboagent.agent import ToolCallDecision

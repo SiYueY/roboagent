@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from roboagent.agent.loop import run_loop
 from roboagent.agent.types import AgentRunResult
@@ -60,7 +60,9 @@ class EventBroadcaster:
     def __init__(self, queue_size: int = 128) -> None:
         self._queue_size = queue_size
         self._queues: set[asyncio.Queue[AgentEvent | object]] = set()
+        self._draining: set[asyncio.Queue[AgentEvent | object]] = set()
         self._closed = False
+
     def subscribe(self) -> AsyncIterator[AgentEvent]:
         queue: asyncio.Queue[AgentEvent | object] = asyncio.Queue(self._queue_size)
         if self._closed:
@@ -71,12 +73,15 @@ class EventBroadcaster:
         async def stream() -> AsyncIterator[AgentEvent]:
             try:
                 while True:
+                    if queue in self._draining and queue.empty():
+                        return
                     item = await queue.get()
                     if item is _SENTINEL:
                         return
-                    yield item  # type: ignore[misc]
+                    yield cast(AgentEvent, item)
             finally:
                 self._queues.discard(queue)
+                self._draining.discard(queue)
 
         return stream()
 
@@ -86,14 +91,13 @@ class EventBroadcaster:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
                 self._queues.discard(queue)
+                self._draining.add(queue)
                 logger.warning("disconnecting slow agent event subscriber")
+
     def close(self) -> None:
         self._closed = True
         for queue in tuple(self._queues):
-            try:
-                queue.put_nowait(_SENTINEL)
-            except asyncio.QueueFull:
-                pass
+            self._draining.add(queue)
         self._queues.clear()
 
 @dataclass(slots=True)
@@ -162,8 +166,10 @@ class AgentRun:
                 after_tool_call=agent.hooks.after_tool_call,
             )
         except asyncio.CancelledError:
-            self._token.cancel("user")
-            status, error = "cancelled", "Run cancelled."
+            if not self._token.cancelled:
+                self._token.cancel("user")
+            status = "timed_out" if self._token.reason == "timeout" else "cancelled"
+            error = "Run timed out." if status == "timed_out" else "Run cancelled."
         except Exception:
             logger.exception("agent run failed")
             status, error = "failed", "Agent runtime failed."
@@ -174,13 +180,13 @@ class AgentRun:
             status = "timed_out" if self._token.reason == "timeout" else "cancelled"
             error = "Run timed out." if status == "timed_out" else "Run cancelled."
         result = AgentRunResult(tuple(messages), final, status, error, self.run_id)
-        self.session._commit(messages)
-        assert self._result is not None
-        self._result.set_result(result)
         await self._emit("agent_completed", {"status": status, "error": error})
         self._terminal = True
         self._broadcaster.close()
+        self.session._commit(messages)
         self.session._finish(self)
+        assert self._result is not None
+        self._result.set_result(result)
 
     async def _timeout_after(self, timeout: float) -> None:
         await asyncio.sleep(timeout)

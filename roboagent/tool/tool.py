@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel, ValidationError
 from roboagent.runtime import CancellationToken, ModelContext, ToolCall, ToolDefinition, ToolExecutionResult
 from roboagent.tool.errors import ToolRegistrationError
 from roboagent.tool.schema import ToolSpec
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +110,13 @@ class Tool:
             details = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
             return ToolExecutionResult(value if isinstance(value, str) else json.dumps(details, ensure_ascii=False, default=str), details)
         except Exception:
+            logger.exception(
+                "tool handler failed: tool=%s run_id=%s turn=%s tool_call_id=%s",
+                self.name,
+                invocation.run_id,
+                invocation.turn,
+                invocation.tool_call.id,
+            )
             return ToolExecutionResult("Tool execution failed.", is_error=True, error_code="execution_error")
 
 

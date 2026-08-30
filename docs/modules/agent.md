@@ -10,6 +10,9 @@ consumer. `run.cancel(reason="user")` requests cooperative cancellation; tools
 remain responsible for stopping any external robot operation. `run_timeout` is
 disabled by default and uses the same cancellation chain when configured.
 
+Each `ContextTransform` receives both the immutable `ModelContext` and the
+run's `CancellationToken`; one-argument transforms are not supported.
+
 The internal `loop.py` performs sequential model/tool turns and does not own
 persistent session state. The first error in a tool batch short-circuits later
 calls; a `ToolExecutionResult(stop_run=True)` ends the run. Model-visible tool

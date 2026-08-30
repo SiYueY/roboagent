@@ -29,6 +29,17 @@ class NativeToolTests(unittest.TestCase):
         self.assertEqual(tool.definition.name, "map.read")
         self.assertEqual(asyncio.run(tool.execute(params, type("I", (), {"cancellation": Token()})())).content, '{"value": 2}')
 
+    def test_handler_exception_is_logged_and_model_safe(self) -> None:
+        tool = Tool.from_spec(ToolSpec(name="move", description="Move", group="robot", source="test"), Args,
+                              lambda _params, _invocation: (_ for _ in ()).throw(RuntimeError("motor offline")))
+        invocation = type("I", (), {"cancellation": Token(), "run_id": "run", "turn": 3,
+                                     "tool_call": ToolCall("call", "move")})()
+        with self.assertLogs("roboagent.tool.tool", level="ERROR") as logs:
+            result = asyncio.run(tool.execute(Args(value=1), invocation))
+        self.assertEqual(result.error_code, "execution_error")
+        self.assertEqual(result.content, "Tool execution failed.")
+        self.assertIn("tool=move run_id=run turn=3 tool_call_id=call", "\n".join(logs.output))
+
     def test_manager_preserves_visibility_and_skill_authorization(self) -> None:
         manager = ToolManager(); manager.register(self._tool()); manager.register(self._tool("pose.read"))
         skill = type("Skill", (), {"allowed_tools": ("pose.read",)})()
