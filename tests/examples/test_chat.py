@@ -32,6 +32,18 @@ class CancellableModel:
 
 @unittest.skipUnless(importlib.util.find_spec("gradio"), "requires the gradio optional extra")
 class ChatExampleTests(unittest.TestCase):
+    BROWSER_ACTIONS = (
+        "toggleSidebar",
+        "closeMobileSidebar",
+        "enterVoiceMode",
+        "toggleMicrophone",
+        "toggleCamera",
+        "toggleCaptions",
+        "toggleSpeaker",
+        "exitVoiceMode",
+        "switchCamera",
+    )
+
     @classmethod
     def setUpClass(cls) -> None:
         path = Path(__file__).parents[2] / "examples" / "chat" / "ui.py"
@@ -42,53 +54,80 @@ class ChatExampleTests(unittest.TestCase):
         spec.loader.exec_module(module)
         cls.app = module
 
-    def test_chat_assets_expose_the_required_layout_and_media_contracts(self) -> None:
+    def test_gradio6_layout_and_browser_media_contracts(self) -> None:
         demo = self.app.create_demo(Agent(ScriptedModel()))
         self.assertIsInstance(demo, self.app.gr.Blocks)
+        config = demo.get_config_file()
         stylesheet = self.app.STYLE_PATH.read_text()
         frontend = self.app.FRONTEND_PATH.read_text()
-        self.assertIn("#session-list", stylesheet)
-        self.assertIn("#composer", stylesheet)
-        self.assertIn("#voice-panel", stylesheet)
-        self.assertIn("#voice-controls", stylesheet)
-        self.assertIn("#camera-layer", stylesheet)
-        self.assertIn("#camera-switch-button", stylesheet)
-        self.assertIn("camera-enabled", stylesheet)
-        self.assertIn("--voice-control-inactive-bg", stylesheet)
-        self.assertIn("--voice-control-active-bg", stylesheet)
-        self.assertIn("button#voice-video.is-active", stylesheet)
-        self.assertIn("#voice-video.is-active button", stylesheet)
-        self.assertIn('button#voice-captions, #voice-captions button)::before', stylesheet)
-        self.assertIn('content: "字"', stylesheet)
-        self.assertIn("voice-mode", stylesheet)
-        self.assertIn("#sidebar-toggle", stylesheet)
-        self.assertIn("#message-input", stylesheet)
-        self.assertIn("sidebar-collapsed", stylesheet)
-        self.assertIn("button#send-button", stylesheet)
-        self.assertIn("button#sidebar-toggle", stylesheet)
-        self.assertIn("#mobile-sidebar-close", stylesheet)
-        self.assertIn("--action-radius", stylesheet)
-        self.assertIn("-webkit-tap-highlight-color: transparent", stylesheet)
-        self.assertIn("getUserMedia", frontend)
-        self.assertIn("cameraStream", frontend)
-        self.assertIn("cameraFacingMode", frontend)
-        self.assertIn("facingMode", frontend)
-        self.assertIn("frameRate: { ideal: 24, max: 30 }", frontend)
-        self.assertIn("releaseCamera", frontend)
-        self.assertIn("switchCamera", frontend)
-        self.assertIn("playsInline", frontend)
-        self.assertIn("cameraVideo.srcObject = null", frontend)
-        self.assertIn("window.addEventListener(\"pagehide\"", frontend)
-        self.assertIn("AudioContext", frontend)
-        self.assertIn("voice-call-button", frontend)
-        self.assertIn("sidebar-collapsed", frontend)
-        self.assertIn("toggleableControls", frontend)
-        self.assertIn("releaseStream", frontend)
-        self.assertIn("syncSidebarLabel", frontend)
-        self.assertIn("collapseSidebarForCompactViewport", frontend)
-        self.assertNotIn('classList.toggle("sidebar-collapsed", compact.matches)', frontend)
+        launch_options = self.app.chat_launch_options()
 
-    def test_layout_uses_fixed_button_scales_and_client_sidebar_state(self) -> None:
+        self.assertEqual(launch_options["theme"], self.app.CHAT_THEME)
+        self.assertEqual(launch_options["css_paths"], [self.app.STYLE_PATH])
+        self.assertIn(frontend, launch_options["head"])
+        self.assertTrue(launch_options["head"].startswith("<script>"))
+        self.assertNotIn("js", launch_options)
+
+        components = {
+            component["props"].get("elem_id"): component
+            for component in config["components"]
+            if component["props"].get("elem_id")
+        }
+        self.assertEqual(components["composer"]["type"], "column")
+        self.assertEqual(sum(item["props"].get("elem_id") == "composer" for item in config["components"]), 1)
+        self.assertEqual(components["message-input"]["props"]["lines"], 2)
+        self.assertEqual(components["message-input"]["props"]["max_lines"], 8)
+        self.assertEqual(components["voice-video"]["props"]["interactive"], True)
+        self.assertEqual(components["voice-more"]["props"]["interactive"], False)
+
+        browser_javascript = [dependency["js"] for dependency in config["dependencies"] if dependency.get("js")]
+        self.assertEqual(
+            browser_javascript,
+            [f"() => window.roboagentChat?.{action}()" for action in self.BROWSER_ACTIONS],
+        )
+
+        for selector in (
+            "#session-list",
+            "#sidebar",
+            "#composer",
+            "#voice-panel",
+            "#voice-controls",
+            "#camera-layer",
+            "#camera-switch-button",
+            "#mobile-sidebar-close",
+        ):
+            self.assertIn(selector, stylesheet)
+        self.assertNotIn("height: calc(100vh - 48px)", stylesheet)
+        for contract in (
+            "--voice-control-active-bg",
+            "--voice-control-inactive-bg",
+            "sidebar-collapsed",
+            "camera-enabled",
+            "label.show_textbox_border",
+            "-webkit-tap-highlight-color: transparent",
+        ):
+            self.assertIn(contract, stylesheet)
+
+        for contract in (
+            'document.querySelector("gradio-app")?.shadowRoot ?? document',
+            "new MutationObserver",
+            "window.roboagentChat",
+            "window.roboagentChatInitError",
+            "getUserMedia",
+            "CAMERA_PROFILES",
+            "frameRate: { ideal: 20, max: 24 }",
+            "waitForCameraRelease",
+            "waitForCameraMetadata",
+            "cameraVideo.srcObject = null",
+            "releaseStream",
+            "window.addEventListener(\"pagehide\"",
+            "AudioContext",
+        ):
+            self.assertIn(contract, frontend)
+        for action in self.BROWSER_ACTIONS:
+            self.assertIn(action, frontend)
+
+    def test_layout_uses_gradio6_components_and_browser_action_helper(self) -> None:
         source = inspect.getsource(self.app.create_demo)
         self.assertIn("scale=0", source)
         self.assertIn("min_width=38", source)
@@ -97,9 +136,16 @@ class ChatExampleTests(unittest.TestCase):
         self.assertIn("max_lines=8", source)
         self.assertNotIn("icon=", source)
         self.assertNotIn("value=None", source)
-        self.assertIn("FRONTEND_PATH.read_text", source)
+        self.assertNotIn("FRONTEND_PATH.read_text", source)
+        self.assertNotIn("theme=", source)
+        self.assertNotIn("css_paths=", source)
+        self.assertIn("bind_browser_action(component, method)", source)
+        self.assertIn("browser_actions", source)
+        self.assertIn("window.roboagentChat?.{method}()", inspect.getsource(self.app.bind_browser_action))
+        self.assertNotIn('type="messages"', source)
         self.assertNotIn("CHAT_LAYOUT_JS", source)
         self.assertIn("voice-call-button", source)
+        self.assertIn('gr.Column(elem_id="composer"', source)
         self.assertNotIn("gr.HTML", source)
         self.assertNotIn("<button", source)
         self.assertNotIn("<svg", source)
@@ -121,6 +167,7 @@ class ChatExampleTests(unittest.TestCase):
         self.assertIn("prevent_thread_lock=True", source)
         self.assertIn("demo.server.force_exit = True", source)
         self.assertIn("demo.block_thread()", source)
+        self.assertIn("chat_launch_options", source)
         self.assertIn("ssl_certfile", source)
         self.assertIn("ssl_keyfile", source)
         self.assertIn('"ssl_verify": False', source)

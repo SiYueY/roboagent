@@ -25,6 +25,7 @@ from roboagent.runtime import MessageDeltaEvent
 
 logger = logging.getLogger(__name__)
 
+CHAT_THEME = gr.themes.Soft(primary_hue="orange", neutral_hue="slate", radius_size="lg")
 ERROR_MESSAGE = "RoboAgent could not complete the request."
 DEFAULT_TITLE = "新对话"
 MAX_CONVERSATIONS = 20
@@ -32,6 +33,27 @@ TITLE_LIMIT = 24
 
 ChatHistory = list[dict[str, str]]
 ChatViewUpdate = tuple[ChatHistory, "ChatPageState", str, object, str]
+BrowserAction = tuple[gr.components.Component, str]
+
+
+def chat_launch_options() -> dict[str, object]:
+    """Return Gradio application options that belong on ``Blocks.launch``."""
+    frontend = FRONTEND_PATH.read_text(encoding="utf-8")
+    return {
+        "theme": CHAT_THEME,
+        "css_paths": [STYLE_PATH],
+        "head": f"<script>({frontend})()</script>",
+    }
+
+
+def bind_browser_action(component: gr.components.Component, method: str) -> None:
+    """Connect a Gradio control to the browser-local frontend API."""
+    component.click(
+        fn=None,
+        js=f"() => window.roboagentChat?.{method}()",
+        queue=False,
+    )
+
 
 @dataclass(slots=True)
 class BrowserConversation:
@@ -41,7 +63,6 @@ class BrowserConversation:
     session: AgentSession
     history: ChatHistory = field(default_factory=list)
     title: str = DEFAULT_TITLE
-    created_at: float = field(default_factory=time)
     updated_at: float = field(default_factory=time)
 
 
@@ -213,12 +234,8 @@ def create_demo(agent: Agent) -> gr.Blocks:
     """Build the browser-local multi-session chat page."""
     initial_state = create_page_state(agent)
     initial_conversation = active_conversation(initial_state)
-    theme = gr.themes.Soft(primary_hue="orange", neutral_hue="slate", radius_size="lg")
     with gr.Blocks(
         title="RoboAgent",
-        theme=theme,
-        css_paths=[STYLE_PATH],
-        js=FRONTEND_PATH.read_text(encoding="utf-8"),
         fill_height=True,
         fill_width=True,
     ) as demo:
@@ -239,7 +256,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
 
             with gr.Column(elem_id="main-area", scale=1, min_width=0):
                 with gr.Row(elem_id="chat-header", equal_height=True):
-                    gr.Button(
+                    sidebar_toggle = gr.Button(
                         value="",
                         variant="secondary",
                         size="sm",
@@ -249,7 +266,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
                     )
                     with gr.Column(scale=1, min_width=0):
                         title = gr.Markdown(header_text(initial_conversation), elem_id="conversation-title")
-                gr.Button(
+                camera_switch_button = gr.Button(
                     value="",
                     variant="secondary",
                     size="sm",
@@ -259,7 +276,6 @@ def create_demo(agent: Agent) -> gr.Blocks:
                 )
                 with gr.Column(elem_id="conversation"):
                     chatbot = gr.Chatbot(
-                        type="messages",
                         value=initial_conversation.history,
                         show_label=False,
                         layout="bubble",
@@ -267,7 +283,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
                         allow_tags=False,
                         elem_id="chatbot",
                     )
-                    with gr.Group(elem_id="composer"):
+                    with gr.Column(elem_id="composer", scale=0, min_width=0):
                         textbox = gr.Textbox(
                             placeholder="给 RoboAgent 发送消息…",
                             show_label=False,
@@ -282,7 +298,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
                                 elem_id="composer-model",
                                 container=False,
                             )
-                            gr.Button(
+                            voice_call_button = gr.Button(
                                 "语音通话",
                                 variant="secondary",
                                 size="sm",
@@ -310,13 +326,13 @@ def create_demo(agent: Agent) -> gr.Blocks:
                             container=False,
                         )
                         with gr.Row(elem_id="voice-controls", equal_height=True):
-                            gr.Button("麦克风", scale=1, min_width=0, elem_id="voice-microphone")
-                            gr.Button("视频", scale=1, min_width=0, elem_id="voice-video")
-                            gr.Button("字幕", scale=1, min_width=0, elem_id="voice-captions")
-                            gr.Button("扬声器", scale=1, min_width=0, elem_id="voice-speaker")
-                            gr.Button("挂断", scale=1, min_width=0, elem_id="voice-hangup")
+                            voice_microphone = gr.Button("麦克风", scale=1, min_width=0, elem_id="voice-microphone")
+                            voice_video = gr.Button("视频", scale=1, min_width=0, elem_id="voice-video")
+                            voice_captions = gr.Button("字幕", scale=1, min_width=0, elem_id="voice-captions")
+                            voice_speaker = gr.Button("扬声器", scale=1, min_width=0, elem_id="voice-speaker")
+                            voice_hangup = gr.Button("挂断", scale=1, min_width=0, elem_id="voice-hangup")
                             gr.Button("更多", scale=1, min_width=0, interactive=False, elem_id="voice-more")
-            gr.Button(
+            mobile_sidebar_close = gr.Button(
                 value="",
                 variant="secondary",
                 size="sm",
@@ -335,4 +351,17 @@ def create_demo(agent: Agent) -> gr.Blocks:
             outputs=chat_outputs,
         )
         session_list.change(select_conversation, inputs=[session_list, page_state], outputs=chat_outputs)
+        browser_actions: tuple[BrowserAction, ...] = (
+            (sidebar_toggle, "toggleSidebar"),
+            (mobile_sidebar_close, "closeMobileSidebar"),
+            (voice_call_button, "enterVoiceMode"),
+            (voice_microphone, "toggleMicrophone"),
+            (voice_video, "toggleCamera"),
+            (voice_captions, "toggleCaptions"),
+            (voice_speaker, "toggleSpeaker"),
+            (voice_hangup, "exitVoiceMode"),
+            (camera_switch_button, "switchCamera"),
+        )
+        for component, method in browser_actions:
+            bind_browser_action(component, method)
     return demo

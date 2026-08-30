@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from roboagent.agent import Agent
 from roboagent.config import load_app_config
 from roboagent.model import create_chat_model
-from ui import create_demo
+from ui import chat_launch_options, create_demo
 
 SYSTEM_PROMPT = "You are RoboAgent, a helpful AI assistant. Respond clearly and concisely."
 
@@ -47,6 +47,7 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=7860,
         prevent_thread_lock=True,
+        **chat_launch_options(),
         **tls_options,
     )
     if demo.server is not None:

@@ -13,7 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gradio = [
-    "gradio>=5,<6",
+    "gradio>=6,<7",
 ]
 
 [[tool.uv.index]]

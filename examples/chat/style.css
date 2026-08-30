@@ -1,4 +1,4 @@
-/* Full-screen chat workspace and Gradio component overrides. */
+/* Gradio 6 full-screen shell. */
 :root {
   --sidebar-width: 280px; --chat-width: 900px;
   --page-bg: #f5f5f7; --sidebar-bg: #f0f0f3;
@@ -50,10 +50,11 @@ main:has(#workspace),
   }
   &.sidebar-collapsed #sidebar { display: none !important; }
 }
+/* Sidebar and browser-local session list. */
 #sidebar {
   display: flex; flex-direction: column;
   min-width: var(--sidebar-width) !important; max-width: var(--sidebar-width);
-  height: calc(100vh - 48px); box-sizing: border-box;
+  height: 100%; box-sizing: border-box;
   overflow: hidden; padding: 26px 18px 18px;
   border-right: 1px solid var(--muted-border); background: var(--sidebar-bg);
   & #brand { margin-bottom: 24px; }
@@ -141,6 +142,7 @@ main:has(#workspace),
     height: 0;
   }
 }
+/* Main conversation area and optional local camera background. */
 #main-area {
   position: relative; isolation: isolate;
   display: flex; flex-direction: column;
@@ -179,6 +181,7 @@ main:has(#workspace),
   border-radius: var(--action-radius) !important;
   -webkit-tap-highlight-color: transparent;
 }
+/* Header and shared icon-button geometry. */
 #chat-header {
   display: flex; flex: 0 0 92px;
   align-items: center; min-height: 92px;
@@ -212,6 +215,7 @@ main:has(#workspace),
 #workspace:not(.sidebar-collapsed) #chat-header :where(button#sidebar-toggle, #sidebar-toggle button)::before {
   transform: rotate(180deg);
 }
+/* Message stream. */
 #conversation {
   display: flex; flex: 1 1 0;
   flex-direction: column; width: min(100%, var(--chat-width));
@@ -242,22 +246,29 @@ main:has(#workspace),
     height: 0;
   }
 }
+/* Text composer.  The outer component is a Gradio 6 Column, not Group. */
 #composer {
-  flex: 0 0 auto; margin: 12px 0 24px;
-  padding: 12px 14px 10px; border: 1px solid var(--border);
-  border-radius: 22px; background: var(--panel-bg);
-  box-shadow: var(--panel-shadow); --block-background-fill: transparent;
-  --panel-background-fill: transparent; --background-fill-secondary: transparent;
+  flex: 0 0 auto; margin: 12px 0 24px; padding: 12px 14px 10px;
+  border: 1px solid var(--border); border-radius: 22px;
+  background: var(--panel-bg); box-shadow: var(--panel-shadow);
+  --block-background-fill: transparent;
+  --panel-background-fill: transparent;
+  --background-fill-secondary: transparent;
   & #message-input textarea {
     min-height: 55px !important; padding: 4px 3px !important;
     resize: none !important; overflow-y: auto !important;
     font-size: 15px; line-height: 1.55;
   }
   & #message-input,
+  & #message-input :is(.block, .form, .wrap, .styler),
+  & #message-input :is(.input-container, .input-wrapper, .textarea-container),
+  & #message-input label.show_textbox_border,
+  & #message-input textarea,
   & #message-input:focus-within,
   & #message-input textarea:focus {
-    outline: 0 !important; border-color: transparent !important;
-    box-shadow: none !important;
+    outline: 0 !important; border: 0 !important;
+    border-color: transparent !important; background: transparent !important;
+    box-shadow: none !important; border-radius: 0 !important;
   }
   & > :where(.form, .styler),
   & > .form > .wrap,
@@ -333,6 +344,7 @@ main:has(#workspace),
     background: #e96d0f !important;
   }
 }
+/* Voice mode and local camera preview. */
 #voice-caption,
 #voice-panel {
   display: none !important;
@@ -399,6 +411,7 @@ main:has(#workspace),
     text-shadow: 0 1px 3px rgb(0 0 0 / 50%);
   }
 }
+/* Voice controls. */
 #voice-status {
   min-height: 46px;
   & :is(.wrap, .html-container, p) {
@@ -425,7 +438,7 @@ main:has(#workspace),
     outline: 0 !important; background: transparent !important;
     box-shadow: none !important;
   }
-  & :is(button#voice-microphone, #voice-microphone button, button#voice-video, #voice-video button, button#voice-captions, #voice-captions button, button#voice-speaker, #voice-speaker button, button#voice-hangup, #voice-hangup button, button#voice-more, #voice-more button) {
+  & :is(button, #voice-microphone button, #voice-video button, #voice-captions button, #voice-speaker button, #voice-hangup button, #voice-more button) {
     --voice-control-bg: var(--voice-control-inactive-bg);
     position: relative; isolation: isolate; display: block; width: 100% !important;
     min-height: 92px !important; padding: 75px 0 0 !important;
@@ -448,8 +461,8 @@ main:has(#workspace),
     }
   }
   & :is(
-    button#voice-microphone.is-active, button#voice-video.is-active, button#voice-captions.is-active, button#voice-speaker.is-active,
-    #voice-microphone.is-active button, #voice-video.is-active button, #voice-captions.is-active button, #voice-speaker.is-active button
+    button:is(#voice-microphone, #voice-video, #voice-captions, #voice-speaker).is-active,
+    :is(#voice-microphone, #voice-video, #voice-captions, #voice-speaker).is-active button
   ) {
     --voice-control-bg: var(--voice-control-active-bg); color: var(--voice-control-active-color) !important;
   }
@@ -475,6 +488,8 @@ main:has(#workspace),
   }
 }
 footer { display: none !important; }
+
+/* Compact layout and safe-area adjustments. */
 @media (max-width: 760px) {
   #workspace {
     height: 100vh; height: 100dvh;

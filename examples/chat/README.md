@@ -2,7 +2,7 @@
 
 这是一个最小的流式、多轮浏览器聊天示例。它展示 `ChatModel`、`Agent`、
 `AgentSession`、`AgentRun` 与 `MessageDeltaEvent` 如何组合；页面使用 Gradio
-实现，但 Gradio 不是该示例的核心能力。
+实现，但 Gradio 不是该示例的核心能力。示例以 Gradio 6 为基线，不兼容 Gradio 5。
 
 示例不包含 Tool、Skill、MCP、模型切换、文件上传或认证。
 
@@ -14,7 +14,8 @@
 
 页面代码与应用入口分离：`ui.py` 保存 Gradio 组件、浏览器会话状态和页面回调；
 `app.py` 仅负责加载配置、创建 Agent 并启动服务。`frontend.js` 保存侧栏、语音面板与浏览器
-Media API 行为；`style.css` 只负责响应式布局和视觉层级，不包含 RoboAgent 运行时行为。
+Media API 行为；它通过 Gradio 的页面 `<head>` 在组件挂载后初始化浏览器 API。`style.css` 只负责
+响应式布局和视觉层级，不包含 RoboAgent 运行时行为。
 
 ### 语音通话模式
 
