@@ -1,31 +1,66 @@
 () => {
   const workspace = document.getElementById("workspace");
   const sidebarToggle = document.getElementById("sidebar-toggle");
+  const mobileSidebarClose = document.getElementById("mobile-sidebar-close");
   const sessionList = document.getElementById("session-list");
   const voiceCallButton = document.getElementById("voice-call-button");
   const voiceCaption = document.getElementById("voice-caption");
   const voiceStatus = document.getElementById("voice-status");
+  const mainArea = document.getElementById("main-area");
+  const cameraSwitchButton = document.getElementById("camera-switch-button");
   if (!workspace || !sidebarToggle || workspace.dataset.roboagentChatReady) return;
 
   workspace.dataset.roboagentChatReady = "true";
   const compact = window.matchMedia("(max-width: 760px)");
   const controls = {
     microphone: document.getElementById("voice-microphone"),
+    video: document.getElementById("voice-video"),
     captions: document.getElementById("voice-captions"),
     speaker: document.getElementById("voice-speaker"),
     hangup: document.getElementById("voice-hangup"),
   };
+  const toggleableControls = ["microphone", "video", "captions", "speaker"];
   const state = {
     active: false,
     microphoneEnabled: false,
+    videoEnabled: false,
     captionsEnabled: true,
     speakerEnabled: true,
-    stream: null,
+    microphoneStream: null,
+    cameraStream: null,
+    cameraFacingMode: "user",
     audioContext: null,
     gain: null,
     oscillator: null,
     tonePlayed: false,
   };
+
+  const createCameraLayer = () => {
+    if (!mainArea) return {};
+    let layer = document.getElementById("camera-layer");
+    let video = document.getElementById("camera-video");
+    let overlay = document.getElementById("camera-overlay");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.id = "camera-layer";
+      mainArea.prepend(layer);
+    }
+    if (!video) {
+      video = document.createElement("video");
+      video.id = "camera-video";
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      layer.append(video);
+    }
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "camera-overlay";
+      layer.append(overlay);
+    }
+    return { layer, video, overlay };
+  };
+  const { video: cameraVideo } = createCameraLayer();
 
   const setStatus = (message) => {
     const text = voiceStatus?.querySelector("p") || voiceStatus;
@@ -38,25 +73,30 @@
     const button = control.querySelector("button") || control;
     button.setAttribute("aria-pressed", String(active));
   };
-  const syncToggleIcon = () => {
+  const syncSidebarLabel = () => {
     const collapsed = workspace.classList.contains("sidebar-collapsed");
     const label = collapsed ? "展开侧边栏" : "隐藏侧边栏";
     const button = sidebarToggle.querySelector("button") || sidebarToggle;
     button.setAttribute("aria-label", label);
     button.setAttribute("title", label);
+    const closeButton = mobileSidebarClose?.querySelector("button") || mobileSidebarClose;
+    closeButton?.setAttribute("aria-label", "隐藏侧边栏");
+    closeButton?.setAttribute("title", "隐藏侧边栏");
   };
-  const syncSidebarForViewport = () => {
-    workspace.classList.toggle("sidebar-collapsed", compact.matches);
-    syncToggleIcon();
+  const collapseSidebarForCompactViewport = () => {
+    if (compact.matches) workspace.classList.add("sidebar-collapsed");
+    syncSidebarLabel();
   };
   const syncVoiceUi = () => {
     workspace.classList.toggle("voice-mode", state.active);
     const showCaption = state.active && state.microphoneEnabled && state.captionsEnabled;
     voiceCaption?.classList.toggle("is-visible", showCaption);
-    setControlState("microphone", state.microphoneEnabled);
-    setControlState("captions", state.captionsEnabled);
-    setControlState("speaker", state.speakerEnabled);
-    syncSidebarForViewport();
+    for (const name of toggleableControls) {
+      setControlState(name, state[`${name}Enabled`]);
+    }
+    workspace.classList.toggle("camera-enabled", state.active && state.videoEnabled);
+    cameraVideo?.classList.toggle("is-mirrored", state.cameraFacingMode === "user");
+    collapseSidebarForCompactViewport();
   };
 
   const stopTone = () => {
@@ -95,10 +135,45 @@
     state.oscillator = oscillator;
     state.tonePlayed = true;
   };
+  const releaseStream = (name) => {
+    state[name]?.getTracks().forEach((track) => track.stop());
+    state[name] = null;
+  };
   const releaseMicrophone = () => {
-    state.stream?.getTracks().forEach((track) => track.stop());
-    state.stream = null;
+    releaseStream("microphoneStream");
     state.microphoneEnabled = false;
+  };
+  const releaseCamera = () => {
+    releaseStream("cameraStream");
+    state.videoEnabled = false;
+    if (cameraVideo) cameraVideo.srcObject = null;
+  };
+  const startCamera = async (facingMode, { reportError = true } = {}) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 24, max: 30 },
+        },
+      });
+      state.cameraStream = stream;
+      state.cameraFacingMode = facingMode;
+      state.videoEnabled = true;
+      if (cameraVideo) {
+        cameraVideo.srcObject = stream;
+        await cameraVideo.play();
+      }
+      setStatus("正在预览视频…");
+      return true;
+    } catch (error) {
+      console.warn("RoboAgent camera access failed", error);
+      releaseCamera();
+      if (reportError) setStatus("无法访问摄像头，请允许浏览器访问摄像头");
+      return false;
+    }
   };
   const enterVoiceMode = () => {
     state.active = true;
@@ -107,29 +182,55 @@
   };
   const exitVoiceMode = () => {
     releaseMicrophone();
+    releaseCamera();
     stopAudio();
-    state.active = false;
-    state.captionsEnabled = true;
-    state.speakerEnabled = true;
+    Object.assign(state, {
+      active: false,
+      captionsEnabled: true,
+      speakerEnabled: true,
+      cameraFacingMode: "user",
+    });
     setStatus("点击麦克风开始");
     syncVoiceUi();
   };
   const toggleMicrophone = async () => {
     if (!state.active) return;
-    if (state.stream) {
+    if (state.microphoneStream) {
       state.microphoneEnabled = !state.microphoneEnabled;
-      state.stream.getAudioTracks().forEach((track) => { track.enabled = state.microphoneEnabled; });
+      state.microphoneStream.getAudioTracks().forEach((track) => { track.enabled = state.microphoneEnabled; });
       setStatus(state.microphoneEnabled ? "正在聆听…" : "麦克风已关闭");
       syncVoiceUi();
       return;
     }
     try {
-      state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      state.microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       state.microphoneEnabled = true;
       setStatus("正在聆听…");
     } catch (error) {
       console.warn("RoboAgent microphone access failed", error);
       setStatus("无法访问麦克风，请允许浏览器访问麦克风");
+    }
+    syncVoiceUi();
+  };
+  const toggleCamera = async () => {
+    if (!state.active) return;
+    if (state.videoEnabled) {
+      releaseCamera();
+      setStatus("视频已关闭");
+    } else {
+      await startCamera(state.cameraFacingMode);
+    }
+    syncVoiceUi();
+  };
+  const switchCamera = async () => {
+    if (!state.active || !state.videoEnabled) return;
+    const previousFacingMode = state.cameraFacingMode;
+    const nextFacingMode = previousFacingMode === "user" ? "environment" : "user";
+    releaseCamera();
+    const switched = await startCamera(nextFacingMode, { reportError: false });
+    if (!switched) {
+      const restored = await startCamera(previousFacingMode, { reportError: false });
+      if (!restored) setStatus("无法切换摄像头，请检查浏览器权限");
     }
     syncVoiceUi();
   };
@@ -158,26 +259,30 @@
     syncVoiceUi();
   };
 
-  syncSidebarForViewport();
-  compact.addEventListener("change", syncSidebarForViewport);
+  collapseSidebarForCompactViewport();
+  compact.addEventListener("change", collapseSidebarForCompactViewport);
   sidebarToggle.addEventListener("click", () => {
     if (state.active && compact.matches) return;
     workspace.classList.toggle("sidebar-collapsed");
-    syncToggleIcon();
+    syncSidebarLabel();
   });
-  sessionList?.addEventListener("change", () => {
-    if (compact.matches) {
-      workspace.classList.add("sidebar-collapsed");
-      syncToggleIcon();
-    }
+  mobileSidebarClose?.addEventListener("click", () => {
+    workspace.classList.add("sidebar-collapsed");
+    syncSidebarLabel();
   });
+  sessionList?.addEventListener("change", collapseSidebarForCompactViewport);
   voiceCallButton?.addEventListener("click", enterVoiceMode);
-  controls.microphone?.addEventListener("click", toggleMicrophone);
-  controls.captions?.addEventListener("click", toggleCaptions);
-  controls.speaker?.addEventListener("click", toggleSpeaker);
+  Object.entries({
+    microphone: toggleMicrophone,
+    video: toggleCamera,
+    captions: toggleCaptions,
+    speaker: toggleSpeaker,
+  }).forEach(([name, handler]) => controls[name]?.addEventListener("click", handler));
   controls.hangup?.addEventListener("click", exitVoiceMode);
+  cameraSwitchButton?.addEventListener("click", switchCamera);
   window.addEventListener("pagehide", () => {
     releaseMicrophone();
+    releaseCamera();
     stopAudio();
   });
 }

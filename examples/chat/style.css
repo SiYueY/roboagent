@@ -142,10 +142,42 @@ main:has(#workspace),
   }
 }
 #main-area {
+  position: relative; isolation: isolate;
   display: flex; flex-direction: column;
   min-width: 0; min-height: 0;
   height: 100%; padding: 0 28px;
   overflow: hidden;
+}
+#camera-layer {
+  position: absolute; inset: 0; z-index: 0;
+  display: none; overflow: hidden; pointer-events: none;
+  background: #15171c;
+}
+#camera-video {
+  width: 100%; height: 100%; object-fit: cover;
+}
+#camera-video.is-mirrored { transform: scaleX(-1); }
+#camera-overlay {
+  position: absolute; inset: 0;
+  background: linear-gradient(to bottom, rgb(0 0 0 / 10%), rgb(0 0 0 / 8%) 42%, rgb(0 0 0 / 28%));
+}
+#main-area > :not(#camera-layer) { position: relative; z-index: 1; }
+#camera-switch-button { display: none !important; }
+#mobile-sidebar-close { display: none !important; }
+:where(#sidebar-toggle, #mobile-sidebar-close) { --action-radius: 12px; }
+:where(#voice-call-button) { --action-radius: 999px; }
+:where(#send-button, #camera-switch-button) { --action-radius: 50%; }
+:where(#sidebar-toggle, #mobile-sidebar-close, #voice-call-button, #send-button, #camera-switch-button) {
+  border-radius: var(--action-radius) !important; overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+:where(#sidebar-toggle, #mobile-sidebar-close, #voice-call-button, #send-button, #camera-switch-button):focus-within,
+:where(#sidebar-toggle, #mobile-sidebar-close, #voice-call-button, #send-button, #camera-switch-button) button:focus {
+  outline: 0 !important; box-shadow: none !important;
+}
+:where(#sidebar-toggle, #mobile-sidebar-close, #voice-call-button, #send-button, #camera-switch-button) button {
+  border-radius: var(--action-radius) !important;
+  -webkit-tap-highlight-color: transparent;
 }
 #chat-header {
   display: flex; flex: 0 0 92px;
@@ -230,10 +262,7 @@ main:has(#workspace),
   & > :where(.form, .styler),
   & > .form > .wrap,
   & #composer-actions:focus-within,
-  & #composer-actions > div,
-  & #composer-actions .wrap,
-  & #composer-actions .block,
-  & #composer-actions .form {
+  & #composer-actions :is(.block, .form, .wrap, .styler) {
     border: 0 !important; background: transparent !important;
     box-shadow: none !important;
   }
@@ -251,10 +280,6 @@ main:has(#workspace),
   & #composer-actions > *,
   & #composer-actions > .form > * {
     flex: 0 0 auto; width: auto !important; min-width: 0 !important;
-  }
-  & #composer-actions :is(.block, .form, .wrap, .styler) {
-    border-color: transparent !important; background: transparent !important;
-    box-shadow: none !important;
   }
   & #composer-model {
     display: block; flex: 0 1 auto !important; margin: 0 !important;
@@ -335,6 +360,45 @@ main:has(#workspace),
     background: transparent !important; box-shadow: none !important;
   }
 }
+#workspace.camera-enabled {
+  & #camera-layer { display: block; }
+  & #camera-switch-button {
+    position: absolute; top: 20px; right: 28px; z-index: 2;
+    display: block !important; width: 44px; min-width: 44px !important;
+    height: 44px; padding: 0 !important; border: 1px solid rgb(255 255 255 / 45%);
+    border-radius: 50%; background: rgb(17 18 22 / 45%); box-shadow: none;
+  }
+  & :where(button#camera-switch-button, #camera-switch-button button) {
+    width: 44px !important; min-width: 44px !important; height: 44px !important;
+    padding: 0 !important; border: 0 !important; border-radius: 50% !important;
+    background: transparent !important;
+  }
+  & :where(button#camera-switch-button, #camera-switch-button button)::before {
+    content: ""; display: block; width: 22px; height: 22px; margin: auto;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M7.1 7.1A7 7 0 0 1 18.4 9H16l3.5 3.5L23 9h-2.5A9 9 0 0 0 5.7 5.7L7.1 7.1zm9.8 9.8A7 7 0 0 1 5.6 15H8l-3.5-3.5L1 15h2.5a9 9 0 0 0 14.8 3.3l-1.4-1.4z'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+  & #chat-header { border-color: rgb(255 255 255 / 28%); }
+  & #chat-header #sidebar-toggle { border-color: rgb(255 255 255 / 45%); background: rgb(17 18 22 / 36%); }
+  & #chat-header :where(button#sidebar-toggle, #sidebar-toggle button)::before { filter: brightness(0) invert(1); }
+  & #conversation-title :is(h2, p),
+  & #voice-caption,
+  & #voice-status :is(.wrap, .html-container, p) { color: #fff !important; text-shadow: 0 1px 3px rgb(0 0 0 / 45%); }
+  & #chatbot .user { background: rgb(255 255 255 / 88%) !important; }
+  & #chatbot .bot {
+    margin: 6px 0; padding: 10px 12px !important; border-radius: 14px;
+    background: rgb(18 18 22 / 46%) !important; color: #fff !important;
+    text-shadow: 0 1px 2px rgb(0 0 0 / 35%);
+  }
+  & #voice-controls {
+    --voice-control-inactive-bg: rgb(18 18 22 / 44%);
+    --voice-control-inactive-color: #fff;
+    --voice-control-active-bg: rgb(255 122 24 / 90%);
+    --voice-control-active-color: #fff;
+    --voice-hangup-bg: rgb(18 18 22 / 48%);
+    --voice-hangup-color: #ff7468;
+    text-shadow: 0 1px 3px rgb(0 0 0 / 50%);
+  }
+}
 #voice-status {
   min-height: 46px;
   & :is(.wrap, .html-container, p) {
@@ -347,40 +411,66 @@ main:has(#workspace),
 #voice-controls {
   display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px 14px;
-  & > * { min-width: 0 !important; }
-  & :where(button#voice-microphone, #voice-microphone button, button#voice-video, #voice-video button, button#voice-captions, #voice-captions button, button#voice-speaker, #voice-speaker button, button#voice-hangup, #voice-hangup button, button#voice-more, #voice-more button) {
-    --voice-control-bg: #f0f0f2;
-    position: relative; display: block; width: 100% !important;
+  --voice-control-inactive-bg: #f0f0f2;
+  --voice-control-inactive-color: #55555e;
+  --voice-control-active-bg: #fff0e5;
+  --voice-control-active-color: var(--accent);
+  --voice-hangup-bg: #ececef;
+  --voice-hangup-color: #ef5645;
+  -webkit-tap-highlight-color: transparent;
+  & > *,
+  & > *:focus-within,
+  & :is(.block, .form, .wrap, .styler) {
+    min-width: 0 !important; border: 0 !important;
+    outline: 0 !important; background: transparent !important;
+    box-shadow: none !important;
+  }
+  & :is(button#voice-microphone, #voice-microphone button, button#voice-video, #voice-video button, button#voice-captions, #voice-captions button, button#voice-speaker, #voice-speaker button, button#voice-hangup, #voice-hangup button, button#voice-more, #voice-more button) {
+    --voice-control-bg: var(--voice-control-inactive-bg);
+    position: relative; isolation: isolate; display: block; width: 100% !important;
     min-height: 92px !important; padding: 75px 0 0 !important;
-    border: 0 !important; background: radial-gradient(circle 32px at 50% 33px, var(--voice-control-bg) 98%, transparent 100%) !important;
-    box-shadow: none !important; color: #55555e !important;
+    border: 0 !important; background: transparent !important;
+    box-shadow: none !important; color: var(--voice-control-inactive-color) !important;
     font-size: 12px !important; line-height: 1 !important;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+    &:focus { outline: 0 !important; box-shadow: none !important; }
+    &::before {
+      content: ""; position: absolute; z-index: 1; top: 19px; left: calc(50% - 14px);
+      width: 28px; height: 28px; background: currentcolor;
+    }
+    &::after {
+      content: ""; position: absolute; z-index: 0; top: 1px; left: calc(50% - 32px);
+      width: 64px; height: 64px; border-radius: 50%; background: var(--voice-control-bg);
+    }
+    &:focus-visible::after {
+      top: 0; left: calc(50% - 33px); width: 66px; height: 66px;
+      border: 2px solid currentcolor; box-sizing: border-box;
+    }
   }
-  & :where(button#voice-microphone, #voice-microphone button, button#voice-video, #voice-video button, button#voice-captions, #voice-captions button, button#voice-speaker, #voice-speaker button, button#voice-hangup, #voice-hangup button, button#voice-more, #voice-more button)::before {
-    content: ""; position: absolute; top: 19px; left: calc(50% - 14px);
-    width: 28px; height: 28px; background: currentcolor;
+  & :is(
+    button#voice-microphone.is-active, button#voice-video.is-active, button#voice-captions.is-active, button#voice-speaker.is-active,
+    #voice-microphone.is-active button, #voice-video.is-active button, #voice-captions.is-active button, #voice-speaker.is-active button
+  ) {
+    --voice-control-bg: var(--voice-control-active-bg); color: var(--voice-control-active-color) !important;
   }
-  & .is-active :where(button#voice-microphone, button#voice-captions, button#voice-speaker),
-  & :where(button#voice-microphone, button#voice-captions, button#voice-speaker).is-active,
-  & :where(#voice-microphone, #voice-captions, #voice-speaker).is-active button {
-    --voice-control-bg: #fff0e5; color: var(--accent) !important;
+  & :is(button#voice-more, #voice-more button) { opacity: 0.42; cursor: not-allowed; }
+  & :is(button#voice-hangup, #voice-hangup button) {
+    --voice-control-bg: var(--voice-hangup-bg); color: var(--voice-hangup-color) !important;
   }
-  & :where(button#voice-video, #voice-video button, button#voice-more, #voice-more button) { opacity: 0.42; cursor: not-allowed; }
-  & :where(button#voice-hangup, #voice-hangup button) { --voice-control-bg: #ececef; color: #ef5645 !important; }
-  & :where(button#voice-microphone, #voice-microphone button)::before {
+  & :is(button#voice-microphone, #voice-microphone button)::before {
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3m5.3-3a5.3 5.3 0 0 1-10.6 0H5a7 7 0 0 0 6 6.9V21H8v2h8v-2h-3v-3.1A7 7 0 0 0 19 11z'/%3E%3C/svg%3E") center / contain no-repeat;
   }
-  & :where(button#voice-video, #voice-video button)::before {
+  & :is(button#voice-video, #voice-video button)::before {
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M4 6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2.2l4 3V5.2l-4 3V8.2l-4-3V8a2 2 0 0 0-2-2z'/%3E%3C/svg%3E") center / contain no-repeat;
   }
-  & :where(button#voice-captions, #voice-captions button)::before { content: "字"; background: transparent; font-size: 26px; line-height: 28px; }
-  & :where(button#voice-speaker, #voice-speaker button)::before {
+  & :is(button#voice-captions, #voice-captions button)::before { content: "字"; background: transparent; font-size: 26px; line-height: 28px; }
+  & :is(button#voice-speaker, #voice-speaker button)::before {
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M3 9v6h4l5 4V5L7 9zm13.5 3a4.5 4.5 0 0 0-2.5-4v2.1a2.5 2.5 0 0 1 0 3.8V16a4.5 4.5 0 0 0 2.5-4m0-8.5v2.1a7 7 0 0 1 0 12.8v2.1a9 9 0 0 0 0-17'/%3E%3C/svg%3E") center / contain no-repeat;
   }
-  & :where(button#voice-hangup, #voice-hangup button)::before {
+  & :is(button#voice-hangup, #voice-hangup button)::before {
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M12 8a9 9 0 0 0-8.5 6v4h4v-2.7h2V18h5v-2.7h2V18h4v-4A9 9 0 0 0 12 8'/%3E%3C/svg%3E") center / contain no-repeat;
   }
-  & :where(button#voice-more, #voice-more button)::before {
+  & :is(button#voice-more, #voice-more button)::before {
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle fill='black' cx='5' cy='12' r='2'/%3E%3Ccircle fill='black' cx='12' cy='12' r='2'/%3E%3Ccircle fill='black' cx='19' cy='12' r='2'/%3E%3C/svg%3E") center / contain no-repeat;
   }
 }
@@ -396,9 +486,21 @@ footer { display: none !important; }
     height: 100%; padding: 18px 14px 14px;
     box-shadow: 18px 0 35px rgb(22 22 28 / 14%);
   }
-  #workspace:not(.sidebar-collapsed) #sidebar-toggle {
+  #workspace:not(.sidebar-collapsed) #mobile-sidebar-close {
     position: fixed; top: 14px;
     left: calc(min(86vw, 320px) - 52px); z-index: 11;
+    display: block !important; width: 38px; min-width: 38px !important;
+    height: 38px; padding: 0 !important; border: 1px solid var(--muted-border);
+    border-radius: 12px; background: var(--panel-bg); box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
+  }
+  #workspace:not(.sidebar-collapsed) :where(button#mobile-sidebar-close, #mobile-sidebar-close button) {
+    width: 38px !important; min-width: 38px !important; height: 38px !important;
+    padding: 0 !important; border: 0 !important; border-radius: 12px !important;
+    background: transparent !important;
+  }
+  #workspace:not(.sidebar-collapsed) :where(button#mobile-sidebar-close, #mobile-sidebar-close button)::before {
+    content: ""; display: block; width: 18px; height: 18px; margin: auto;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2355555e' d='m15 5-7 7 7 7 1.4-1.4-5.6-5.6 5.6-5.6z'/%3E%3C/svg%3E") center / contain no-repeat;
   }
   #sidebar #brand { margin-bottom: 16px; }
   #sidebar #new-chat { margin-bottom: 10px; }
@@ -422,6 +524,9 @@ footer { display: none !important; }
       padding: 10px 12px max(14px, env(safe-area-inset-bottom));
       border-radius: 0;
     }
+  }
+  #workspace.camera-enabled #camera-switch-button {
+    top: max(14px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right));
   }
   #voice-controls { gap: 18px 10px; }
 }

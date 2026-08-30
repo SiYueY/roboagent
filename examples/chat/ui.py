@@ -249,6 +249,14 @@ def create_demo(agent: Agent) -> gr.Blocks:
                     )
                     with gr.Column(scale=1, min_width=0):
                         title = gr.Markdown(header_text(initial_conversation), elem_id="conversation-title")
+                gr.Button(
+                    value="",
+                    variant="secondary",
+                    size="sm",
+                    scale=0,
+                    min_width=44,
+                    elem_id="camera-switch-button",
+                )
                 with gr.Column(elem_id="conversation"):
                     chatbot = gr.Chatbot(
                         type="messages",
@@ -303,11 +311,19 @@ def create_demo(agent: Agent) -> gr.Blocks:
                         )
                         with gr.Row(elem_id="voice-controls", equal_height=True):
                             gr.Button("麦克风", scale=1, min_width=0, elem_id="voice-microphone")
-                            gr.Button("视频", scale=1, min_width=0, interactive=False, elem_id="voice-video")
+                            gr.Button("视频", scale=1, min_width=0, elem_id="voice-video")
                             gr.Button("字幕", scale=1, min_width=0, elem_id="voice-captions")
                             gr.Button("扬声器", scale=1, min_width=0, elem_id="voice-speaker")
                             gr.Button("挂断", scale=1, min_width=0, elem_id="voice-hangup")
                             gr.Button("更多", scale=1, min_width=0, interactive=False, elem_id="voice-more")
+            gr.Button(
+                value="",
+                variant="secondary",
+                size="sm",
+                scale=0,
+                min_width=38,
+                elem_id="mobile-sidebar-close",
+            )
 
         chat_inputs: Sequence[gr.components.Component] = [textbox, chatbot, page_state]
         chat_outputs: Sequence[gr.components.Component] = [chatbot, page_state, textbox, session_list, title]
