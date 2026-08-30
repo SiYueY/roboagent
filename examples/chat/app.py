@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CERTIFICATE_PATH = Path(__file__).with_name("certs") / "roboagent-cert.pem"
+PRIVATE_KEY_PATH = Path(__file__).with_name("certs") / "roboagent-key.pem"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -27,6 +29,17 @@ def create_agent() -> Agent:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     demo = create_demo(create_agent())
+    tls_options: dict[str, object] = {}
+    if CERTIFICATE_PATH.is_file() and PRIVATE_KEY_PATH.is_file():
+        tls_options = {
+            "ssl_certfile": str(CERTIFICATE_PATH),
+            "ssl_keyfile": str(PRIVATE_KEY_PATH),
+            "ssl_verify": False,
+        }
+        logging.info("Starting RoboAgent chat with the local HTTPS certificate.")
+    elif CERTIFICATE_PATH.exists() or PRIVATE_KEY_PATH.exists():
+        logging.warning("Both local HTTPS certificate files are required; starting with HTTP instead.")
+
     # Gradio's default Ctrl+C handler joins the server thread while active
     # streaming requests finish. For this local development server, force the
     # Uvicorn shutdown path so Ctrl+C returns promptly instead.
@@ -34,6 +47,7 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=7860,
         prevent_thread_lock=True,
+        **tls_options,
     )
     if demo.server is not None:
         demo.server.force_exit = True

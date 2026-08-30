@@ -42,12 +42,16 @@ class ChatExampleTests(unittest.TestCase):
         spec.loader.exec_module(module)
         cls.app = module
 
-    def test_create_demo_has_session_sidebar_and_external_stylesheet(self) -> None:
+    def test_create_demo_has_session_sidebar_voice_ui_and_external_assets(self) -> None:
         demo = self.app.create_demo(Agent(ScriptedModel()))
         self.assertIsInstance(demo, self.app.gr.Blocks)
         stylesheet = self.app.STYLE_PATH.read_text()
+        frontend = self.app.FRONTEND_PATH.read_text()
         self.assertIn("#session-list", stylesheet)
         self.assertIn("#composer", stylesheet)
+        self.assertIn("#voice-panel", stylesheet)
+        self.assertIn("#voice-controls", stylesheet)
+        self.assertIn("voice-mode", stylesheet)
         self.assertIn("#sidebar-toggle", stylesheet)
         self.assertIn("#message-input", stylesheet)
         self.assertIn("sidebar-collapsed", stylesheet)
@@ -60,7 +64,11 @@ class ChatExampleTests(unittest.TestCase):
         self.assertIn("height: 36px !important", stylesheet)
         self.assertIn("min-height: 72px", stylesheet)
         self.assertIn("::-webkit-scrollbar-button", stylesheet)
-        self.assertIn("#composer-actions :not(#send-button)", stylesheet)
+        self.assertIn("#composer-actions :is(.block, .form, .wrap, .styler)", stylesheet)
+        self.assertIn("getUserMedia", frontend)
+        self.assertIn("AudioContext", frontend)
+        self.assertIn("voice-call-button", frontend)
+        self.assertIn("sidebar-collapsed", frontend)
 
     def test_layout_uses_fixed_button_scales_and_client_sidebar_state(self) -> None:
         source = inspect.getsource(self.app.create_demo)
@@ -71,20 +79,32 @@ class ChatExampleTests(unittest.TestCase):
         self.assertIn("max_lines=8", source)
         self.assertNotIn("icon=", source)
         self.assertNotIn("value=None", source)
-        self.assertIn("CHAT_LAYOUT_JS", source)
-        self.assertIn("window.matchMedia", self.app.CHAT_LAYOUT_JS)
-        self.assertIn("sidebar-collapsed", self.app.CHAT_LAYOUT_JS)
-        self.assertIn("syncToggleIcon", self.app.CHAT_LAYOUT_JS)
+        self.assertIn("FRONTEND_PATH.read_text", source)
+        self.assertNotIn("CHAT_LAYOUT_JS", source)
+        self.assertIn("voice-call-button", source)
+        self.assertNotIn("gr.HTML", source)
+        self.assertNotIn("<button", source)
+        self.assertNotIn("<svg", source)
+        self.assertIn("voice-panel", source)
+        self.assertIn("voice-microphone", source)
         self.assertIn("send_button.click(chat", source)
         self.assertIn("textbox.submit(chat", source)
         self.assertNotIn("async def send", source)
         self.assertNotIn("container=False,\n                    scale=1,", source)
 
     def test_example_server_uses_fast_interrupt_shutdown(self) -> None:
-        source = (Path(__file__).parents[2] / "examples" / "chat" / "app.py").read_text()
+        chat_directory = Path(__file__).parents[2] / "examples" / "chat"
+        source = (chat_directory / "app.py").read_text()
+        certificate_script = (chat_directory / "generate_cert.sh").read_text()
         self.assertIn("prevent_thread_lock=True", source)
         self.assertIn("demo.server.force_exit = True", source)
         self.assertIn("demo.block_thread()", source)
+        self.assertIn("ssl_certfile", source)
+        self.assertIn("ssl_keyfile", source)
+        self.assertIn('"ssl_verify": False', source)
+        self.assertIn("CERTIFICATE_PATH.is_file()", source)
+        self.assertIn("subjectAltName=IP:$lan_ip", certificate_script)
+        self.assertIn("refusing to overwrite", certificate_script)
 
     def test_title_is_first_message_and_is_truncated(self) -> None:
         self.assertEqual(self.app.conversation_title("  一个   标题 "), "一个 标题")

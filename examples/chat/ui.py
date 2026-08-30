@@ -14,6 +14,7 @@ from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STYLE_PATH = Path(__file__).with_name("style.css")
+FRONTEND_PATH = Path(__file__).with_name("frontend.js")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -31,43 +32,6 @@ TITLE_LIMIT = 24
 
 ChatHistory = list[dict[str, str]]
 ChatViewUpdate = tuple[ChatHistory, "ChatPageState", str, object, str]
-
-CHAT_LAYOUT_JS = """
-() => {
-  const workspace = document.getElementById("workspace");
-  const toggle = document.getElementById("sidebar-toggle");
-  const sessionList = document.getElementById("session-list");
-  if (!workspace || !toggle || workspace.dataset.chatLayoutReady) return;
-
-  workspace.dataset.chatLayoutReady = "true";
-  const compact = window.matchMedia("(max-width: 760px)");
-  const toggleButton = toggle.querySelector("button");
-  const syncToggleIcon = () => {
-    const collapsed = workspace.classList.contains("sidebar-collapsed");
-    const label = collapsed ? "展开侧边栏" : "隐藏侧边栏";
-    toggleButton?.setAttribute("aria-label", label);
-    toggleButton?.setAttribute("title", label);
-  };
-  const syncForViewport = () => {
-    workspace.classList.toggle("sidebar-collapsed", compact.matches);
-    syncToggleIcon();
-  };
-
-  syncForViewport();
-  compact.addEventListener("change", syncForViewport);
-  toggle.addEventListener("click", () => {
-    workspace.classList.toggle("sidebar-collapsed");
-    syncToggleIcon();
-  });
-  sessionList.addEventListener("change", () => {
-    if (compact.matches) {
-      workspace.classList.add("sidebar-collapsed");
-      syncToggleIcon();
-    }
-  });
-}
-"""
-
 
 @dataclass(slots=True)
 class BrowserConversation:
@@ -254,7 +218,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
         title="RoboAgent",
         theme=theme,
         css_paths=[STYLE_PATH],
-        js=CHAT_LAYOUT_JS,
+        js=FRONTEND_PATH.read_text(encoding="utf-8"),
         fill_height=True,
         fill_width=True,
     ) as demo:
@@ -304,11 +268,19 @@ def create_demo(agent: Agent) -> gr.Blocks:
                             max_lines=8,
                             elem_id="message-input",
                         )
-                        with gr.Column(elem_id="composer-actions", scale=1, min_width=0):
-                            gr.HTML(
-                                '<span class="composer-model-label">Qwen3.7-Flash</span>',
-                                padding=False,
+                        with gr.Row(elem_id="composer-actions", equal_height=True):
+                            gr.Markdown(
+                                "Qwen3.7-Flash",
                                 elem_id="composer-model",
+                                container=False,
+                            )
+                            gr.Button(
+                                "语音通话",
+                                variant="secondary",
+                                size="sm",
+                                scale=0,
+                                min_width=0,
+                                elem_id="voice-call-button",
                             )
                             send_button = gr.Button(
                                 value="",
@@ -318,6 +290,24 @@ def create_demo(agent: Agent) -> gr.Blocks:
                                 min_width=44,
                                 elem_id="send-button",
                             )
+                    gr.Markdown(
+                        "帮我检查机器人的当前状态……",
+                        elem_id="voice-caption",
+                        container=False,
+                    )
+                    with gr.Group(elem_id="voice-panel"):
+                        gr.Markdown(
+                            "点击麦克风开始",
+                            elem_id="voice-status",
+                            container=False,
+                        )
+                        with gr.Row(elem_id="voice-controls", equal_height=True):
+                            gr.Button("麦克风", scale=1, min_width=0, elem_id="voice-microphone")
+                            gr.Button("视频", scale=1, min_width=0, interactive=False, elem_id="voice-video")
+                            gr.Button("字幕", scale=1, min_width=0, elem_id="voice-captions")
+                            gr.Button("扬声器", scale=1, min_width=0, elem_id="voice-speaker")
+                            gr.Button("挂断", scale=1, min_width=0, elem_id="voice-hangup")
+                            gr.Button("更多", scale=1, min_width=0, interactive=False, elem_id="voice-more")
 
         chat_inputs: Sequence[gr.components.Component] = [textbox, chatbot, page_state]
         chat_outputs: Sequence[gr.components.Component] = [chatbot, page_state, textbox, session_list, title]
