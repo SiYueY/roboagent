@@ -64,6 +64,7 @@ class BrowserConversation:
     history: ChatHistory = field(default_factory=list)
     title: str = DEFAULT_TITLE
     updated_at: float = field(default_factory=time)
+    voice_token: str = ""
 
 
 @dataclass(slots=True)
@@ -74,14 +75,17 @@ class ChatPageState:
     active_id: str
 
 
-def new_conversation(agent: Agent) -> BrowserConversation:
+def new_conversation(agent: Agent, speech_registry=None) -> BrowserConversation:
     """Create an empty conversation with its own AgentSession."""
-    return BrowserConversation(id=uuid4().hex, session=agent.new_session())
+    conversation = BrowserConversation(id=uuid4().hex, session=agent.new_session())
+    if speech_registry is not None:
+        conversation.voice_token = speech_registry.register(conversation)
+    return conversation
 
 
-def create_page_state(agent: Agent) -> ChatPageState:
+def create_page_state(agent: Agent, speech_registry=None) -> ChatPageState:
     """Create the initial browser-local chat page state."""
-    conversation = new_conversation(agent)
+    conversation = new_conversation(agent, speech_registry)
     return ChatPageState(conversations=[conversation], active_id=conversation.id)
 
 
@@ -140,7 +144,7 @@ def view_update(conversation: BrowserConversation, state: ChatPageState) -> Chat
     return list(conversation.history), state, "", session_list_update(state), header_text(conversation)
 
 
-def enforce_conversation_limit(state: ChatPageState) -> None:
+def enforce_conversation_limit(state: ChatPageState, speech_registry=None) -> None:
     """Remove the oldest non-active conversations when the page reaches its cap."""
     while len(state.conversations) > MAX_CONVERSATIONS:
         candidates = [item for item in state.conversations if item.id != state.active_id]
@@ -148,17 +152,20 @@ def enforce_conversation_limit(state: ChatPageState) -> None:
             return
         stale = min(candidates, key=lambda item: item.updated_at)
         state.conversations.remove(stale)
+        if speech_registry is not None and stale.voice_token:
+            speech_registry.discard(stale.voice_token)
 
 
 def create_conversation(
     state: ChatPageState,
     agent: Agent,
+    speech_registry=None,
 ) -> ChatViewUpdate:
     """Add and activate a fresh page-local conversation."""
-    conversation = new_conversation(agent)
+    conversation = new_conversation(agent, speech_registry)
     state.conversations.append(conversation)
     state.active_id = conversation.id
-    enforce_conversation_limit(state)
+    enforce_conversation_limit(state, speech_registry)
     return view_update(conversation, state)
 
 
@@ -230,9 +237,9 @@ async def chat(
         yield view_update(conversation, state)
 
 
-def create_demo(agent: Agent) -> gr.Blocks:
+def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
     """Build the browser-local multi-session chat page."""
-    initial_state = create_page_state(agent)
+    initial_state = create_page_state(agent, speech_registry)
     initial_conversation = active_conversation(initial_state)
     with gr.Blocks(
         title="RoboAgent",
@@ -240,6 +247,14 @@ def create_demo(agent: Agent) -> gr.Blocks:
         fill_width=True,
     ) as demo:
         page_state = gr.State(value=initial_state)
+        # Keep the token component rendered (but CSS-hidden): ``visible=False``
+        # removes it from Gradio's DOM before the browser can open WebSocket.
+        gr.Textbox(
+            value=initial_conversation.voice_token,
+            elem_id="voice-token",
+            container=False,
+            show_label=False,
+        )
         with gr.Row(elem_id="workspace", equal_height=False):
             with gr.Column(elem_id="sidebar", scale=0, min_width=260):
                 gr.Markdown("# RoboAgent\n轻量级机器人智能助手", elem_id="brand")
@@ -252,7 +267,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
                     min_width=0,
                     elem_id="session-list",
                 )
-                gr.Markdown("`Qwen3.7-Flash`", elem_id="model-name")
+                gr.Markdown("Qwen3.7-Flash", elem_id="model-name")
 
             with gr.Column(elem_id="main-area", scale=1, min_width=0):
                 with gr.Row(elem_id="chat-header", equal_height=True):
@@ -346,7 +361,7 @@ def create_demo(agent: Agent) -> gr.Blocks:
         send_button.click(chat, inputs=chat_inputs, outputs=chat_outputs)
         textbox.submit(chat, inputs=chat_inputs, outputs=chat_outputs)
         new_button.click(
-            lambda state: create_conversation(state, agent),
+            lambda state: create_conversation(state, agent, speech_registry),
             inputs=page_state,
             outputs=chat_outputs,
         )

@@ -226,8 +226,17 @@ main:has(#workspace),
   flex: 1 1 auto; min-height: 0;
   height: auto !important; border: 0 !important;
   border-radius: 0 !important; background: transparent !important;
+  --block-background-fill: transparent;
+  --block-background-fill-dark: transparent;
+  --panel-background-fill: transparent;
+  --background-fill-primary: transparent;
+  --background-fill-secondary: transparent;
   & .wrap,
   & > .wrap,
+  & .empty,
+  & .placeholder,
+  & .message-wrap,
+  & .bubble-wrap,
   & .bot {
     border: 0 !important; background: transparent !important;
     box-shadow: none !important;
@@ -245,6 +254,12 @@ main:has(#workspace),
     display: none; width: 0;
     height: 0;
   }
+}
+#chatbot > :is(.block, .form, .wrap, .styler),
+#chatbot :is([data-testid="chatbot"], [data-testid="empty"], .empty, .placeholder) {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
 }
 /* Text composer.  The outer component is a Gradio 6 Column, not Group. */
 #composer {
@@ -299,7 +314,10 @@ main:has(#workspace),
     color: #777780; font-size: 12px; overflow: hidden;
     text-overflow: ellipsis;
   }
-  & #composer-model p { margin: 0 !important; }
+  & #composer-model :is(p, .prose, .markdown) {
+    margin: 0 !important; color: #55555e !important;
+    font-weight: 500 !important;
+  }
   & #voice-call-button {
     flex: 0 0 auto !important; width: auto !important;
     min-width: 0 !important; margin: 0 !important;
@@ -349,12 +367,21 @@ main:has(#workspace),
 #voice-panel {
   display: none !important;
 }
+
+#voice-token { display: none; }
 #workspace.voice-mode {
   & #composer { display: none !important; }
+  /* Voice captions and controls share a fixed-height conversation column.
+     The caption is the only item allowed to grow/scroll, so a long streamed
+     response can never push hang-up and microphone controls below the viewport. */
+  & #conversation { min-height: 0; overflow: hidden; }
+  & #chatbot { display: none !important; }
   & #voice-caption.is-visible {
-    display: block !important; flex: 0 0 auto;
-    margin: 10px 0 0; color: #777780;
-    font-size: 14px;
+    display: block !important; flex: 1 1 auto; min-height: 0;
+    margin: 10px 0 0; padding-right: 8px;
+    overflow: auto; overscroll-behavior: contain;
+    color: #777780; font-size: 14px; line-height: 1.65;
+    overflow-wrap: anywhere; scrollbar-width: thin;
   }
   & #voice-caption :is(.wrap, .html-container, p) {
     margin: 0 !important; padding: 0 !important;
@@ -362,8 +389,11 @@ main:has(#workspace),
     box-shadow: none !important;
   }
   & #voice-panel {
-    display: block !important; flex: 0 0 auto;
-    margin: 12px 0 24px; padding: 14px 18px 18px;
+    display: block !important; flex: 0 0 auto; min-height: 0;
+    /* Before microphone activation the caption is hidden. Auto top margin
+       preserves the panel's bottom placement in that empty state; once a
+       caption is visible its flex area consumes the available space instead. */
+    margin: auto 0 24px; padding: 14px 18px 18px;
     border: 0; border-radius: 0;
     background: transparent; box-shadow: none;
   }
@@ -535,7 +565,7 @@ footer { display: none !important; }
   #workspace.voice-mode {
     & #sidebar-toggle { display: none !important; }
     & #voice-panel {
-      min-height: 260px; margin: 8px 0 10px;
+      min-height: 260px; margin: auto 0 10px;
       padding: 10px 12px max(14px, env(safe-area-inset-bottom));
       border-radius: 0;
     }

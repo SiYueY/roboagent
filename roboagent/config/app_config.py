@@ -15,6 +15,7 @@ from roboagent.config.subagent_config import SubagentConfig
 from roboagent.model.providers import ProviderModelConfig
 from roboagent.model.registry import ModelRegistry
 from roboagent.skill import SkillManager
+from roboagent.speech.config import SpeechConfig
 
 
 class AppConfig(BaseModel):
@@ -26,6 +27,7 @@ class AppConfig(BaseModel):
     models: list[ProviderModelConfig] = Field(default_factory=list, description="Provider-backed chat models.")
     skills: SkillConfig = Field(default_factory=SkillConfig, description="Skill subsystem configuration.")
     subagents: list[SubagentConfig] = Field(default_factory=list, description="Configured sub-agent profiles.")
+    speech: SpeechConfig | None = Field(default=None, description="Optional real-time speech configuration.")
 
     @model_validator(mode="after")
     def validate_uniqueness(self) -> AppConfig:

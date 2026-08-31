@@ -138,6 +138,9 @@ celerybeat.pid
 .env
 config.yaml
 examples/chat/certs/
+roboagent/speech/audio/data/silero_vad.onnx
+roboagent/speech/audio/data/.silero_vad.onnx.sha256
+:memory:.ses
 .envrc
 .venv
 env/

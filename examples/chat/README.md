@@ -20,12 +20,12 @@ Media API 行为；它通过 Gradio 的页面 `<head>` 在组件挂载后初始�
 ### 语音通话模式
 
 输入区的“语音通话”会在同一会话中切换到底部语音控制面板，不会创建新页面或新会话。麦克风
-按钮会请求浏览器音频权限，字幕只显示临时测试文本；扬声器使用浏览器生成的短提示音验证静音与
-恢复。挂断会释放麦克风与音频资源并恢复文本输入区。
+按钮会请求浏览器音频权限；浏览器先进行低通重采样，再用二进制帧发送 PCM。服务端将同一份
+降噪音频供 VAD 和 ASR 使用。挂断会释放麦克风与音频资源并恢复文本输入区。
 
-该模式仅验证浏览器端 UI 和 Media API：不会把语音或视频发送给 Agent。摄像头画面只在当前
-浏览器中本地预览，不上传、不录制，也不包含 ASR、TTS、WebSocket 或 WebRTC。可从语音面板
-开关摄像头，并在视频开启时使用右上角按钮切换前后摄像头。
+该模式使用同源 WebSocket 发送 16 kHz PCM16 麦克风音频，经通义实时 ASR、当前对话的
+`AgentSession` 与通义实时 TTS 后回放 24 kHz PCM16 音频。语音转写和回答会写入当前文字会话；
+用户在播放期间再次说话会取消未完成的回答与播放。摄像头画面仍只在浏览器本地预览，不上传或录制。
 
 ## 配置
 
@@ -49,8 +49,41 @@ DASHSCOPE_API_KEY=your-dashscope-api-key
 ## 启动
 
 ```bash
-uv sync --extra gradio
+uv sync --extra gradio --extra speech
+bash scripts/deploy_silero_vad.sh
 uv run python examples/chat/app.py
+```
+
+`speech` extra 同时安装通义 SDK、RNNoise、SOXR、ONNX Runtime 和 Uvicorn 的 WebSocket 支持；若服务日志出现
+`No supported WebSocket library detected`，请重新执行上面的 `uv sync` 命令后再启动。
+
+默认 `audio_filter.provider: rnnoise` 会在服务端执行降噪；`vad.provider: silero` 使用本地 ONNX
+模型。将 Silero 模型放在 `roboagent/speech/audio/data/silero_vad.onnx`，或在配置中设置
+`speech.vad.model_path`（也可使用 `ROBOAGENT_SILERO_VAD_MODEL`）。模型不可用时会记录明确警告，并
+优先使用 RNNoise 产生的人声概率、再退化到能量门限；在生产环境可设置 `speech.vad.required: true`
+禁止该退化。
+
+`scripts/deploy_silero_vad.sh` 默认从 Silero 官方 `master` 下载 16 kHz ONNX 模型，并以原子方式
+写入上述默认路径；已有有效模型不会被覆盖，使用 `--force` 才会刷新。脚本会保存 SHA-256 到本地
+清单，便于审计，但该值不是固定版本信任锚，因为模型来源按 `master` 更新。可用
+`bash scripts/deploy_silero_vad.sh --verify-only` 仅校验现有模型。
+
+语音回答默认在累计 16 个字符后即提交首个 TTS 片段，后续以 32 个字符或句末优先断句；同一通话
+会复用通义实时 TTS 连接，以缩短首音延迟。可在 `speech.tts.first_chunk_chars` 与
+`speech.tts.chunk_chars` 调整这两个值（前者不得大于后者）。
+`speech.tts.volume` 默认是 `100`；若要降低播放音量，请优先调低该值而不是放大浏览器 PCM。
+
+播放期间的打断默认需要连续 400 ms 的有效语音（置信度至少 0.60、输入音量至少 0.004），以兼顾
+正常说话打断和扬声器回声抑制；可通过 `speech.turn.barge_in_*` 三项按设备调整。
+
+资源受限环境可设置 `audio_filter.provider: passthrough` 和 `vad.provider: energy`。不要重新打开
+`autoGainControl`：它常会在静音间隙放大风扇和机械噪声。Krisp 属于独立厂商 SDK/模型接入，当前
+配置位保留但不会随 `speech` extra 安装。
+
+如果 `7860` 已被其他本地服务占用，可改用其他端口：
+
+```bash
+ROBOAGENT_CHAT_PORT=7861 uv run python examples/chat/app.py
 ```
 
 如需使用其他配置文件，设置 `ROBOAGENT_CONFIG_PATH`；RoboAgent 会读取该

@@ -1,0 +1,16 @@
+"""Framework-independent speech transport protocol."""
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Protocol
+
+from ..event import SpeechEvent
+from ..types import AudioChunk
+
+
+class SpeechTransport(Protocol):
+    def receive_audio(self) -> AsyncIterator[AudioChunk]: ...
+    async def send_audio(self, audio: AudioChunk) -> None: ...
+    async def send_event(self, event: SpeechEvent) -> None: ...
+    async def clear_output(self) -> None: ...
+    async def close(self) -> None: ...

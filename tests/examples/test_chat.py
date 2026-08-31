@@ -56,6 +56,7 @@ class ChatExampleTests(unittest.TestCase):
 
     def test_gradio6_layout_and_browser_media_contracts(self) -> None:
         demo = self.app.create_demo(Agent(ScriptedModel()))
+        self.addCleanup(demo.close)
         self.assertIsInstance(demo, self.app.gr.Blocks)
         config = demo.get_config_file()
         stylesheet = self.app.STYLE_PATH.read_text()
@@ -91,6 +92,7 @@ class ChatExampleTests(unittest.TestCase):
             "#sidebar",
             "#composer",
             "#voice-panel",
+            "#voice-caption.is-visible",
             "#voice-controls",
             "#camera-layer",
             "#camera-switch-button",
@@ -105,6 +107,8 @@ class ChatExampleTests(unittest.TestCase):
             "camera-enabled",
             "label.show_textbox_border",
             "-webkit-tap-highlight-color: transparent",
+            "overscroll-behavior: contain",
+            "margin: auto 0 24px",
         ):
             self.assertIn(contract, stylesheet)
 
@@ -122,10 +126,24 @@ class ChatExampleTests(unittest.TestCase):
             "releaseStream",
             "window.addEventListener(\"pagehide\"",
             "AudioContext",
+            "ensureAudioOutput",
+            "TTS_OUTPUT_GAIN = 1.8",
+            "AUDIO_WORKLET_SOURCE",
+            "URL.createObjectURL",
+            'payload.type === "audio.completed"',
+            'payload.type === "response.delta"',
+            "state.responseCaption += payload.delta",
         ):
             self.assertIn(contract, frontend)
         for action in self.BROWSER_ACTIONS:
             self.assertIn(action, frontend)
+        self.assertNotIn('"/roboagent-audio-worklet.js"', frontend)
+        self.assertNotIn("playTone", frontend)
+        self.assertNotIn("tonePlayed", frontend)
+        self.assertEqual(
+            [path.name for path in self.app.FRONTEND_PATH.parent.glob("*.js")],
+            ["frontend.js"],
+        )
 
     def test_layout_uses_gradio6_components_and_browser_action_helper(self) -> None:
         source = inspect.getsource(self.app.create_demo)
@@ -160,13 +178,19 @@ class ChatExampleTests(unittest.TestCase):
         self.assertNotIn("async def send", source)
         self.assertNotIn("container=False,\n                    scale=1,", source)
 
-    def test_example_server_uses_fast_interrupt_shutdown(self) -> None:
+    def test_example_server_uses_mounted_gradio_and_has_no_legacy_worklet_route(self) -> None:
         chat_directory = Path(__file__).parents[2] / "examples" / "chat"
         source = (chat_directory / "app.py").read_text()
         certificate_script = (chat_directory / "generate_cert.sh").read_text()
-        self.assertIn("prevent_thread_lock=True", source)
-        self.assertIn("demo.server.force_exit = True", source)
-        self.assertIn("demo.block_thread()", source)
+        self.assertIn("gr.mount_gradio_app", source)
+        self.assertIn("uvicorn.run", source)
+        self.assertNotIn("prevent_thread_lock", source)
+        self.assertNotIn("demo.server.force_exit", source)
+        self.assertNotIn("demo.block_thread", source)
+        self.assertNotIn("FileResponse", source)
+        self.assertNotIn("audio-worklet.js", source)
+        self.assertNotIn("def create_agent", source)
+        self.assertFalse((chat_directory / "audio-worklet.js").exists())
         self.assertIn("chat_launch_options", source)
         self.assertIn("ssl_certfile", source)
         self.assertIn("ssl_keyfile", source)

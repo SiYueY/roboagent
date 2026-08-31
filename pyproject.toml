@@ -15,6 +15,16 @@ dependencies = [
 gradio = [
     "gradio>=6,<7",
 ]
+speech = [
+    "dashscope>=1.25.6",
+    "av<17.1.0", # pyrnnoise 0.4.x is not compatible with PyAV 17.1+
+    "audiolab==0.5.1", # compatible Graph API used by pyrnnoise 0.4.x
+    "numpy>=1.26",
+    "onnxruntime>=1.18",
+    "pyrnnoise>=0.4",
+    "soxr>=0.5",
+    "uvicorn[standard]>=0.30",
+]
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

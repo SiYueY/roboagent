@@ -1,0 +1,19 @@
+"""Speech recognition contracts."""
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Protocol
+
+from ..types import AudioChunk, Transcript
+
+
+class ASRSession(Protocol):
+    async def start(self) -> None: ...
+    async def write(self, audio: AudioChunk) -> None: ...
+    async def commit(self) -> None: ...
+    def events(self) -> AsyncIterator[Transcript]: ...
+    async def close(self) -> None: ...
+
+
+class ASR(Protocol):
+    def create_session(self) -> ASRSession: ...

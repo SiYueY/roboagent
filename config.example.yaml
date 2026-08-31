@@ -8,3 +8,40 @@ models:
       model: qwen3.7-flash
       dashscope_api_key: ${DASHSCOPE_API_KEY}
 skills: {sources: []}
+speech:
+  asr:
+    provider: dashscope
+    model: qwen-audio-3.0-asr-flash-streaming
+    dashscope_api_key: ${DASHSCOPE_API_KEY}
+    language_hints: [zh]
+    silence_ms: 1500
+    speech_noise_threshold: 0.2
+    heartbeat: true
+  tts:
+    provider: dashscope
+    model: qwen3-tts-flash-realtime
+    voice: Cherry
+    dashscope_api_key: ${DASHSCOPE_API_KEY}
+    volume: 100
+    # Start speech early, then prefer natural sentence boundaries.
+    first_chunk_chars: 16
+    chunk_chars: 32
+  audio_filter:
+    provider: rnnoise
+    required: false
+    resampler_quality: QQ
+  vad:
+    provider: silero
+    confidence: 0.5
+    min_volume: 0.003
+    start_ms: 160
+    stop_ms: 400
+  turn:
+    silence_ms: 700
+    max_duration_ms: 20000
+    idle_timeout_ms: 1000
+    min_speech_ms: 300
+    barge_in_ms: 400
+    barge_in_confidence: 0.60
+    barge_in_min_volume: 0.004
+  diagnostics: true
