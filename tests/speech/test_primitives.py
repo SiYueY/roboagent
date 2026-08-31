@@ -5,13 +5,17 @@ from collections.abc import AsyncIterator, Sequence
 from importlib.util import find_spec
 
 from roboagent.speech.audio.buffer import AudioBuffer
-from roboagent.speech.audio.filter import PassthroughAudioFilter
-from roboagent.speech.audio.rnnoise import RNNoiseFilter
+from roboagent.speech.audio.frame import AudioFrameAssembler
+from roboagent.speech.audio.passthrough import PassthroughAudioProcessor
+from roboagent.speech.audio.rnnoise import RNNoiseProcessor
+from roboagent.speech.audio.webrtc import WebRTCAudioProcessor
 from roboagent.speech.audio.vad import EnergyVAD, SileroVAD, VADState
-from roboagent.speech.config import DashScopeTTSConfig
+from roboagent.speech.config import DashScopeTTSConfig, SpeechConfig
+from roboagent.speech.event import SpeechStartedEvent
 from roboagent.speech.session import SpeechSession
 from roboagent.speech.text.segmenter import TextSegmenter
 from roboagent.speech.turn.detector import TurnDetector
+from roboagent.speech.turn.interruption import InterruptionDetector
 from roboagent.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
 
 
@@ -23,6 +27,13 @@ class SpeechPrimitiveTests(unittest.TestCase):
         buffer.append(AudioChunk(b"ef", DEFAULT_INPUT_FORMAT))
         self.assertEqual(buffer.read(), b"cdef")
 
+    def test_canonical_frame_assembler_outputs_exact_20ms_frames(self) -> None:
+        assembler = AudioFrameAssembler(DEFAULT_INPUT_FORMAT)
+        self.assertEqual(assembler.push(AudioChunk(b"x" * 320, DEFAULT_INPUT_FORMAT)), ())
+        frames = assembler.push(AudioChunk(b"y" * 320, DEFAULT_INPUT_FORMAT))
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(len(frames[0].data), 640)
+
     def test_audio_chunks_get_monotonic_timestamps_by_default(self) -> None:
         first = AudioChunk(b"", DEFAULT_INPUT_FORMAT)
         second = AudioChunk(b"", DEFAULT_INPUT_FORMAT)
@@ -30,6 +41,15 @@ class SpeechPrimitiveTests(unittest.TestCase):
 
     def test_tts_workspace_configuration_is_preserved(self) -> None:
         self.assertEqual(DashScopeTTSConfig(workspace_id="workspace-1").workspace_id, "workspace-1")
+
+    def test_legacy_audio_filter_configuration_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            SpeechConfig.model_validate({"audio_filter": {"provider": "rnnoise"}})
+
+    def test_default_interruption_policy_is_responsive_for_browser_capture(self) -> None:
+        options = SpeechConfig().turn.interruption
+        self.assertEqual(options.min_duration_ms, 300)
+        self.assertEqual(options.min_confidence, 0.55)
 
     def test_energy_vad_recognizes_pcm16_energy(self) -> None:
         vad = EnergyVAD(threshold=0.01, calibration_frames=0)
@@ -57,25 +77,40 @@ class SpeechPrimitiveTests(unittest.TestCase):
         self.assertFalse(vad.process(quiet))
         self.assertEqual(vad.state, VADState.QUIET)
 
-    def test_passthrough_filter_preserves_chunk(self) -> None:
+    def test_passthrough_processor_preserves_capture_and_render(self) -> None:
         async def check() -> None:
-            filter_ = PassthroughAudioFilter()
+            filter_ = PassthroughAudioProcessor()
             await filter_.start(DEFAULT_INPUT_FORMAT)
             chunk = AudioChunk(b"\0\0" * 320, DEFAULT_INPUT_FORMAT, 1.0)
-            self.assertEqual(tuple(await filter_.process(chunk)), (chunk,))
-            self.assertEqual(tuple(await filter_.flush()), ())
+            self.assertEqual(tuple(await filter_.process_capture(chunk)), (chunk,))
+            self.assertEqual(tuple(await filter_.process_render(chunk)), (chunk,))
+            self.assertEqual(tuple(await filter_.flush_capture()), ())
         import asyncio
         asyncio.run(check())
 
     @unittest.skipUnless(find_spec("pyrnnoise"), "speech extra is not installed")
     def test_rnnoise_processes_a_20ms_pcm_frame(self) -> None:
         async def check() -> None:
-            filter_ = RNNoiseFilter(required=True)
+            filter_ = RNNoiseProcessor(required=True)
             await filter_.start(DEFAULT_INPUT_FORMAT)
-            output = tuple(await filter_.process(AudioChunk(b"\0\0" * 320, DEFAULT_INPUT_FORMAT)))
+            output = tuple(await filter_.process_capture(AudioChunk(b"\0\0" * 320, DEFAULT_INPUT_FORMAT)))
             self.assertEqual(len(output), 1)
             self.assertEqual(len(output[0].data), 640)
             await filter_.close()
+        import asyncio
+        asyncio.run(check())
+
+    @unittest.skipUnless(find_spec("pywebrtc_audio"), "speech-webrtc extra is not installed")
+    def test_webrtc_uses_played_render_as_far_end_reference(self) -> None:
+        async def check() -> None:
+            processor = WebRTCAudioProcessor()
+            await processor.start(DEFAULT_INPUT_FORMAT, DEFAULT_INPUT_FORMAT)
+            rendered = (await processor.process_render(AudioChunk(b"\1\0" * 320, DEFAULT_INPUT_FORMAT)))[0]
+            self.assertEqual(processor._far, b"")
+            processor.observe_render(rendered)
+            self.assertEqual(len(processor._far), 640)
+            await processor.process_capture(AudioChunk(b"\0\0" * 320, DEFAULT_INPUT_FORMAT))
+            await processor.close()
         import asyncio
         asyncio.run(check())
 
@@ -167,46 +202,49 @@ class _ScriptedVAD:
 
 
 class SpeechSessionInputTests(unittest.IsolatedAsyncioTestCase):
-    async def test_barge_in_uses_a_short_sustained_confirmation_window(self) -> None:
-        vad = _ScriptedVAD([True] * 20)
-        vad.confidence, vad.level = 0.7, 0.01
-        session = SpeechSession(
-            agent_session=object(), transport=_FakeTransport(()), asr=_FakeASR(), tts=_FakeTTS(),
-            vad=vad, turn_detector=TurnDetector(), barge_in_ms=400,
-            barge_in_confidence=0.6, barge_in_min_volume=0.004,
-        )
-        session._agent_run = object()  # Simulate an assistant response being spoken.
-        audio = AudioChunk(b"\0" * 640, DEFAULT_INPUT_FORMAT)  # 20 ms PCM16.
+    async def test_interruption_uses_a_short_sustained_confirmation_window(self) -> None:
+        detector = InterruptionDetector(min_duration_ms=400, min_confidence=0.6, min_volume=0.004)
         for _ in range(19):
-            self.assertFalse(session._confirm_barge_in(audio, True))
-        self.assertTrue(session._confirm_barge_in(audio, True))
+            self.assertFalse(detector.update(speaking=True, confidence=0.7, level=0.01, output_active=True, duration_ms=20).confirmed)
+        self.assertTrue(detector.update(speaking=True, confidence=0.7, level=0.01, output_active=True, duration_ms=20).confirmed)
+
+    async def test_interruption_reports_false_candidate(self) -> None:
+        detector = InterruptionDetector()
+        detector.update(speaking=True, confidence=1, level=1, output_active=True, duration_ms=20)
+        self.assertTrue(detector.update(speaking=False, confidence=0, level=0, output_active=True, duration_ms=20).false_interruption)
 
     async def test_only_filtered_preroll_reaches_asr_after_confirmed_start(self) -> None:
-        class Filter(PassthroughAudioFilter):
-            async def process(self, audio: AudioChunk):
-                return (AudioChunk(b"clean-" + audio.data, audio.format),)
+        class Processor(PassthroughAudioProcessor):
+            async def process_capture(self, audio: AudioChunk):
+                return (AudioChunk(audio.data.replace(b"a", b"c"), audio.format),)
 
         transport = _FakeTransport([
-            AudioChunk(b"ambient", DEFAULT_INPUT_FORMAT),
-            AudioChunk(b"speech", DEFAULT_INPUT_FORMAT),
-            AudioChunk(b"quiet", DEFAULT_INPUT_FORMAT),
+            AudioChunk(b"a" * 640, DEFAULT_INPUT_FORMAT),
+            AudioChunk(b"b" * 640, DEFAULT_INPUT_FORMAT),
+            AudioChunk(b"d" * 640, DEFAULT_INPUT_FORMAT),
         ])
         asr = _FakeASR()
         session = SpeechSession(
             agent_session=object(), transport=transport, asr=asr, tts=_FakeTTS(),
-            audio_filter=Filter(), vad=_ScriptedVAD([False, True, False]),
+            audio_processor=Processor(), vad=_ScriptedVAD([False, True, False]),
             turn_detector=TurnDetector(silence_ms=0, max_duration_ms=1000, idle_timeout_ms=1000),
         )
         await session.run()
-        self.assertEqual(asr.sessions[0].written, [b"clean-ambient", b"clean-speech", b"clean-quiet"])
+        self.assertEqual(asr.sessions[0].written, [b"c" * 640, b"b" * 640, b"d" * 640])
         self.assertTrue(asr.sessions[0].committed)
         self.assertTrue(transport.closed)
+        started = next(event for event in transport.events if isinstance(event, SpeechStartedEvent))
+        self.assertEqual(started.turn_id, 1)
 
     async def test_noise_transcripts_do_not_start_agent(self) -> None:
         self.assertFalse(SpeechSession._is_meaningful_transcript("…"))
         self.assertFalse(SpeechSession._is_meaningful_transcript("啊"))
         self.assertTrue(SpeechSession._is_meaningful_transcript("你好"))
         self.assertTrue(SpeechSession._is_meaningful_transcript("hello"))
+
+    async def test_short_stop_word_can_confirm_barge_in_without_becoming_a_prompt(self) -> None:
+        self.assertTrue(SpeechSession._is_interruption_transcript("停"))
+        self.assertFalse(SpeechSession._is_meaningful_transcript("停"))
 
     async def test_close_releases_resources_after_transport_disconnect(self) -> None:
         transport = _DisconnectingTransport(())

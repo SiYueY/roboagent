@@ -10,7 +10,7 @@ class TextSegmenter:
     chunks are longer to avoid choppy prosody and repeated provider commits.
     """
 
-    def __init__(self, max_chars: int = 32, *, first_chunk_chars: int | None = None) -> None:
+    def __init__(self, max_chars: int = 48, *, first_chunk_chars: int | None = None) -> None:
         first_chunk_chars = min(16, max_chars) if first_chunk_chars is None else first_chunk_chars
         if first_chunk_chars < 1 or max_chars < first_chunk_chars:
             raise ValueError("first_chunk_chars must be positive and no greater than max_chars.")

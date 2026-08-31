@@ -14,8 +14,8 @@ from ..types import AudioChunk, AudioFormat
 logger = logging.getLogger(__name__)
 
 
-class RNNoiseFilter:
-    """Filter PCM16 with pyrnnoise, buffering its native 48 kHz frames."""
+class RNNoiseProcessor:
+    """Process capture PCM with RNNoise; render PCM passes through unchanged."""
 
     def __init__(self, *, required: bool = False, quality: str = "QQ") -> None:
         self.required = required
@@ -27,9 +27,9 @@ class RNNoiseFilter:
         self._enabled = False
         self.speech_probability: float | None = None
 
-    async def start(self, format: AudioFormat) -> None:
-        self._format = format
-        if format.channels != 1 or format.sample_width != 2:
+    async def start(self, capture_format: AudioFormat, render_format: AudioFormat | None = None) -> None:
+        self._format = capture_format
+        if capture_format.channels != 1 or capture_format.sample_width != 2:
             raise SpeechConfigurationError("RNNoise requires mono PCM16 input.")
         try:
             import numpy as np
@@ -55,7 +55,7 @@ class RNNoiseFilter:
         output = self._soxr.resample(samples, source_rate, target_rate, quality=self.quality)
         return self._np.clip(output, -32768, 32767).astype(self._np.int16).tobytes()
 
-    async def process(self, audio: AudioChunk) -> Sequence[AudioChunk]:
+    async def process_capture(self, audio: AudioChunk) -> Sequence[AudioChunk]:
         if not self._enabled or self._engine is None or self._format is None:
             return (audio,)
         try:
@@ -81,7 +81,10 @@ class RNNoiseFilter:
             logger.warning("RNNoise failed; bypassing this frame: %s", exc)
             return (audio,)
 
-    async def flush(self) -> Sequence[AudioChunk]:
+    async def process_render(self, audio: AudioChunk) -> Sequence[AudioChunk]:
+        return (audio,)
+
+    async def flush_capture(self) -> Sequence[AudioChunk]:
         # pyrnnoise owns incomplete native frames and does not expose an
         # end-of-stream flush API. Dropping an incomplete <10 ms tail is safer
         # than padding and injecting non-user audio into ASR.

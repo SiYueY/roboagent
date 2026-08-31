@@ -1985,6 +1985,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pyalsaaudio"
+version = "0.11.0"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/21/a6/3d833079b030d449345e35ce0e2874e330d3612135734f07b9ceace25bcf/pyalsaaudio-0.11.0.tar.gz", hash = "sha256:a78a9dca33524b2c9064b34e21f5ab874272313cf324a9a77592f396a5e0fddc", size = 311152, upload-time = "2024-05-30T21:35:57.928Z" }
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -2160,6 +2166,31 @@ wheels = [
 ]
 
 [[package]]
+name = "pywebrtc-audio"
+version = "0.1.0"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/4e/61/a204f921c4e6cc4d7866308b82c5c2ad939c0e831c774515ab727b3c76e6/pywebrtc_audio-0.1.0.tar.gz", hash = "sha256:e51635e141034df088a0cc4ce9f90ffaaca6ece7015b5a24d38146f9afa72d95", size = 1746934, upload-time = "2026-05-19T04:25:36.953Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/8f/a2/8a1b0b621a4f4b76a916b107d9c9e4faea6a00a97f334ff7da917d44b709/pywebrtc_audio-0.1.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:a6afc05cc517059510107badcdb2e83aa936e860f1e553d068738265912fb9e7", size = 401833, upload-time = "2026-05-19T04:25:15.658Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e7/02/d6d20c87cde495de87d6816ae260743dc1cb1398e42f2eba3303e1d30146/pywebrtc_audio-0.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5c41216f517dc615cfc55a5cf734c7562b086dc120932a0bf68580093c50fecc", size = 358664, upload-time = "2026-05-19T04:25:17.004Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/54/3f/faa7009399e42d53b2295cf6ce9ad58cb7c6006c06f3c4e2d8d2cb72b7a4/pywebrtc_audio-0.1.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6eeb172d139a73cf16d49b6e32f284097d946a8a5570d427f1f15e11c9bf9e22", size = 412454, upload-time = "2026-05-19T04:25:18.307Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f2/c8/76b1effd16e7e0e6176554a8079487766d2b76e1024e54aca748a57db1ff/pywebrtc_audio-0.1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f96f08ad706165c09008e7a78bffbf3ae374914b1890d145ab3714491347997b", size = 450823, upload-time = "2026-05-19T04:25:19.672Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b0/41/dd1eb59ef280d39e40c8d36b9f4853a235a8b8ecb88c4b177dfe51573c67/pywebrtc_audio-0.1.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:0e5c26896af62b25dc2c9c71ef59fa227e2687841a9c29013ccb05c5f97f2470", size = 1348771, upload-time = "2026-05-19T04:25:21.315Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/20/f0/05c99fbe97e9ec3d233f33e255b5ed3bba3cbc0a67ba1ace0f82db6ec27d/pywebrtc_audio-0.1.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:f102b7bd2929ef6168b44def462c4ae04e60b1b51d724b7c21cab2d79fb8d8b5", size = 1428637, upload-time = "2026-05-19T04:25:22.774Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/49/7c/1360a81011b99cb897e044199424b104abe7f27abf7dd3e126bbc1a16a01/pywebrtc_audio-0.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:6eef9065089a2e25ef1b9743661cb48caa4c2e65acee1314e8957d0c24ae534a", size = 311988, upload-time = "2026-05-19T04:25:24.82Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/6e/0c/f4a865a831389e74185731edf31f2b915943f2288b7bead20a2eebcdfb12/pywebrtc_audio-0.1.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:7b485f6eb033032c372fa2f3e59baaa7bd28538c8d9c862d58128e52a8664dea", size = 401849, upload-time = "2026-05-19T04:25:26.434Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f0/89/52b1205dd5b0c9f0bfea2eed1062a27549e097b42ba22ad4c541a2efd32b/pywebrtc_audio-0.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:180db79d375e41f6ff8c082b924b128a6f3f79c93d7bc2053446eab150bf6c0e", size = 358690, upload-time = "2026-05-19T04:25:28.073Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/12/93/bbfa966cc04c627f6474d2f8406eb83d307c20f96d0f170ca8993ffe9337/pywebrtc_audio-0.1.0-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:26ffea3f6c06665e7ca501c8ac800a0522e46f9ca8e1a5ade57d94271c859fba", size = 412443, upload-time = "2026-05-19T04:25:29.41Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/2a/26/1ebfe836271c4d2b6cc0d41e41f93a2c8d7fba89d0e86a2d7742516e6360/pywebrtc_audio-0.1.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c1768aa038ea51d8c35e5e59e1bb10d8fccd5c75a188c312152119586cafd19d", size = 450826, upload-time = "2026-05-19T04:25:30.767Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f3/05/7a71cf2ae5c5e3971f17aa36ea217d1933ea0fdb6979a8bc63df7e5f8bff/pywebrtc_audio-0.1.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:6a88f1ade674bbfb3253f58c57ca0955347b5d6b356654a9b0907e51aca9c927", size = 1348839, upload-time = "2026-05-19T04:25:32.328Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c3/a0/fea917b67bfc0c5ae04f4f83b223258585ad41cbe5e9d61947c66e069ead/pywebrtc_audio-0.1.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:6a4afdb3cd92ef65185ea26c8b0d743db0a8cc4d8b890d6a29e209ff3ff90be4", size = 1428680, upload-time = "2026-05-19T04:25:33.833Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a1/f7/c19df55667596cf3b851f2c1fbd774689b5a1565c841e5b091f35f134e48/pywebrtc_audio-0.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:d4ade645f7c8c03bb26ec0b56fd140473125a303b09b186074a90700fd32ffe4", size = 311920, upload-time = "2026-05-19T04:25:35.233Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -2258,6 +2289,12 @@ speech = [
     { name = "soxr" },
     { name = "uvicorn", extra = ["standard"] },
 ]
+speech-alsa = [
+    { name = "pyalsaaudio" },
+]
+speech-webrtc = [
+    { name = "pywebrtc-audio" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -2268,14 +2305,16 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'speech'", specifier = ">=1.26" },
     { name = "onnxruntime", marker = "extra == 'speech'", specifier = ">=1.18" },
     { name = "openai", specifier = ">=2.31.0" },
+    { name = "pyalsaaudio", marker = "extra == 'speech-alsa'", specifier = ">=0.11.0" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pyrnnoise", marker = "extra == 'speech'", specifier = ">=0.4" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "pywebrtc-audio", marker = "extra == 'speech-webrtc'", specifier = ">=0.1.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "soxr", marker = "extra == 'speech'", specifier = ">=0.5" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'speech'", specifier = ">=0.30" },
 ]
-provides-extras = ["gradio", "speech"]
+provides-extras = ["gradio", "speech", "speech-webrtc", "speech-alsa"]
 
 [[package]]
 name = "safehttpx"

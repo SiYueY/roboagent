@@ -14,9 +14,15 @@ class DashScopeASRConfig(BaseModel):
     workspace_id: str | None = None
     region: str = "beijing"
     language_hints: tuple[str, ...] = ("zh",)
-    silence_ms: int = Field(default=1500, ge=200, le=6000)
+    # Local endpointing is authoritative. This is only a provider-side safety
+    # net for a lost local completion signal.
+    silence_ms: int = Field(default=800, ge=200, le=6000)
     speech_noise_threshold: float = Field(default=0.2, ge=-1.0, le=1.0)
     heartbeat: bool = True
+    # Keep one streaming recognition task alive across local turns.  The
+    # service emits sentence-final results while audio continues; stop only
+    # when the SpeechSession itself closes or the socket fails.
+    persistent: bool = True
 
 
 class DashScopeTTSConfig(BaseModel):
@@ -33,7 +39,7 @@ class DashScopeTTSConfig(BaseModel):
     # produced rather than amplifying already-quantized browser audio.
     volume: int = Field(default=100, ge=0, le=100)
     first_chunk_chars: int = Field(default=16, ge=4, le=128)
-    chunk_chars: int = Field(default=32, ge=8, le=256)
+    chunk_chars: int = Field(default=48, ge=8, le=256)
 
     @model_validator(mode="after")
     def validate_chunk_sizes(self) -> "DashScopeTTSConfig":
@@ -42,13 +48,22 @@ class DashScopeTTSConfig(BaseModel):
         return self
 
 
-class AudioFilterConfig(BaseModel):
+class WebRTCAudioConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["rnnoise", "passthrough", "krisp"] = "rnnoise"
+    echo_cancellation: bool = True
+    noise_suppression: bool = True
+    auto_gain_control: bool = True
+    high_pass_filter: bool = True
+    stream_delay_ms: int = Field(default=60, ge=0, le=2_000)
+    ns_level: int = Field(default=1, ge=0, le=3)
+
+
+class AudioConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    processor: Literal["rnnoise", "passthrough", "webrtc"] = "rnnoise"
     required: bool = False
     resampler_quality: Literal["QQ", "LQ", "MQ", "HQ", "VHQ"] = "QQ"
-    model_path: str | None = None
-    api_key: str | None = None
+    webrtc: WebRTCAudioConfig = Field(default_factory=WebRTCAudioConfig)
 
 
 class VADConfig(BaseModel):
@@ -68,45 +83,44 @@ class VADConfig(BaseModel):
     calibration_ms: int = Field(default=500, ge=0, le=3000)
 
 
+class InterruptionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    # This opens a candidate ASR probe.  It is not a cancellation by itself:
+    # an intelligible ASR partial/final confirms the interruption.
+    min_duration_ms: int = Field(default=300, ge=100, le=5000)
+    min_confidence: float = Field(default=0.55, ge=0, le=1)
+    min_volume: float = Field(default=0.003, ge=0, le=1)
+
+
 class TurnConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    silence_ms: int = Field(default=700, ge=100, le=6000)
+    silence_ms: int = Field(default=400, ge=100, le=6000)
     max_duration_ms: int = Field(default=20_000, ge=1000, le=60000)
     idle_timeout_ms: int = Field(default=1000, ge=100, le=10_000)
     min_speech_ms: int = Field(default=300, ge=0, le=5000)
-    # Output is especially susceptible to speaker echo. Barge-in therefore
-    # needs a stronger and longer VAD confirmation than an ordinary turn.
-    barge_in_ms: int = Field(default=400, ge=100, le=5000)
-    barge_in_confidence: float = Field(default=0.60, ge=0, le=1)
-    barge_in_min_volume: float = Field(default=0.004, ge=0, le=1)
+    interruption: InterruptionConfig = Field(default_factory=InterruptionConfig)
+
+
+class DeviceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["alsa"] = "alsa"
+    input_device: str = "default"
+    output_device: str = "default"
+    capture_sample_rate: int = Field(default=48_000, ge=8_000, le=96_000)
+    playback_sample_rate: int = Field(default=48_000, ge=8_000, le=96_000)
+    channels: int = Field(default=1, ge=1, le=2)
+    period_ms: int = Field(default=20, ge=10, le=100)
+    buffer_ms: int = Field(default=80, ge=20, le=1_000)
 
 
 class SpeechConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asr: DashScopeASRConfig = Field(default_factory=DashScopeASRConfig)
     tts: DashScopeTTSConfig = Field(default_factory=DashScopeTTSConfig)
-    audio_filter: AudioFilterConfig = Field(default_factory=AudioFilterConfig)
+    audio: AudioConfig = Field(default_factory=AudioConfig)
     vad: VADConfig = Field(default_factory=VADConfig)
     turn: TurnConfig = Field(default_factory=TurnConfig)
+    device: DeviceConfig | None = None
+    mode: Literal["pipeline", "realtime"] = "pipeline"
     diagnostics: bool = True
-
-    # Deprecated flat keys accepted for one release.
-    vad_threshold: float | None = Field(default=None, exclude=True)
-    vad_noise_multiplier: float | None = Field(default=None, exclude=True)
-    vad_calibration_ms: int | None = Field(default=None, exclude=True)
-    turn_silence_ms: int | None = Field(default=None, exclude=True)
-    turn_max_duration_ms: int | None = Field(default=None, exclude=True)
-
-    @model_validator(mode="after")
-    def map_legacy_audio_options(self) -> "SpeechConfig":
-        if self.vad_threshold is not None:
-            self.vad = self.vad.model_copy(update={"threshold": self.vad_threshold})
-        if self.vad_noise_multiplier is not None:
-            self.vad = self.vad.model_copy(update={"noise_multiplier": self.vad_noise_multiplier})
-        if self.vad_calibration_ms is not None:
-            self.vad = self.vad.model_copy(update={"calibration_ms": self.vad_calibration_ms})
-        if self.turn_silence_ms is not None:
-            self.turn = self.turn.model_copy(update={"silence_ms": self.turn_silence_ms})
-        if self.turn_max_duration_ms is not None:
-            self.turn = self.turn.model_copy(update={"max_duration_ms": self.turn_max_duration_ms})
-        return self

@@ -57,7 +57,7 @@ uv run python examples/chat/app.py
 `speech` extra 同时安装通义 SDK、RNNoise、SOXR、ONNX Runtime 和 Uvicorn 的 WebSocket 支持；若服务日志出现
 `No supported WebSocket library detected`，请重新执行上面的 `uv sync` 命令后再启动。
 
-默认 `audio_filter.provider: rnnoise` 会在服务端执行降噪；`vad.provider: silero` 使用本地 ONNX
+默认 `audio.processor: rnnoise` 会在服务端执行降噪；`vad.provider: silero` 使用本地 ONNX
 模型。将 Silero 模型放在 `roboagent/speech/audio/data/silero_vad.onnx`，或在配置中设置
 `speech.vad.model_path`（也可使用 `ROBOAGENT_SILERO_VAD_MODEL`）。模型不可用时会记录明确警告，并
 优先使用 RNNoise 产生的人声概率、再退化到能量门限；在生产环境可设置 `speech.vad.required: true`
@@ -68,15 +68,16 @@ uv run python examples/chat/app.py
 清单，便于审计，但该值不是固定版本信任锚，因为模型来源按 `master` 更新。可用
 `bash scripts/deploy_silero_vad.sh --verify-only` 仅校验现有模型。
 
-语音回答默认在累计 16 个字符后即提交首个 TTS 片段，后续以 32 个字符或句末优先断句；同一通话
+语音回答默认在累计 16 个字符后即提交首个 TTS 片段，后续以 48 个字符或句末优先断句；同一通话
 会复用通义实时 TTS 连接，以缩短首音延迟。可在 `speech.tts.first_chunk_chars` 与
 `speech.tts.chunk_chars` 调整这两个值（前者不得大于后者）。
 `speech.tts.volume` 默认是 `100`；若要降低播放音量，请优先调低该值而不是放大浏览器 PCM。
 
-播放期间的打断默认需要连续 400 ms 的有效语音（置信度至少 0.60、输入音量至少 0.004），以兼顾
-正常说话打断和扬声器回声抑制；可通过 `speech.turn.barge_in_*` 三项按设备调整。
+播放期间先需要连续 300 ms 的有效语音（置信度至少 0.55、输入音量至少 0.003）形成候选；只有
+ASR 返回可识别的 partial/final 文本后才真正停止声音，以兼顾正常说话打断和扬声器回声抑制。
+可通过 `speech.turn.interruption` 三项按设备调整。
 
-资源受限环境可设置 `audio_filter.provider: passthrough` 和 `vad.provider: energy`。不要重新打开
+资源受限环境可设置 `audio.processor: passthrough` 和 `vad.provider: energy`。不要重新打开
 `autoGainControl`：它常会在静音间隙放大风扇和机械噪声。Krisp 属于独立厂商 SDK/模型接入，当前
 配置位保留但不会随 `speech` extra 安装。
 

@@ -133,6 +133,18 @@ class ChatExampleTests(unittest.TestCase):
             'payload.type === "audio.completed"',
             'payload.type === "response.delta"',
             "state.responseCaption += payload.delta",
+            'setStatus("正在生成回答…")',
+            'setStatus("正在播放…")',
+            "playbackSources: new Set()",
+            "const clearPlayback",
+            "const syncPlaybackStatus",
+            "state.responseCompleted = false",
+            "source.stop()",
+            'type: "playback.started"',
+            'payload.type === "playback.begin"',
+            "activeResponseId",
+            "speechMetrics",
+            "getSpeechMetrics",
         ):
             self.assertIn(contract, frontend)
         for action in self.BROWSER_ACTIONS:

@@ -25,6 +25,12 @@ speech = [
     "soxr>=0.5",
     "uvicorn[standard]>=0.30",
 ]
+speech-webrtc = [
+    "pywebrtc-audio>=0.1.0",
+]
+speech-alsa = [
+    "pyalsaaudio>=0.11.0",
+]
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

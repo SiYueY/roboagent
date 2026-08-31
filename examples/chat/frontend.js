@@ -115,23 +115,31 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
     try {
       const compactViewport = window.matchMedia(COMPACT_VIEWPORT);
       const state = {
-        active: false,
-        microphoneEnabled: false,
-        videoEnabled: false,
-        captionsEnabled: true,
-        speakerEnabled: true,
-        microphoneStream: null,
-        cameraStream: null,
-        cameraFacingMode: "user",
-        audioContext: null,
-        gain: null,
-        speechSocket: null,
-        workletNode: null,
-        workletContext: null,
-        microphoneSink: null,
-        pendingAudio: [],
-        playbackTime: 0,
-        responseCaption: "",
+        active : false,
+        microphoneEnabled : false,
+        videoEnabled : false,
+        captionsEnabled : true,
+        speakerEnabled : true,
+        microphoneStream : null,
+        cameraStream : null,
+        cameraFacingMode : "user",
+        audioContext : null,
+        gain : null,
+        speechSocket : null,
+        workletNode : null,
+        workletContext : null,
+        microphoneSink : null,
+        pendingAudio : [],
+        playbackTime : 0,
+        playbackSources : new Set(),
+        playbackStartTimers : new Set(),
+        responseCaption : "",
+        responseActive : false,
+        responseCompleted : false,
+        activeTurnId : null,
+        activeResponseId : null,
+        playbackResponseId : null,
+        speechMetrics : [],
       };
 
       // DOM utilities ------------------------------------------------------
@@ -207,6 +215,16 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
         state[key] = null;
       };
       const stopAudio = () => {
+        state.playbackSources.forEach((source) => {
+          try {
+            source.stop();
+          } catch (_) { /* source already ended */
+          }
+        });
+        state.playbackSources.clear();
+        state.playbackStartTimers.forEach((timer) =>
+                                              window.clearTimeout(timer));
+        state.playbackStartTimers.clear();
         state.audioContext?.close();
         state.audioContext = null;
         state.gain = null;
@@ -277,6 +295,11 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
         );
       });
       const playPcm = async (buffer) => {
+        // Binary WebSocket frames have no metadata. ``playback.begin`` is
+        // ordered ahead of the PCM frames and identifies their owner.
+        if (state.playbackResponseId === null ||
+            state.playbackResponseId !== state.activeResponseId)
+          return;
         if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 2 || buffer.byteLength % 2) {
           throw new Error("服务端返回了无效的 PCM 音频帧");
         }
@@ -284,11 +307,52 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
         const samples = new Int16Array(buffer);
         const audio = context.createBuffer(1, samples.length, 24000);
         const channel = audio.getChannelData(0);
-        for (let i = 0; i < samples.length; i += 1) channel[i] = samples[i] / 32768;
+        for (let i = 0; i < samples.length; i += 1)
+          channel[i] = samples[i] / 32768;
         const source = context.createBufferSource();
-        source.buffer = audio; source.connect(state.gain || state.audioContext.destination);
+        source.buffer = audio;
+        source.connect(state.gain || state.audioContext.destination);
         const start = Math.max(context.currentTime, state.playbackTime);
-        source.start(start); state.playbackTime = start + audio.duration;
+        state.playbackSources.add(source);
+        source.onended = () => {
+          state.playbackSources.delete(source);
+          syncPlaybackStatus();
+        };
+        const delayMs = Math.max(0, (start - context.currentTime) * 1000);
+        const startTimer = window.setTimeout(() => {
+          state.playbackStartTimers.delete(startTimer);
+          if (state.speechSocket?.readyState === WebSocket.OPEN) {
+            state.speechSocket.send(
+                JSON.stringify({type : "playback.started"}));
+          }
+        }, delayMs);
+        state.playbackStartTimers.add(startTimer);
+        source.start(start);
+        state.playbackTime = start + audio.duration;
+        // Binary PCM arrival is the most reliable local indication that the
+        // response has left the model stage, even if a lifecycle event is
+        // delayed behind other WebSocket messages.
+        setStatus("正在播放…");
+      };
+      const clearPlayback = () => {
+        state.playbackSources.forEach((source) => {
+          try {
+            source.stop();
+          } catch (_) { /* source already ended */
+          }
+        });
+        state.playbackSources.clear();
+        state.playbackStartTimers.forEach((timer) =>
+                                              window.clearTimeout(timer));
+        state.playbackStartTimers.clear();
+        state.playbackTime = 0;
+        state.playbackResponseId = null;
+      };
+      const syncPlaybackStatus = () => {
+        if (state.playbackSources.size || !state.responseCompleted)
+          return;
+        state.playbackTime = 0;
+        setStatus(state.microphoneEnabled ? "正在聆听…" : "回答完成");
       };
       const startCamera = async (facingMode, { reportError = true } = {}) => {
         try {
@@ -345,30 +409,96 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
           state.speechSocket.onmessage = (event) => {
             if (typeof event.data === "string") {
               const payload = JSON.parse(event.data);
+              const isOlderTurn = payload.turn_id != null &&
+                                  state.activeTurnId != null &&
+                                  payload.turn_id < state.activeTurnId;
+              const isOlderResponse =
+                  payload.response_id != null &&
+                  state.activeResponseId != null &&
+                  payload.response_id < state.activeResponseId;
+              // Clear and errors are connection-wide and must always be
+              // honoured. All other stale lifecycle events are ignored.
+              if (payload.type !== "playback.clear" &&
+                  payload.type !== "error" && (isOlderTurn || isOlderResponse))
+                return;
               if (payload.type === "session.ready") setStatus("语音服务已就绪，点击麦克风开始");
               if (payload.type === "speech.started") {
-                state.responseCaption = "";
-                byId("voice-caption").textContent = "";
+                state.activeTurnId = payload.turn_id ?? state.activeTurnId;
+                if (!state.responseActive) {
+                  state.responseCaption = "";
+                  // A prior response may still have scheduled PCM ending in
+                  // the browser. Its terminal event must not complete this
+                  // newly captured turn before the new agent response starts.
+                  state.responseCompleted = false;
+                  byId("voice-caption").textContent = "";
+                }
                 setStatus("正在识别…");
               }
               if (payload.type === "speech.stopped") setStatus("正在处理语音…");
               if (payload.type === "response.started") {
+                state.activeResponseId = payload.response_id;
+                state.playbackResponseId = null;
                 state.responseCaption = "";
+                state.responseActive = true;
+                state.responseCompleted = false;
                 setStatus("正在思考…");
               }
-              if (payload.type === "response.completed" && !state.playbackTime) {
-                setStatus(state.microphoneEnabled ? "正在聆听…" : "回答完成");
+              if (payload.type === "response.completed") {
+                if (payload.response_id !== state.activeResponseId)
+                  return;
+                state.responseActive = false;
+                state.responseCompleted = true;
+                syncPlaybackStatus();
               }
-              if (payload.type === "audio.started") setStatus("正在播放…");
+              if (payload.type === "playback.begin") {
+                if (payload.response_id !== state.activeResponseId)
+                  return;
+                state.playbackResponseId = payload.response_id;
+              }
+              if (payload.type === "audio.started" &&
+                  payload.response_id === state.activeResponseId)
+                setStatus("正在播放…");
               if (payload.type === "audio.completed") {
-                setStatus(state.microphoneEnabled ? "正在聆听…" : "语音播放完成");
+                if (payload.response_id !== state.activeResponseId)
+                  return;
+                syncPlaybackStatus();
               }
-              if (payload.type === "transcript.partial" || payload.type === "transcript.final") byId("voice-caption").textContent = payload.text;
+              if (payload.type === "interrupted") {
+                state.responseActive = false;
+                state.responseCompleted = true;
+                state.activeResponseId = null;
+                clearPlayback();
+              }
+              if ((payload.type === "transcript.partial" ||
+                   payload.type === "transcript.final") &&
+                  payload.turn_id === state.activeTurnId)
+                byId("voice-caption").textContent = payload.text;
               if (payload.type === "response.delta") {
+                if (payload.response_id !== state.activeResponseId)
+                  return;
                 state.responseCaption += payload.delta || "";
                 byId("voice-caption").textContent = state.responseCaption;
+                if (state.responseActive && !state.playbackSources.size) {
+                  setStatus("正在生成回答…");
+                }
               }
-              if (payload.type === "playback.clear") state.playbackTime = 0;
+              if (payload.type === "playback.clear")
+                clearPlayback();
+              if (payload.type === "speech.metrics") {
+                state.speechMetrics.push(payload);
+                if (state.speechMetrics.length > 50)
+                  state.speechMetrics.shift();
+                // Keep detailed timings inspectable without adding a noisy
+                // production UI.  Set data-debug=true on voice-status to see
+                // the latest end-to-end measurement in place.
+                const status = byId("voice-status");
+                if (status?.dataset.debug === "true") {
+                  status.textContent =
+                      `端到端 ${Math.round(payload.e2e_turn_ms)} ms · ASR ${
+                          Math.round(payload.asr_final_ms)} ms · TTS ${
+                          Math.round(payload.tts_ttfa_ms)} ms`;
+                }
+              }
               if (payload.type === "speech.diagnostics") {
                 const status = byId("voice-status");
                 if (status?.dataset.debug === "true") {
@@ -501,6 +631,7 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
         toggleCaptions,
         toggleSpeaker,
         switchCamera,
+        getSpeechMetrics : () => [...state.speechMetrics],
       };
       const cleanup = () => {
         compactViewport.removeEventListener("change", syncCompactSidebar);

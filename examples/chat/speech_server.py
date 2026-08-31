@@ -5,52 +5,18 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, is_dataclass
-from time import time
+from time import monotonic, time
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from roboagent.speech.asr.dashscope import DashScopeASR
-from roboagent.speech.audio import EnergyVAD, PassthroughAudioFilter, RNNoiseFilter, SileroVAD
-from roboagent.speech.errors import SpeechConfigurationError
 from roboagent.speech.config import SpeechConfig
-from roboagent.speech.session import SpeechSession
-from roboagent.speech.text.segmenter import TextSegmenter
+from roboagent.speech.factory import create_speech_session
+from roboagent.speech.errors import SpeechConfigurationError
 from roboagent.speech.transport.base import SpeechTransport
-from roboagent.speech.tts.dashscope import DashScopeTTS
-from roboagent.speech.turn.detector import TurnDetector
 from roboagent.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
 
 logger = logging.getLogger(__name__)
-
-
-def _make_audio_filter(config: SpeechConfig):
-    options = config.audio_filter
-    if options.provider == "passthrough":
-        return PassthroughAudioFilter()
-    if options.provider == "rnnoise":
-        return RNNoiseFilter(required=options.required, quality=options.resampler_quality)
-    raise SpeechConfigurationError(
-        "Krisp requires the separately installed vendor adapter and model; choose rnnoise or passthrough."
-    )
-
-
-def _make_vad(config: SpeechConfig):
-    options = config.vad
-    if options.provider == "energy":
-        return EnergyVAD(
-            options.threshold,
-            noise_multiplier=options.noise_multiplier,
-            calibration_frames=max(0, options.calibration_ms // 20),
-        )
-    return SileroVAD(
-        confidence=options.confidence,
-        min_volume=options.min_volume,
-        start_ms=options.start_ms,
-        stop_ms=options.stop_ms,
-        model_path=options.model_path,
-        required=options.required,
-    )
 
 
 class ConversationRegistry:
@@ -78,6 +44,14 @@ class WebSocketSpeechTransport(SpeechTransport):
         self.websocket = websocket
         self._closed = False
         self._received_audio = False
+        self._first_playback_started_at: float | None = None
+        self._active_response_id: int | None = None
+
+    def playback_started_at(self) -> float | None:
+        return self._first_playback_started_at
+
+    def reset_playback_metrics(self) -> None:
+        self._first_playback_started_at = None
 
     async def receive_audio(self):
         while not self._closed:
@@ -93,6 +67,8 @@ class WebSocketSpeechTransport(SpeechTransport):
             text = message.get("text")
             if text:
                 payload = json.loads(text)
+                if payload.get("type") == "playback.started" and self._first_playback_started_at is None:
+                    self._first_playback_started_at = monotonic()
                 if payload.get("type") in {"session.cancel", "session.close"}:
                     return
 
@@ -101,10 +77,19 @@ class WebSocketSpeechTransport(SpeechTransport):
 
     async def send_event(self, event) -> None:
         payload = asdict(event) if is_dataclass(event) else dict(event)
+        if payload.get("type") == "playback.begin":
+            self._active_response_id = payload.get("response_id")
+        if payload.get("type") == "speech.metrics":
+            # Safe structured telemetry: event payload intentionally has no
+            # transcript, PCM data, or credentials.
+            logger.info("speech_metrics %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
         await self.websocket.send_text(json.dumps(payload, ensure_ascii=False))
 
     async def clear_output(self) -> None:
-        await self.websocket.send_text('{"type":"playback.clear"}')
+        await self.websocket.send_text(json.dumps({
+            "type": "playback.clear", "response_id": self._active_response_id,
+        }))
+        self._active_response_id = None
 
     async def close(self) -> None:
         self._closed = True
@@ -122,28 +107,7 @@ def install_speech_route(app: FastAPI, registry: ConversationRegistry, config: S
         logger.info("Speech WebSocket connected for the active chat conversation.")
         transport = WebSocketSpeechTransport(websocket)
         try:
-            session = SpeechSession(
-                agent_session=conversation.session,
-                transport=transport,
-                asr=DashScopeASR(config.asr),
-                tts=DashScopeTTS(config.tts),
-                audio_filter=_make_audio_filter(config),
-                vad=_make_vad(config),
-                turn_detector=TurnDetector(
-                    config.turn.silence_ms,
-                    config.turn.max_duration_ms,
-                    config.turn.idle_timeout_ms,
-                    config.turn.min_speech_ms,
-                ),
-                segmenter=TextSegmenter(
-                    config.tts.chunk_chars,
-                    first_chunk_chars=config.tts.first_chunk_chars,
-                ),
-                barge_in_ms=config.turn.barge_in_ms,
-                barge_in_confidence=config.turn.barge_in_confidence,
-                barge_in_min_volume=config.turn.barge_in_min_volume,
-                diagnostics=config.diagnostics,
-            )
+            session = create_speech_session(agent_session=conversation.session, transport=transport, config=config)
         except SpeechConfigurationError as exc:
             await transport.send_event({"type": "error", "error": str(exc)})
             await websocket.close(code=1011, reason="Invalid speech configuration")
@@ -163,7 +127,7 @@ def install_speech_route(app: FastAPI, registry: ConversationRegistry, config: S
                 await original(event)
             transport.send_event = record
         await record_events()
-        await transport.send_event({"type": "session.ready", "timestamp": time()})
+        await transport.send_event({"type": "session.ready", "timestamp": time(), "mode": config.mode})
         try:
             await session.run()
         except WebSocketDisconnect:

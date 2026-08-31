@@ -29,11 +29,9 @@ class DashScopeASR:
 
 
 class DashScopeASRSession:
-    # DashScope ``Recognition.stop`` finalizes and closes one recognition
-    # request. SpeechSession creates one request per locally detected turn.
-    persistent = False
     def __init__(self, config: DashScopeASRConfig) -> None:
         self.config = config
+        self.persistent = config.persistent
         self._queue: asyncio.Queue[Transcript | Exception | None] = asyncio.Queue()
         self._recognition: Any = None
         self._closed = False
