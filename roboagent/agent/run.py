@@ -139,7 +139,6 @@ class AgentRun:
     async def _execute(self) -> None:
         agent = self.session.agent
         messages = list(self.session.messages)
-        context_state = self.session.context_state
         messages.append(self.prompt)
         final = None
         status = "failed"
@@ -152,7 +151,7 @@ class AgentRun:
             if agent.run_timeout is not None:
                 timeout_task = asyncio.create_task(self._timeout_after(agent.run_timeout))
             tools = {tool.name: tool for tool in agent.tools}
-            loop_result = await run_loop(
+            final, status, error = await run_loop(
                 model=agent.model,
                 system_prompt=agent.system_prompt,
                 messages=messages,
@@ -163,15 +162,10 @@ class AgentRun:
                 run_id=self.run_id,
                 max_turns=agent.max_turns,
                 context_manager=agent.context_manager,
-                context_state=context_state,
                 transforms=agent.hooks.context_transforms,
                 before_tool_call=agent.hooks.before_tool_call,
                 after_tool_call=agent.hooks.after_tool_call,
             )
-            final = loop_result.final_message
-            status = loop_result.status
-            error = loop_result.error
-            context_state = loop_result.context_state
         except asyncio.CancelledError:
             if not self._token.cancelled:
                 self._token.cancel("user")
@@ -190,7 +184,7 @@ class AgentRun:
         await self._emit("agent_completed", {"status": status, "error": error})
         self._terminal = True
         self._broadcaster.close()
-        self.session._commit(messages, context_state)
+        self.session._commit(messages)
         self.session._finish(self)
         assert self._result is not None
         self._result.set_result(result)

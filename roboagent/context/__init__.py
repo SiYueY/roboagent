@@ -1,12 +1,9 @@
-"""Working-context management for model invocations."""
+"""Model-context management for agent invocations."""
 
-from .context import AgentContext, ContextResult, SessionContextState
-from .manager import ContextManager, DefaultContextManager
+from .manager import ContextManager, FullContextManager, WindowContextManager
 
 __all__ = [
-    "AgentContext",
     "ContextManager",
-    "ContextResult",
-    "DefaultContextManager",
-    "SessionContextState",
+    "FullContextManager",
+    "WindowContextManager",
 ]

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from roboagent.agent.types import AgentHooks
-from roboagent.context import ContextManager, DefaultContextManager, SessionContextState
+from roboagent.context import ContextManager, FullContextManager
 from roboagent.model.client import ChatModel
 from roboagent.runtime import Message
 from roboagent.tool import Tool
@@ -43,7 +43,7 @@ class Agent:
         object.__setattr__(self, "tools", tuple(tools))
         object.__setattr__(self, "system_prompt", system_prompt)
         object.__setattr__(self, "hooks", hooks or AgentHooks())
-        object.__setattr__(self, "context_manager", context_manager or DefaultContextManager())
+        object.__setattr__(self, "context_manager", context_manager or FullContextManager())
         object.__setattr__(self, "max_turns", max_turns)
         object.__setattr__(self, "run_timeout", run_timeout)
 
@@ -52,8 +52,7 @@ class Agent:
         messages: Sequence[Message] = (),
         *,
         session_id: str | None = None,
-        context_state: SessionContextState | None = None,
     ) -> "AgentSession":
         from roboagent.agent.session import AgentSession
 
-        return AgentSession(self, messages, session_id, context_state)
+        return AgentSession(self, messages, session_id)

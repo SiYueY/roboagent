@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from roboagent.agent import Agent
-from roboagent.context import AgentContext, ContextResult, SessionContextState
-from roboagent.runtime import AssistantMessage, ModelEvent, UserMessage
+from roboagent.agent import Agent, AgentHooks
+from roboagent.context import FullContextManager, WindowContextManager
+from roboagent.runtime import AssistantMessage, ModelContext, ModelEvent, UserMessage
 
 
 class Model:
@@ -17,40 +17,53 @@ class Model:
     async def stream(self, request, cancellation):
         self.requests.append(request)
         yield ModelEvent("start")
+        yield ModelEvent("text_delta", "done")
         yield ModelEvent("done", message=AssistantMessage("done"))
 
 
-class Manager:
-    async def prepare(self, messages, state, cancellation):
-        next_state = SessionContextState("remembered", state.compacted_until + 1)
-        return ContextResult(AgentContext((messages[-1],), "remembered"), next_state)
-
-
-class CancellingManager:
-    async def prepare(self, messages, state, cancellation):
-        cancellation.cancel("user")
-        return ContextResult(AgentContext(tuple(messages)), state)
+class InvalidManager:
+    async def prepare(self, **_kwargs):
+        return ()
 
 
 class ContextIntegrationTests(unittest.TestCase):
-    def test_loop_uses_working_context_and_commits_only_context_state(self):
+    def test_agent_defaults_to_full_context_manager(self):
         model = Model()
         original = UserMessage("earlier")
-        session = Agent(model, system_prompt="system", context_manager=Manager()).new_session((original,))
+        session = Agent(model).new_session((original,))
 
         result = asyncio.run(session.run("latest"))
 
         self.assertEqual(result.status, "completed")
-        self.assertEqual(session.messages[0], original)
-        self.assertEqual(session.context_state, SessionContextState("remembered", 1))
-        request = model.requests[0]
-        self.assertEqual([message.content for message in request.context.messages], ["latest"])
-        self.assertEqual(request.context.system_prompt, "system\n\nPrevious session context:\nremembered")
+        self.assertIsInstance(session.agent.context_manager, FullContextManager)
+        self.assertEqual([message.content for message in model.requests[0].context.messages], ["earlier", "latest"])
 
-    def test_cancellation_during_context_preparation_skips_model_invocation(self):
+    def test_window_context_does_not_modify_session_transcript(self):
+        model = Model()
+        history = (UserMessage("old"), AssistantMessage("previous"), UserMessage("recent"))
+        session = Agent(model, context_manager=WindowContextManager(max_messages=2)).new_session(history)
+
+        asyncio.run(session.run("latest"))
+
+        self.assertEqual([message.content for message in session.messages], ["old", "previous", "recent", "latest", "done"])
+        self.assertEqual([message.content for message in model.requests[0].context.messages], ["recent", "latest"])
+
+    def test_context_transform_runs_after_context_manager(self):
         model = Model()
 
-        result = asyncio.run(Agent(model, context_manager=CancellingManager()).new_session().run("latest"))
+        def transform(context, _cancellation):
+            return ModelContext("changed", context.messages, context.tools)
 
-        self.assertEqual(result.status, "cancelled")
+        asyncio.run(
+            Agent(model, hooks=AgentHooks(context_transforms=(transform,))).new_session().run("latest")
+        )
+
+        self.assertEqual(model.requests[0].context.system_prompt, "changed")
+
+    def test_invalid_context_manager_result_fails_before_model_invocation(self):
+        model = Model()
+
+        result = asyncio.run(Agent(model, context_manager=InvalidManager()).new_session().run("latest"))
+
+        self.assertEqual(result.status, "failed")
         self.assertEqual(model.requests, [])

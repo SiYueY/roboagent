@@ -10,7 +10,6 @@ from roboagent.runtime import (
     ModelContext,
     ToolExecutionResult,
 )
-from roboagent.context import SessionContextState
 from roboagent.tool import ToolInvocation
 
 AgentRunStatus = Literal["completed", "failed", "cancelled", "max_turns", "timed_out"]
@@ -22,16 +21,6 @@ class AgentRunResult:
     status: AgentRunStatus
     error: str | None = None
     run_id: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class AgentLoopResult:
-    """The terminal outcome of the loop and its updated context state."""
-
-    final_message: AssistantMessage | None
-    status: AgentRunStatus
-    error: str | None
-    context_state: SessionContextState
 
 ContextTransform = Callable[
     [ModelContext, CancellationToken],

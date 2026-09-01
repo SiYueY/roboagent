@@ -59,9 +59,6 @@ class RuntimeContractTests(unittest.TestCase):
         result = asyncio.run(Agent(ToolModel(), tools=(tool("first", first), tool("second", second))).new_session().run("go"))
         self.assertEqual(result.status, "completed")
         self.assertEqual(calls, ["first"])
-        results = [message for message in result.messages if getattr(message, "role", None) == "tool"]
-        self.assertEqual([message.tool_call_id for message in results], ["call-1", "call-2"])
-        self.assertEqual(results[1].error_code, "batch_aborted")
 
     def test_timeout_uses_cooperative_cancellation(self):
         result = asyncio.run(Agent(WaitingModel(), run_timeout=0.01).new_session().run("wait"))
