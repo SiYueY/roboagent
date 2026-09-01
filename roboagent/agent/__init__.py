@@ -5,6 +5,7 @@ from roboagent.agent.run import AgentRun
 from roboagent.agent.session import AgentSession, SessionBusyError
 from roboagent.agent.types import (
     AgentHooks,
+    AgentLoopResult,
     AgentRunResult,
     AgentRunStatus,
     ToolCallDecision,
@@ -14,6 +15,7 @@ from roboagent.agent.types import (
 __all__ = [
     "Agent",
     "AgentHooks",
+    "AgentLoopResult",
     "AgentRun",
     "AgentRunResult",
     "AgentRunStatus",

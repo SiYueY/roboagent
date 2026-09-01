@@ -4,7 +4,8 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
-from roboagent.agent.types import AfterToolCall, BeforeToolCall, ContextTransform, ToolCallDecision
+from roboagent.agent.types import AgentLoopResult, AfterToolCall, BeforeToolCall, ContextTransform, ToolCallDecision
+from roboagent.context import ContextManager, SessionContextState
 from roboagent.model.client import ChatModel
 from roboagent.runtime import AssistantMessage, CancellationToken, Message, ModelContext, ModelRequest, ToolCall, ToolExecutionResult, ToolResultMessage
 from roboagent.tool import Tool, ToolInvocation
@@ -13,15 +14,25 @@ Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 async def run_loop(*, model: ChatModel, system_prompt: str | None, messages: list[Message],
                    tools: Mapping[str, Tool], definitions: tuple, cancellation: CancellationToken,
-                   emit: Emit, run_id: str, max_turns: int, transforms: Sequence[ContextTransform] = (),
+                   emit: Emit, run_id: str, max_turns: int, context_manager: ContextManager,
+                   context_state: SessionContextState, transforms: Sequence[ContextTransform] = (),
                    before_tool_call: BeforeToolCall | None = None,
-                   after_tool_call: AfterToolCall | None = None) -> tuple[AssistantMessage | None, str, str | None]:
+                   after_tool_call: AfterToolCall | None = None) -> AgentLoopResult:
     final: AssistantMessage | None = None
     for turn in range(1, max_turns + 1):
         if cancellation.cancelled:
-            return final, _cancel_status(cancellation), "Run cancelled."
+            return AgentLoopResult(final, _cancel_status(cancellation), "Run cancelled.", context_state)
         await emit("turn_started", {"turn": turn})
-        context = ModelContext(system_prompt, tuple(messages), definitions)
+        try:
+            context_result = await context_manager.prepare(messages, context_state, cancellation)
+            context_state = context_result.state
+        except Exception:
+            error = "Context preparation failed."
+            await emit("runtime_error", {"error": error, "turn": turn})
+            return AgentLoopResult(final, "failed", error, context_state)
+        if cancellation.cancelled:
+            return AgentLoopResult(final, _cancel_status(cancellation), "Run cancelled.", context_state)
+        context = ModelContext(_build_system_prompt(system_prompt, context_result.context.summary), context_result.context.messages, definitions)
         try:
             for transform in transforms:
                 context = await _await(transform(context, cancellation))
@@ -30,35 +41,63 @@ async def run_loop(*, model: ChatModel, system_prompt: str | None, messages: lis
         except Exception:
             error = "Context transform failed."
             await emit("runtime_error", {"error": error, "turn": turn})
-            return final, "failed", error
+            return AgentLoopResult(final, "failed", error, context_state)
         assistant, failure = await _stream_message(model, ModelRequest(model.model_name, context), cancellation, emit, turn)
         if failure:
             status = _cancel_status(cancellation) if cancellation.cancelled else "failed"
             await emit("runtime_error", {"error": failure, "turn": turn})
-            return final, status, failure
+            return AgentLoopResult(final, status, failure, context_state)
         assert assistant is not None
         final = assistant
         messages.append(assistant)
         await emit("message_completed", {"turn": turn, "message": assistant})
         if not assistant.tool_calls:
             await emit("turn_completed", {"turn": turn})
-            return final, "completed", None
+            return AgentLoopResult(final, "completed", None, context_state)
         stop_run = False
-        for call in assistant.tool_calls:
+        for index, call in enumerate(assistant.tool_calls):
             await emit("tool_started", {"turn": turn, "tool_call": call})
             result, stop_run = await _execute_tool(call, assistant.finish_reason, tools, context, cancellation, run_id, turn, before_tool_call, after_tool_call)
             messages.append(result)
             await emit("tool_completed", {"turn": turn, "tool_call": call, "result": result})
             if cancellation.cancelled:
-                return final, _cancel_status(cancellation), "Run cancelled."
+                await _record_skipped_tool_calls(
+                    assistant.tool_calls[index + 1 :], messages, emit, turn, "Tool call was not executed because the run was cancelled.", "cancelled"
+                )
+                return AgentLoopResult(final, _cancel_status(cancellation), "Run cancelled.", context_state)
             if result.is_error or stop_run:
+                await _record_skipped_tool_calls(
+                    assistant.tool_calls[index + 1 :], messages, emit, turn, "Tool call was not executed because a previous tool call ended the batch.", "batch_aborted"
+                )
                 break
         await emit("turn_completed", {"turn": turn})
         if stop_run:
-            return final, "completed", None
+            return AgentLoopResult(final, "completed", None, context_state)
     error = f"Agent exceeded max_turns={max_turns}."
     await emit("runtime_error", {"error": error, "turn": max_turns})
-    return final, "max_turns", error
+    return AgentLoopResult(final, "max_turns", error, context_state)
+
+
+def _build_system_prompt(system_prompt: str | None, summary: str | None) -> str | None:
+    if not summary:
+        return system_prompt
+    summary_prompt = f"Previous session context:\n{summary}"
+    return f"{system_prompt}\n\n{summary_prompt}" if system_prompt else summary_prompt
+
+
+async def _record_skipped_tool_calls(
+    calls: Sequence[ToolCall],
+    messages: list[Message],
+    emit: Emit,
+    turn: int,
+    content: str,
+    error_code: str,
+) -> None:
+    """Record a terminal result for calls deliberately not executed this turn."""
+    for call in calls:
+        result = ToolResultMessage(call.id, call.name, content, True, error_code=error_code)
+        messages.append(result)
+        await emit("tool_completed", {"turn": turn, "tool_call": call, "result": result})
 
 async def _stream_message(model: ChatModel, request: ModelRequest, cancellation: CancellationToken, emit: Emit, turn: int) -> tuple[AssistantMessage | None, str | None]:
     started = False
