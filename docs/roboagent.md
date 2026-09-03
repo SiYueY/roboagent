@@ -1,45 +1,74 @@
-# RoboAgent v1 Agent Runtime Kernel 设计
+# RoboAgent v1 Agent Runtime Kernel 完整规格
 
-## 1. 定位与设计原则
+## 1. 定位、范围与总体架构
+
+### 1.1 项目定位
 
 RoboAgent v1 是一个：
 
-> **模型无关、工具无关、可嵌入的异步 Agent Runtime Kernel。**
+> **模型无关、工具无关、模态无关、可嵌入的异步 Agent Runtime Kernel。**
 
 它定义：
 
-> **Agent 如何运行。**
+> **Agent 如何运行，以及 Runtime 如何以稳定、统一、可验证的协议管理模型调用、工具调用、控制输入和多模态消息。**
 
-而不定义：
+它不定义：
 
-> **Agent 应该如何安全地操作机器人、浏览器、代码仓库、数据库或其他业务系统。**
+> **Agent 应如何安全地操作机器人、浏览器、代码仓库、数据库或其他业务系统，也不负责具体媒体处理、长期存储、业务编排或领域安全策略。**
 
-因此，v1 负责的核心能力包括：
+v1 负责：
 
 * Agent / Session / Run 生命周期；
-* canonical transcript；
-* ModelContext 与 RunContext；
+* provider-neutral canonical transcript；
+* modality-neutral canonical message；
+* Text / Image / Audio / File 内容；
+* MediaSource；
+* MediaLimits；
+* MediaResolver；
+* ResolvedMedia；
+* ModelContext；
+* RunContext；
+* ModelCapabilities；
+* ContextManager；
+* ToolResolver / FrozenToolSet；
 * Model streaming；
-* Tool Call 执行；
-* sequential / parallel tool execution；
+* Tool Call / Tool Result；
+* sequential / parallel Tool execution；
+* ToolExecutionPolicy；
 * cancel / steer / follow-up；
 * timeout / max turns；
-* transcript commit；
-* runtime state；
+* transcript safe commit；
+* internal runtime state；
+* public RunState snapshot；
 * lifecycle events；
+* event replay；
 * `continue_run()`；
-* execution policy。
+* canonical / semantic / capability validation；
+* compatibility migration。
 
-以下能力不属于 v1 Kernel：
+v1 明确不实现：
 
 ```text
-机器人安全
-硬件资源互斥
-审批与权限
-浏览器安全
-代码沙箱
+STT
+TTS
+VAD
+AEC
 
-持久化 Memory
+audio resampling
+image resize
+OCR
+image captioning
+video frame extraction
+media transcoding
+
+automatic modality conversion
+automatic multimodal model routing
+
+media blob store
+Session persistence
+raw multimodal durable Event persistence
+
+Persistent Memory
 RAG
 MCP
 
@@ -47,43 +76,91 @@ Handoff
 Sub-Agent
 Multi-Agent
 
+Approval
+Permission
+Robot Safety
+Resource Lock
+
 Gateway
 Cron
 Telemetry Backend
 ```
 
-这些能力未来通过：
+这些能力未来都应建立在 Kernel 的稳定协议和扩展接口之上。
+
+---
+
+### 1.2 v1 多模态支持范围
+
+必须明确区分：
 
 ```text
-RunContext
-ToolExecutionPolicy
-Hooks
-Events
-Tool abstraction
+canonical protocol support
 ```
 
-在 Kernel 之外实现。
+和：
 
-### 1.1 参考框架
+```text
+end-to-end provider support
+```
 
-RoboAgent 不直接复制某一个 Agent 框架，而是综合借鉴：
+v1 定义：
+
+| Modality | Canonical Protocol | Tool I/O | E2E Adapter required |
+| -------- | -----------------: | -------: | -------------------: |
+| Text     |                  ✅ |        ✅ |                    ✅ |
+| Image    |                  ✅ |        ✅ |                    ✅ |
+| Audio    |                  ✅ |        ✅ |             Optional |
+| File     |                  ✅ |        ✅ |             Optional |
+
+因此：
+
+> **RoboAgent v1 的 canonical protocol 正式支持 Text、Image、Audio、File。**
+
+但 v1 发布阻塞的 Provider 验收只要求：
+
+```text
+Text E2E
+Text + Image E2E
+Image ToolResult E2E
+```
+
+Audio / File 必须具备完整的：
+
+```text
+canonical representation
+validation
+Tool I/O
+capability negotiation
+error semantics
+```
+
+但具体 Provider Adapter 的真实端到端支持不是 v1 发布阻塞项。
+
+Realtime Audio 不属于 v1 canonical transcript。
+
+---
+
+### 1.3 设计参考
+
+RoboAgent 综合参考：
 
 | 框架                   | 主要参考                                                              |
 | -------------------- | ----------------------------------------------------------------- |
 | Pi Agent Core        | Agent Loop、steering、follow-up、continue、tool batch、runtime control |
-| OpenAI Agents Python | Agent / Run 分层、RunContext、RunConfig、policy boundary               |
-| smolagents           | structured execution state / result                               |
-| Hermes Agent         | interrupt、skills、memory、subagent 等长期扩展边界                          |
+| OpenAI Agents Python | Agent / Run 边界、RunContext、Provider / Realtime 分层                  |
+| smolagents           | modality-agnostic Agent / Tool abstraction                        |
+| Hermes Agent         | vision、voice、interrupt、skills 等平台层扩展边界                            |
 
 总体原则：
 
-> **Pi 提供运行语义基线，OpenAI Agents 提供职责边界；RoboAgent 保持轻量、Pythonic、可嵌入。**
+> **Pi 提供运行语义基线，OpenAI Agents 提供职责边界与 Realtime 分层参考，smolagents 提供 modality-agnostic 抽象参考；RoboAgent 保持轻量、Pythonic 和可嵌入。**
 
 ---
 
-# 2. Runtime 对象模型
+### 1.4 核心对象模型
 
-RoboAgent v1 固定以下对象职责：
+RoboAgent v1 固定：
 
 ```text
 Agent        immutable reusable definition
@@ -92,18 +169,26 @@ Run          one execution lifecycle
 
 ModelContext model-visible input
 RunContext   local runtime context
-RunState     transient execution state
+
+_RunState    internal mutable execution state
+RunState     public immutable media-safe snapshot
+
 RunControl   external control plane
 
 AgentLoop    runtime orchestration
 ToolExecutor tool batch execution
 ```
 
-整体关系：
+整体结构：
 
 ```text
                     Agent
                       │
+          ┌───────────┴───────────┐
+          ▼                       ▼
+   MediaLimits              MediaResolver
+          │                       │
+          └───────────┬───────────┘
                       ▼
                    Session
              canonical transcript
@@ -113,29 +198,65 @@ ToolExecutor tool batch execution
                       │
        ┌──────────────┼──────────────┐
        ▼              ▼              ▼
-  RunContext      RunState      RunControl
+  RunContext      _RunState      RunControl
        │              │              │
        └──────────────┼──────────────┘
                       ▼
                  AgentLoop
-              ┌───────┴───────┐
-              ▼               ▼
-       ContextManager     ToolExecutor
-              │               │
-              ▼               ▼
-        ModelContext          Tool
-              │
-              ▼
-             Model
+              ┌───────┴────────┐
+              ▼                ▼
+       ContextManager      ToolExecutor
+              │                │
+              ▼                ▼
+        ModelContext        ToolOutput
+              │                │
+              ▼                ▼
+       MessageContent     MessageContent
+              │                │
+              └───────┬────────┘
+                      ▼
+                 Model Adapter
+                      │
+                      ▼
+                    Model
 ```
 
-## 2.1 Agent
+最重要的架构原则：
+
+> **Modality 是 Runtime 数据模型的一部分，不是 Runtime 控制流的一部分。**
+
+因此增加：
+
+```text
+ImageContent
+AudioContent
+FileContent
+```
+
+后：
+
+```text
+Agent
+Session
+Run
+RunControl
+AgentLoop
+ToolExecutor
+```
+
+的核心状态机不应发生结构变化。
+
+---
+
+## 2. Agent、Session、Run 与 Runtime 状态
+
+### 2.1 Agent
 
 `Agent` 是：
 
-> **不可变、可复用的 Agent Definition。**
+> **immutable reusable Agent Definition。**
 
-包含：
+概念上包含：
 
 ```text
 model
@@ -144,6 +265,9 @@ system_prompt
 context_manager
 hooks
 default_run_config
+
+media_limits
+media_resolver
 ```
 
 不包含：
@@ -151,13 +275,13 @@ default_run_config
 ```text
 current turn
 current response
-current RunState
+current _RunState
 run task
 pending controls
-tool execution task
+tool execution tasks
 ```
 
-因此，一个 Agent 可以同时服务多个 Session：
+一个 Agent 可以服务多个 Session：
 
 ```text
 Agent
@@ -168,20 +292,129 @@ Agent
     └── Run 1
 ```
 
+Agent 是配置与 execution dependencies 定义，不是运行中的 Agent 实例。
+
 ---
 
-## 2.2 AgentSession
+### 2.2 MediaLimits 属于 Agent Definition
+
+v1 定义：
+
+```python
+@dataclass(frozen=True, slots=True)
+class MediaLimits:
+    max_inline_bytes: int = 8 * 1024 * 1024
+    max_contents_per_message: int = 16
+```
+
+MediaLimits 控制：
+
+```text
+BytesSource 单对象最大 inline bytes
+单 Message 最大 MessageContent 数量
+```
+
+它控制的是：
+
+> **canonical protocol acceptance。**
+
+因此它：
+
+```text
+不属于 RunConfig
+```
+
+而属于：
+
+```text
+Agent definition
+```
+
+Session 创建时固定捕获：
+
+```text
+Agent.media_limits
+      ↓
+AgentSession._media_limits
+```
+
+该 Session 生命周期内：
+
+```text
+start()
+history import
+TranscriptValidator
+continue_run()
+ToolOutput validation
+```
+
+全部使用同一套 immutable MediaLimits。
+
+这样同一份 canonical transcript：
+
+> 不会因为不同 RunConfig 而在不同 Run 中忽然变成合法或非法。
+
+---
+
+### 2.3 MediaResolver 属于 Agent Execution Dependency
+
+推荐：
+
+```python
+@dataclass(frozen=True)
+class Agent:
+    ...
+    media_resolver: MediaResolver | None = None
+```
+
+MediaResolver 是：
+
+> **Application-owned execution dependency。**
+
+Agent 保存 Resolver reference，但 Kernel 不实现具体 filesystem / HTTP access policy。
+
+同一个 Agent 的多个并发 Session / Run 默认共享同一个 MediaResolver：
+
+```text
+Agent
+  │
+  └── MediaResolver
+        ├── Run A
+        ├── Run B
+        └── Run C
+```
+
+因此共享 Resolver 实现必须：
+
+> **concurrency-safe。**
+
+v1 不同时提供：
+
+```text
+resolver instance
++
+resolver factory
+```
+
+两套机制。
+
+保持一个明确入口。
+
+---
+
+### 2.4 AgentSession
 
 `AgentSession` 是：
 
 > **Conversation lifecycle owner。**
 
-主要负责：
+负责：
 
 ```text
 session_id
 canonical transcript
 active-run ownership
+fixed media_limits
 
 start()
 run()
@@ -192,7 +425,7 @@ continue_run()
 
 > **`Session.messages` 是唯一 canonical conversation transcript。**
 
-对外只能暴露：
+对外只能提供：
 
 ```text
 immutable snapshot
@@ -200,60 +433,17 @@ immutable snapshot
 read-only view
 ```
 
-不能允许外部直接修改内部 transcript。
-
-### Session 原子性
-
-`start()` 必须遵循：
-
-```text
-acquire active-run ownership
-        ↓
-validate session state
-        ↓
-normalize / validate UserMessage
-        ↓
-commit initial UserMessage
-        ↓
-create AgentRun
-        ↓
-start execution task
-```
-
-如果：
-
-```text
-active Run 冲突
-输入非法
-Session 状态非法
-```
-
-则：
-
-> **不得修改 transcript。**
-
-v1 只保证同一 event loop 内的并发安全。
-
-默认不保证：
-
-```text
-cross-thread
-cross-event-loop
-```
-
-调用安全。
-
-如果应用需要跨线程控制 AgentRun，应自行将操作 marshal 到 Run 所属 event loop。
+不能允许外部直接修改 transcript。
 
 ---
 
-## 2.3 AgentRun
+### 2.5 AgentRun
 
 `AgentRun` 表示：
 
-> **一次 Agent execution。**
+> **一次完整 Agent execution lifecycle。**
 
-推荐异步启动：
+推荐：
 
 ```python
 run = session.start(
@@ -262,37 +452,37 @@ run = session.start(
 )
 ```
 
-观察事件：
+订阅：
 
 ```python
 async for event in run.events():
     ...
 ```
 
-等待结果：
+等待：
 
 ```python
 result = await run.result()
 ```
 
-运行中可以：
+控制：
 
 ```python
-run.steer("Do not modify files")
-run.follow_up("Then summarize the result")
 run.cancel()
+run.steer(...)
+run.follow_up(...)
 ```
 
 Convenience API：
 
 ```python
 result = await session.run(
-    "Inspect the repository",
+    prompt,
     config=config,
 )
 ```
 
-语义等价于：
+语义等价：
 
 ```python
 run = session.start(prompt, config=config)
@@ -306,170 +496,77 @@ start() → AgentRun
 run()   → RunResult
 ```
 
-### Eager Start
+---
+
+### 2.6 `start()` 原子性
+
+固定顺序：
+
+```text
+acquire active-run ownership
+        ↓
+normalize public input
+        ↓
+canonical structure validation
+        ↓
+message semantic validation
+        ↓
+session state validation
+        ↓
+commit initial UserMessage
+        ↓
+create AgentRun
+        ↓
+immediately create execution task
+```
+
+如果：
+
+```text
+active Run exists
+input invalid
+Session invalid
+```
+
+则：
+
+> **不得修改 transcript。**
+
+v1 只保证：
+
+> **同一 event loop 内并发安全。**
+
+不默认承诺：
+
+```text
+cross-thread
+cross-event-loop
+```
+
+安全。
+
+---
+
+### 2.7 Eager Start
 
 `session.start()`：
 
 > **立即启动 execution task。**
 
-不是 lazy start。
+不是 lazy execution。
 
 因此：
 
-* active-run ownership 在 `start()` 成功时立即生效；
-* execution event 从此刻开始产生；
-* timeout 从 execution task 创建时开始计算；
-* 即使没有 subscriber，Run 仍继续执行；
-* 即使没有立即 `await result()`，Run 也不会暂停；
-* Run terminal 后自动释放 Session active ownership。
+* active-run ownership 立即生效；
+* Runtime events 可以立即产生；
+* timeout 从 execution task 创建时开始；
+* 无 subscriber 也继续执行；
+* 无 `result()` waiter 也继续执行；
+* terminal 后自动释放 Session active ownership。
 
 ---
 
-## 2.4 ModelContext 与 RunContext
-
-二者必须严格隔离。
-
-### ModelContext
-
-表示：
-
-> **模型能够看到的输入。**
-
-路径：
-
-```text
-Session.messages
-      ↓
-ContextManager
-      ↓
-ModelContext
-      ↓
-Model
-```
-
-其中可能包含：
-
-```text
-system prompt
-conversation messages
-tool schemas
-显式 model-visible context
-```
-
-### RunContext
-
-表示：
-
-> **Runtime / Tool / Hook 可以访问，但模型默认不可见的本地运行时上下文。**
-
-推荐：
-
-```python
-@dataclass(slots=True)
-class RunContext:
-    session_id: str
-    run_id: str
-    cancellation: CancellationToken
-    turn: int = 0
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-```
-
-必须满足：
-
-```text
-RunContext != ModelContext
-```
-
-并且：
-
-> **Kernel 永远不会隐式将 `RunContext.metadata` 投影到 ModelContext。**
-
-`metadata`：
-
-* application-owned；
-* Kernel 不解释；
-* Tool / Hook 默认只读；
-* 不自动进入 ModelContext；
-* 不进入 Events；
-* 不进入 RunResult；
-* 不进入默认 logging / tracing。
-
-如果应用希望某些 runtime data 对模型可见，必须显式构造 model-visible input。
-
----
-
-## 2.5 ToolInvocation
-
-推荐：
-
-```python
-@dataclass(...)
-class ToolInvocation:
-    call: ToolCall
-    run_context: RunContext
-    tool_context: ToolCallContext
-    model_context: ModelContext | None = None
-```
-
-其中：
-
-```text
-model_context
-```
-
-默认必须为：
-
-```text
-None
-```
-
-只有显式配置允许 Tool 读取当前 Turn 的 ModelContext 时才提供。
-
-如果提供：
-
-> 必须是当前 Turn 的 immutable ModelContext snapshot。
-
-因为 ModelContext 可能包含：
-
-```text
-system prompt
-conversation history
-tool definitions
-model-only instructions
-```
-
-普通 Tool 不应该无意读取这些内容。
-
----
-
-## 2.6 RunState
-
-RunState 表示：
-
-> **当前 Run 的瞬时 execution snapshot。**
-
-内部可以维护：
-
-```python
-@dataclass(slots=True)
-class RunState:
-    status: RunStatus
-    phase: RunPhase
-    turn: int = 0
-
-    streaming_message: AssistantMessage | None = None
-    pending_tool_calls: tuple[ToolCall, ...] = ()
-
-    error: RunError | None = None
-```
-
-但：
-
-> 对外只能返回 immutable snapshot / copy。
-
-不能把同一个 mutable RunState 暴露给调用方。
-
-### RunStatus
+### 2.8 RunStatus
 
 ```python
 class RunStatus(Enum):
@@ -483,7 +580,9 @@ class RunStatus(Enum):
     MAX_TURNS = "max_turns"
 ```
 
-### RunPhase
+---
+
+### 2.9 RunPhase
 
 ```python
 class RunPhase(Enum):
@@ -495,14 +594,15 @@ class RunPhase(Enum):
     TERMINAL = "terminal"
 ```
 
-合法状态转换：
+状态机：
 
 ```text
 CREATED / IDLE
       │
       ▼
-RUNNING / PREPARING_CONTEXT
+RUNNING
       │
+      ├── PREPARING_CONTEXT
       ├── MODEL
       ├── TOOL
       └── BETWEEN_TURNS
@@ -514,50 +614,126 @@ terminal status / TERMINAL
 即：
 
 ```text
-CREATED → RUNNING → exactly one terminal status
+CREATED
+    ↓
+RUNNING
+    ↓
+exactly one terminal
 ```
 
-terminal 后不能重新进入 RUNNING。
-
-### Cancellation Request
-
-Cancellation request 本身不是新的 `RunStatus`。
-
-通过：
-
-```text
-CancellationToken
-CancellationRequested event
-```
-
-表示。
-
-完成 runtime cleanup 后才进入：
-
-```text
-CANCELLED
-TIMED_OUT
-```
-
-等 terminal status。
-
-### RunState.error
-
-规则：
-
-* 正常执行时为 `None`；
-* terminal failure 确认后写入；
-* 单个 ToolCall failure 不写入 RunState.error；
-* terminal 后不再清除。
+terminal 后不能回到 RUNNING。
 
 ---
 
-## 2.7 三类信息来源
+### 2.10 Internal `_RunState`
 
-必须保持：
+Runtime 内部可以使用：
+
+```python
+@dataclass(slots=True)
+class _RunState:
+    status: RunStatus
+    phase: RunPhase
+    turn: int = 0
+
+    streaming_message: AssistantMessage | None = None
+    pending_tool_calls: tuple[ToolCall, ...] = ()
+
+    error: RunError | None = None
+```
+
+它是：
+
+> **AgentLoop 内部 mutable execution state。**
+
+内部 `_RunState` 可以暂时持有：
 
 ```text
-Session.messages ≠ RunState ≠ Events
+raw provisional MessageContent
+BytesSource
+provider-normalized provisional data
+```
+
+但不得直接作为 public API 暴露。
+
+---
+
+### 2.11 Public RunState Snapshot
+
+公共 API 暴露的：
+
+```text
+run.state
+run.state()
+run.snapshot()
+```
+
+无论最终具体命名如何，都必须返回：
+
+> **immutable、media-safe、read-only snapshot。**
+
+推荐：
+
+```python
+@dataclass(frozen=True, slots=True)
+class RunState:
+    status: RunStatus
+    phase: RunPhase
+    turn: int
+
+    streaming_content: tuple[ContentSummary, ...] = ()
+    pending_tool_calls: tuple[ToolCallSummary, ...] = ()
+
+    error: RunError | None = None
+```
+
+Public RunState：
+
+```text
+不得包含 raw BytesSource.data
+不得暴露 full local file path
+不得暴露 credential-bearing URL
+不得暴露 raw provisional image/audio payload
+```
+
+因此：
+
+```text
+internal _RunState
+        ↓
+media-safe snapshot
+        ↓
+public RunState
+```
+
+---
+
+### 2.12 RunState.error
+
+规则：
+
+```text
+normal execution
+    → None
+
+single ToolCall FAILED
+    → None
+
+Run terminal FAILED
+    → RunError
+
+terminal
+    → never clear
+```
+
+---
+
+### 2.13 三类事实来源
+
+始终：
+
+```text
+Session.messages != RunState != Events
 ```
 
 分别表示：
@@ -567,35 +743,655 @@ Session.messages
     canonical conversation truth
 
 RunState
-    transient execution snapshot
+    public execution snapshot
 
 Events
-    observable execution records
+    observable runtime records
 ```
 
-三者不能相互替代。
+内部 `_RunState` 只是 Runtime implementation state，不是新的 canonical truth。
 
 ---
 
-# 3. Canonical Transcript Protocol
+### 2.14 Turn
 
-Kernel 保存：
+一个 Turn：
 
-> **provider-neutral canonical transcript。**
+> **一次 Model Invocation，以及该 invocation 产生的完整 Tool Batch。**
 
-基础消息：
+因此：
 
 ```text
-UserMessage
-AssistantMessage
-ToolResultMessage
+steer triggers Model
+    → +1 turn
+
+follow-up triggers Model
+    → +1 turn
 ```
 
-具体 Provider 的 tool protocol 差异由 Model Adapter 处理。
+`max_turns`：
 
-## 3.1 Transcript Grammar
+> 计算 Model Invocation 次数。
 
-抽象语法：
+---
+
+## 3. Canonical Message 与多模态内容协议
+
+### 3.1 MessageContent
+
+RoboAgent 使用：
+
+```python
+MessageContent = (
+    TextContent
+    | ImageContent
+    | AudioContent
+    | FileContent
+)
+```
+
+这是：
+
+> **v1 canonical protocol closed union。**
+
+未知类型：
+
+```text
+UnsupportedContentTypeError
+```
+
+不能：
+
+```text
+ignore
+best effort
+Adapter decides
+```
+
+未来增加：
+
+```text
+VideoContent
+```
+
+时必须更新：
+
+```text
+MessageContent union
+validator
+ModelCapabilities
+Adapter
+serialization
+semantic tests
+```
+
+因此：
+
+> 新增 Video 是 canonical protocol 的版本化扩展。
+
+但不应改变 AgentLoop 状态机。
+
+v1 不定义 `Modality.VIDEO`。
+
+---
+
+### 3.2 TextContent
+
+```python
+@dataclass(frozen=True, slots=True)
+class TextContent:
+    text: str
+```
+
+必须 runtime validate：
+
+```text
+text is str
+```
+
+`TextContent("")`：
+
+> canonical structure 合法。
+
+但 UserMessage 另有 semantic validation。
+
+---
+
+### 3.3 ImageContent
+
+```python
+@dataclass(frozen=True, slots=True)
+class ImageContent:
+    source: MediaSource
+    media_type: str | None = None
+    detail: str | None = None
+```
+
+必须：
+
+```text
+source is MediaSource
+detail is str | None
+media_type is None or image/*
+```
+
+`detail`：
+
+> **optional Adapter hint。**
+
+Provider 不支持时：
+
+```text
+Adapter may ignore
+```
+
+默认不产生 capability failure。
+
+如果应用要求某个 Provider-specific detail 必须生效，应通过 Adapter options 表达。
+
+---
+
+### 3.4 AudioContent
+
+```python
+@dataclass(frozen=True, slots=True)
+class AudioContent:
+    source: MediaSource
+    media_type: str | None = None
+    transcript: str | None = None
+```
+
+必须：
+
+```text
+source is MediaSource
+transcript is str | None
+media_type is None or audio/*
+```
+
+`transcript`：
+
+> **non-model-visible auxiliary metadata。**
+
+不能自动：
+
+```text
+transcript → TextContent
+```
+
+如果应用希望模型看到 transcript：
+
+```python
+UserMessage(
+    content=(
+        AudioContent(...),
+        TextContent("known transcript"),
+    )
+)
+```
+
+必须显式提供。
+
+---
+
+### 3.5 FileContent
+
+```python
+@dataclass(frozen=True, slots=True)
+class FileContent:
+    source: MediaSource
+    media_type: str | None = None
+    filename: str | None = None
+```
+
+要求：
+
+```text
+filename is str | None
+media_type is None or valid MIME
+```
+
+`Modality.FILE` 只表示：
+
+> **存在某种 native file/document input 能力。**
+
+不意味着：
+
+```text
+PDF
+DOCX
+ZIP
+source code
+binary
+```
+
+全部支持。
+
+具体 MIME subtype 由 Adapter 精确验证。
+
+---
+
+### 3.6 MediaSource
+
+```python
+MediaSource = (
+    BytesSource
+    | FileSource
+    | UrlSource
+)
+```
+
+同样是 closed union。
+
+未知 source：
+
+```text
+UnsupportedMediaSourceError
+```
+
+---
+
+### 3.7 BytesSource
+
+```python
+@dataclass(frozen=True, slots=True)
+class BytesSource:
+    data: bytes
+```
+
+要求：
+
+```text
+type(data) is bytes
+len(data) > 0
+len(data) <= MediaLimits.max_inline_bytes
+```
+
+BytesSource：
+
+> **inline immutable / snapshot-like media payload。**
+
+---
+
+### 3.8 FileSource
+
+```python
+@dataclass(frozen=True, slots=True)
+class FileSource:
+    path: str
+```
+
+要求：
+
+```text
+path is str
+non-empty
+non-whitespace
+absolute path
+```
+
+`absolute path` 使用创建或验证 `FileSource` 的当前宿主操作系统的
+`pathlib.Path(path).is_absolute()` 语义：POSIX host 使用 POSIX absolute
+path；Windows host 接受 drive-rooted path 或 UNC path。当前宿主不能识别为
+absolute 的路径必须拒绝；跨主机路径映射属于 Application / MediaResolver
+policy，不属于 canonical protocol。
+
+Kernel 不检查：
+
+```text
+file exists
+readable
+media valid
+```
+
+FileSource 是：
+
+> **external live reference。**
+
+因此：
+
+```text
+same canonical transcript
+```
+
+在未来 Turn / `continue_run()` 时可能读取到不同文件内容。
+
+v1 接受：
+
+```text
+canonical structural identity
+    !=
+external media byte identity
+```
+
+---
+
+### 3.9 UrlSource
+
+```python
+@dataclass(frozen=True, slots=True)
+class UrlSource:
+    url: str
+```
+
+Canonical validation 只验证：
+
+```text
+url is str
+non-empty
+absolute
+scheme ∈ {http, https}
+host syntactically valid
+```
+
+不判断：
+
+```text
+localhost
+private IP
+redirect
+DNS rebinding
+credentials
+availability
+resource size
+```
+
+这些属于 MediaResolver。
+
+UrlSource 同样是：
+
+> **external live reference。**
+
+---
+
+### 3.10 MediaSource Provenance 不等于授权
+
+严格不变量：
+
+> **MediaSource 的来源不影响访问权限。**
+
+无论来自：
+
+```text
+User
+Tool
+Model Provider
+history import
+```
+
+只要下一次 Provider invocation 需要实际访问：
+
+```text
+FileSource
+UrlSource
+```
+
+都必须重新经过：
+
+```text
+MediaResolver
+```
+
+因此：
+
+```text
+provider-created URL
+    !=
+trusted URL
+```
+
+以及：
+
+```text
+source provenance
+    !=
+access authorization
+```
+
+---
+
+### 3.11 MIME
+
+Canonical MIME 使用：
+
+```text
+type/subtype
+```
+
+规则：
+
+```text
+ASCII
+normalized lowercase
+no MIME parameters
+```
+
+例如：
+
+```text
+image/jpeg
+audio/wav
+application/pdf
+```
+
+合法。
+
+以下：
+
+```text
+image/jpeg; charset=utf-8
+```
+
+v1 canonical layer 拒绝。
+
+类型必须匹配：
+
+```text
+ImageContent → image/*
+AudioContent → audio/*
+FileContent  → any valid canonical MIME
+```
+
+---
+
+### 3.12 Public Construction 与 Tuple Normalization
+
+Canonical 内部：
+
+```python
+tuple[MessageContent, ...]
+```
+
+公共 API 可接受：
+
+```python
+Sequence[MessageContent]
+```
+
+但必须排除：
+
+```text
+str
+bytes
+bytearray
+```
+
+处理：
+
+```text
+public value
+    ↓
+normalize
+    ↓
+runtime type validation
+    ↓
+canonical structure validation
+    ↓
+message semantic validation
+    ↓
+tuple[MessageContent, ...]
+```
+
+Canonical transcript 不保存 mutable list。
+
+---
+
+### 3.13 兼容字符串构造
+
+v1 继续允许：
+
+```python
+UserMessage("hello")
+AssistantMessage("hello")
+ToolOutput("hello")
+```
+
+作为 ergonomic shorthand。
+
+统一：
+
+```text
+str
+ ↓
+TextContent
+ ↓
+tuple
+```
+
+它可以长期作为公共便利 API。
+
+真正需要 deprecated 的是：
+
+```text
+text-only internal assumptions
+legacy result types
+legacy serialization
+```
+
+而不是自然的字符串输入。
+
+---
+
+### 3.14 UserMessage
+
+Canonical 语义：
+
+```python
+@dataclass(frozen=True, slots=True)
+class UserMessage:
+    content: tuple[MessageContent, ...]
+```
+
+要求：
+
+```text
+content non-empty
+```
+
+如果全部是 TextContent：
+
+```text
+至少一个具有非-whitespace text
+```
+
+合法：
+
+```text
+Image only
+Audio only
+File only
+Text("") + Image
+```
+
+非法：
+
+```text
+content=()
+Text("") only
+Text("   ") only
+```
+
+---
+
+### 3.15 AssistantMessage
+
+```python
+@dataclass(frozen=True, slots=True)
+class AssistantMessage:
+    content: tuple[MessageContent, ...] = ()
+    tool_calls: tuple[ToolCall, ...] = ()
+```
+
+允许：
+
+```text
+text only
+image only
+audio only
+file only
+mixed content
+tool calls only
+content + tool calls
+```
+
+因此：
+
+```text
+Assistant output != str
+```
+
+成为正式 v1 语义。
+
+结构上：
+
+```python
+AssistantMessage(
+    content=(),
+    tool_calls=(),
+)
+```
+
+可以 canonical-valid。
+
+最终是否视为正常 finish，由 Adapter finish semantics 判断。
+
+---
+
+### 3.16 ToolResultMessage
+
+```python
+@dataclass(frozen=True, slots=True)
+class ToolResultMessage:
+    tool_call_id: str
+    tool_name: str
+    status: ToolCallStatus
+    content: tuple[MessageContent, ...] = ()
+    error: ToolExecutionError | None = None
+```
+
+不包含：
+
+```text
+details: Any
+```
+
+因为：
+
+* `Any` 可能 mutable；
+* 会破坏 canonical transcript 深度稳定性；
+* 容易泄露 application internal state。
+
+`details` 只存在：
+
+```text
+ToolOutput
+ToolCallOutcome
+internal observer data
+```
+
+---
+
+### 3.17 Canonical Transcript Grammar
 
 ```text
 Transcript :=
@@ -611,184 +1407,132 @@ ToolExchange :=
     ToolResultMessage+
 ```
 
-假设：
+若：
 
 ```text
-AssistantMessage(
-    tool_calls=[A, B, C]
-)
+Assistant(tool_calls=[A, B, C])
 ```
 
-那么必须紧跟：
+必须：
 
 ```text
-ToolResultMessage(A)
-ToolResultMessage(B)
-ToolResultMessage(C)
+ToolResult(A)
+ToolResult(B)
+ToolResult(C)
 ```
 
-要求：
+严格满足：
 
 ```text
-数量一致
-顺序一致
-tool_call_id 一致
+count
+order
+tool_call_id
 ```
 
-在这些 ToolResults 全部完成前：
+Tool Exchange 完成前：
 
-> 不能插入新的 UserMessage 或 AssistantMessage。
+```text
+禁止新 UserMessage
+禁止新 AssistantMessage
+```
 
 ---
 
-## 3.2 合法 Tool Exchange
+### 3.18 合法 Transcript
 
 合法：
 
 ```text
-Assistant(tool_calls=[A])
-ToolResult(A)
+User(Text + Image)
+Assistant(Text)
 ```
 
 合法：
 
 ```text
 Assistant(
-    text="I'll inspect the repository.",
-    tool_calls=[A, B],
+    Text,
+    tool_calls=[A, B]
 )
-
-ToolResult(A)
-ToolResult(B)
+ToolResult(A, Image)
+ToolResult(B, Text)
 ```
-
----
-
-## 3.3 非法 Tool Exchange
-
-非法：
-
-```text
-Assistant(tool_calls=[A, B])
-ToolResult(B)
-ToolResult(A)
-```
-
-非法：
-
-```text
-Assistant(tool_calls=[A])
-UserMessage(...)
-ToolResult(A)
-```
-
-非法：
-
-```text
-ToolResult(A)
-```
-
-非法：
-
-```text
-Assistant(no tool_calls)
-ToolResult(A)
-```
-
-非法：
-
-```text
-Assistant(tool_calls=[A])
-ToolResult(A)
-ToolResult(A)
-```
-
----
-
-## 3.4 Consecutive UserMessage
-
-以下合法：
-
-```text
-UserMessage(A)
-UserMessage(B)
-UserMessage(C)
-```
-
-这是 steering / follow-up 合并进入下一 Model Turn 的重要基础。
-
----
-
-## 3.5 Assistant text + ToolCall
 
 合法：
 
 ```text
-AssistantMessage(
-    content="I'll inspect the files.",
-    tool_calls=[A],
-)
+User(Text)
+User(Image)
+User(Audio)
+Assistant(...)
 ```
 
-但必须继续完成：
+---
+
+### 3.19 非法 Transcript
+
+非法：
+
+```text
+Assistant(A, B)
+ToolResult(B)
+ToolResult(A)
+```
+
+非法：
+
+```text
+Assistant(A)
+User(...)
+ToolResult(A)
+```
+
+非法：
 
 ```text
 ToolResult(A)
 ```
 
----
-
-## 3.6 Empty Assistant
-
-以下 provider-normalized message 合法：
+非法：
 
 ```text
-AssistantMessage(
-    content="",
-    tool_calls=[],
-)
+Assistant(no tools)
+ToolResult(A)
 ```
 
-Kernel 不因为内容为空而自动破坏 transcript。
-
-是否将其解释为：
-
-```text
-normal completion
-model protocol error
-特殊 finish state
-```
-
-由 Model Adapter / finish reason 处理。
+非法 duplicate ToolResult。
 
 ---
 
-## 3.7 ToolCall ID
+### 3.20 ToolCall ID
 
-同一个 AssistantMessage 中：
+同一个 AssistantMessage 内：
 
-> **ToolCall.id 必须唯一。**
+```text
+ToolCall.id MUST be unique
+```
 
 重复：
-
-```text
-ToolCall(id="1")
-ToolCall(id="1")
-```
-
-必须产生：
 
 ```text
 ProtocolError
 ```
 
-不能进入 ToolExecutor。
+不得执行。
 
 ---
 
-## 3.8 History Import
+### 3.21 TranscriptValidator
 
-导入已有 transcript 时必须使用与 runtime 相同的：
+以下统一：
+
+```text
+runtime transcript
+history import
+continue_run()
+```
+
+使用同一个：
 
 ```text
 TranscriptValidator
@@ -797,7 +1541,13 @@ TranscriptValidator
 验证：
 
 ```text
-message sequence
+runtime field types
+
+MessageContent
+MediaSource
+MIME
+Message semantics
+
 ToolCall IDs
 ToolResult count
 ToolResult order
@@ -805,65 +1555,927 @@ ToolResult ownership
 dangling ToolCall
 ```
 
-非法 transcript：
+---
 
-> 直接拒绝导入或创建 Session。
+### 3.22 Validation 分层
 
-不能等到下一 Model 调用才发现。
+#### Layer 1 — Canonical Structure Validation
+
+判断对象本身是否合法：
+
+```text
+unknown Content
+unknown Source
+
+wrong runtime type
+
+empty BytesSource
+oversized BytesSource
+relative FileSource
+invalid URL
+invalid MIME
+
+Image + audio/*
+Audio + image/*
+```
+
+#### Layer 2 — Message Semantic Validation
+
+判断合法 Contents 能否组成合法 Message：
+
+```text
+empty UserMessage
+whitespace-only text UserMessage
+```
+
+#### Layer 3 — Model Capability Validation
+
+判断合法 ModelContext 是否能被当前 Model / Adapter 接受：
+
+```text
+ImageContent
++
+TEXT-only model
+```
+
+产生：
+
+```text
+ModelCapabilityError
+```
+
+统一：
+
+```text
+FAILED / MODEL_ERROR
+```
 
 ---
 
-# 4. AgentLoop 与 Runtime Control
+### 3.23 System / Tool Schema / Tool Arguments
 
-## 4.1 Turn 定义
+v1 多模态只属于：
 
-一个 Turn 定义为：
+```text
+MessageContent
+```
 
-> **一次 Model Invocation，以及由它产生的一次完整 Tool Batch。**
+以下仍然：
+
+```text
+system_prompt → str
+
+Tool schema
+    → JSON-compatible schema
+
+Tool arguments
+    → JSON-compatible values
+```
+
+不允许：
+
+```text
+ImageContent inside Tool arguments
+AudioContent inside system prompt
+```
+
+---
+
+## 4. MediaResolver、ResolvedMedia 与媒体访问边界
+
+### 4.1 MediaResolver
+
+正式接口：
+
+```python
+class MediaResolver(Protocol):
+    async def resolve(
+        self,
+        source: MediaSource,
+        *,
+        expected_media_type: str | None,
+        run_context: RunContext,
+        cancellation: CancellationToken,
+    ) -> ResolvedMedia:
+        ...
+```
+
+它是：
+
+> **Application-owned media access boundary。**
+
+Kernel 不内置：
+
+```text
+filesystem downloader
+HTTP downloader
+SSRF policy
+credential manager
+```
+
+`expected_media_type` 必须由 Adapter 从正在编码的 canonical content 的
+`media_type` 原样传入。这样 Resolver 能把检测到的 MIME 与 canonical
+声明比较；`None` 表示 canonical content 未声明 MIME。
+
+---
+
+### 4.2 MediaResolver 与 RunContext
+
+Resolver 可以读取当前：
+
+```text
+session_id
+run_id
+metadata
+```
+
+用于：
+
+```text
+tenant-aware media policy
+user-specific credentials
+session-specific file roots
+audit scope
+per-run accounting
+```
+
+但：
+
+> **Resolver 不得修改 RunContext。**
+
+并且：
+
+> **Resolver 读取 RunContext 不意味着 RunContext.metadata 可以隐式进入 ModelContext。**
+
+仍然保持：
+
+```text
+RunContext != ModelContext
+```
+
+---
+
+### 4.3 默认媒体访问行为
+
+默认：
+
+```text
+BytesSource
+    → directly resolvable
+
+FileSource
+UrlSource
+    → denied if no MediaResolver
+```
+
+Adapter 不允许绕过 Resolver 自行：
+
+```text
+open(path)
+HTTP GET(url)
+```
+
+---
+
+### 4.4 ResolvedMediaPayload
+
+v1：
+
+```python
+ResolvedMediaPayload = bytes | Path
+```
+
+不支持 streaming payload。
+
+---
+
+### 4.5 MediaOwnership
+
+为避免 Path ownership 歧义，正式定义：
+
+```python
+class MediaOwnership(Enum):
+    BORROWED = "borrowed"
+    OWNED = "owned"
+```
+
+---
+
+### 4.6 ResolvedMedia
+
+```python
+@dataclass(slots=True)
+class ResolvedMedia:
+    payload: bytes | Path
+    media_type: str | None
+    size: int
+    source: MediaSource
+    ownership: MediaOwnership
+
+    async def close(self) -> None:
+        ...
+```
+
+`ResolvedMedia` 表示：
+
+> **已经通过 application access boundary，并可在当前 Provider consumption scope 中安全使用的媒体资源。**
+
+---
+
+### 4.7 ResolvedMedia.payload
+
+允许：
+
+```text
+bytes
+Path
+```
+
+`payload` 在：
+
+```text
+close()
+```
+
+前必须保持可用。
+
+---
+
+### 4.8 BORROWED Ownership
 
 例如：
 
 ```text
-Model
-  ↓
-Tool A
-Tool B
-  ↓
-next Model
+FileSource("/data/a.jpg")
+    ↓
+ResolvedMedia(
+    payload=Path("/data/a.jpg"),
+    ownership=BORROWED
+)
 ```
 
-第一段属于一个 Turn。
+表示：
 
-所以：
+> payload 生命周期由外部 Application 所有。
+
+`close()`：
 
 ```text
-steering → new Model Invocation → +1 turn
-
-follow-up → new Model Invocation → +1 turn
+不得删除 payload
 ```
 
-`max_turns` 计算：
-
-> Model Invocation 数量。
+可以释放 Resolver 自己附带创建的 handle / internal bookkeeping。
 
 ---
 
-## 4.2 Frozen Visible Tool Set
+### 4.9 OWNED Ownership
 
-每个 Turn 首先解析本轮可见工具：
+例如：
 
 ```text
-ToolResolver
-      ↓
-FrozenToolSet
-      ↓
-┌───────────────┐
-│               │
-▼               ▼
-ModelContext  ToolExecutor
+UrlSource(...)
+    ↓
+download temp file
+    ↓
+ResolvedMedia(
+    payload=Path("/tmp/..."),
+    ownership=OWNED
+)
 ```
 
-推荐接口：
+表示：
+
+> payload 生命周期由 Resolver 所有。
+
+`close()`：
+
+```text
+应 best-effort 删除 / 释放 payload
+```
+
+---
+
+### 4.10 Bytes Ownership
+
+如果 Resolver 直接返回 canonical BytesSource.data：
+
+```text
+ownership=BORROWED
+```
+
+如果 Resolver 创建了新的 bytes payload：
+
+```text
+ownership=OWNED
+```
+
+---
+
+### 4.11 为什么 v1 不支持 Streaming ResolvedMedia
+
+v1 不定义：
+
+```text
+AsyncIterator[bytes]
+read()
+seek()
+stream()
+```
+
+避免提前引入：
+
+```text
+rewind
+partial retry
+stream ownership
+stream backpressure
+provider streaming upload
+```
+
+大媒体可以 materialize 为 Path。
+
+未来再扩展。
+
+---
+
+### 4.12 ResolvedMedia.media_type
+
+如果 canonical Content 已显式提供：
+
+```text
+media_type
+```
+
+则：
+
+> **canonical media_type 优先。**
+
+这里的 canonical 值就是 `resolve(..., expected_media_type=...)` 的
+`expected_media_type`；Resolver 不能只从 `MediaSource` 推断它。
+
+Resolver 检测结果与其冲突：
+
+```text
+MediaResolutionError(
+    MEDIA_TYPE_MISMATCH
+)
+```
+
+不能静默替换 canonical MIME。
+
+如果 canonical：
+
+```text
+media_type=None
+```
+
+Resolver 可以检测：
+
+```text
+ResolvedMedia.media_type
+```
+
+供 Adapter 使用。
+
+但：
+
+> 不反向修改 canonical MessageContent。
+
+---
+
+### 4.13 ResolvedMedia.size
+
+`size`：
+
+```text
+必须 >= 0
+```
+
+表示实际 resolved payload byte size。
+
+可以用于：
+
+```text
+provider-specific limit validation
+download quota
+upload validation
+diagnostics
+```
+
+---
+
+### 4.14 ResolvedMedia.close()
+
+必须：
+
+```text
+async
+idempotent
+best-effort
+```
+
+负责：
+
+```text
+release Resolver-owned memory
+delete OWNED temporary Path
+close Resolver-created handle
+release temporary upload preparation resources
+```
+
+不得：
+
+```text
+delete BORROWED FileSource path
+mutate canonical MediaSource
+```
+
+---
+
+### 4.15 ResolvedMedia 生命周期
+
+每次：
+
+```text
+resolve()
+```
+
+产生：
+
+> **单次 Provider consumption scope resource。**
+
+推荐：
+
+```python
+resolved = await resolver.resolve(
+    source,
+    expected_media_type=content.media_type,
+    run_context=run_context,
+    cancellation=token,
+)
+
+try:
+    request = adapter.encode_media(resolved)
+    response = await adapter.invoke(request)
+finally:
+    await resolved.close()
+```
+
+必须覆盖：
+
+```text
+normal Provider success
+Adapter encode failure
+Provider request failure
+Provider response failure
+Run cancellation
+timeout
+```
+
+不能等到整个 Run terminal 才统一 cleanup。
+
+---
+
+### 4.16 Cleanup Failure
+
+`close()` cleanup failure：
+
+```text
+log / diagnostic only
+```
+
+默认不能：
+
+```text
+overwrite primary error
+turn successful model call into Run failure
+```
+
+---
+
+### 4.17 MediaResolutionError
+
+建议稳定错误码：
+
+```python
+class MediaResolutionErrorCode(Enum):
+    ACCESS_DENIED = "access_denied"
+    NOT_FOUND = "not_found"
+    TOO_LARGE = "too_large"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    FETCH_FAILED = "fetch_failed"
+    MEDIA_TYPE_MISMATCH = "media_type_mismatch"
+```
+
+```python
+class MediaResolutionError(Exception):
+    code: MediaResolutionErrorCode
+```
+
+映射：
+
+```text
+ACCESS_DENIED
+NOT_FOUND
+TOO_LARGE
+FETCH_FAILED
+MEDIA_TYPE_MISMATCH
+    → FAILED / MODEL_ERROR
+```
+
+如果：
+
+```text
+TIMEOUT
+```
+
+由 Run deadline 导致：
+
+```text
+→ TIMED_OUT
+```
+
+如果：
+
+```text
+CANCELLED
+```
+
+由用户 Run cancellation 导致：
+
+```text
+→ CANCELLED
+```
+
+cancel / timeout 不能被普通 MODEL_ERROR 覆盖。
+
+---
+
+### 4.18 Resolver Access Policy
+
+v1 不额外增加：
+
+```text
+MediaAccessPolicy
+MediaManager
+MediaStore
+```
+
+应用将策略封装进 MediaResolver。
+
+Resolver 可以控制：
+
+```text
+filesystem roots
+allowed hosts
+private networks
+ports
+redirects
+credentials
+download size
+timeout
+temporary files
+tenant identity
+```
+
+---
+
+### 4.19 Resolver Concurrency
+
+共享 MediaResolver 必须：
+
+> **concurrency-safe。**
+
+多个 Run 的：
+
+```text
+resolve()
+close()
+```
+
+不得互相污染。
+
+---
+
+### 4.20 同一 Provider Invocation 的多媒体 Resolution
+
+同一条 ModelContext message 中的多个 external media 可以由 Adapter
+并行 resolve，以减少准备时间；是否并行由 Adapter 决定。
+
+无论 resolve completion order 如何：
+
+```text
+canonical MessageContent order
+        =
+encoded provider content order
+```
+
+若其中一个 ordinary resolution 失败：
+
+1. 记录最先观察到的 ordinary failure 作为 primary failure；
+2. 对尚未完成的 sibling resolve 请求 cancellation；
+3. 等待所有已启动 resolve 到达可安全 cleanup 的状态；
+4. 对每个已成功 resolve 的资源调用 `close()`；
+5. 以 primary failure 结束本次 Model preparation。
+
+Run cancellation 或 timeout 优先于 ordinary failure，并分别保持
+`CANCELLED` / `TIMED_OUT` 语义。
+
+---
+
+### 4.21 Resolver Cancellation
+
+Resolver 必须响应：
+
+```text
+Run cancellation
+timeout
+```
+
+尽力：
+
+```text
+cancel network request
+close stream
+release temporary resource
+```
+
+---
+
+### 4.22 Provider 输出媒体仍重新授权
+
+如果 Provider 输出：
+
+```python
+ImageContent(
+    source=UrlSource(...)
+)
+```
+
+进入 canonical transcript：
+
+> 它只是一个 canonical reference。
+
+下一 Turn 需要实际访问时：
+
+```text
+必须重新经过 MediaResolver
+```
+
+Tool 输出 / history import 同理。
+
+---
+
+### 4.23 跨 Session / Run 媒体预算
+
+v1 Kernel 只保证：
+
+```text
+max_inline_bytes
+max_contents_per_message
+```
+
+以下属于 Application responsibility：
+
+```text
+Session cumulative media memory
+Run cumulative media bytes
+media cache
+storage quota
+upload quota
+history retention
+```
+
+长期 Session 中大量：
+
+```text
+BytesSource
+```
+
+可能保留大量内存。
+
+需要 bounded retention 的应用应：
+
+```text
+prefer external references
+implement Session lifecycle
+implement compaction
+future blob storage
+```
+
+---
+
+## 5. ModelContext、Capabilities、Streaming 与 Provider Adapter
+
+### 5.1 ModelContext
+
+```python
+@dataclass(frozen=True)
+class ModelContext:
+    messages: tuple[Message, ...]
+    ...
+```
+
+Messages 可以多模态。
+
+路径：
+
+```text
+Session.messages
+      ↓
+ContextManager
+      ↓
+ModelContext
+      ↓
+Model Adapter
+      ↓
+MediaResolver as needed
+      ↓
+Provider
+```
+
+---
+
+### 5.2 RunContext
+
+```python
+@dataclass(slots=True)
+class RunContext:
+    session_id: str
+    run_id: str
+    cancellation: CancellationToken
+    turn: int = 0
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+```
+
+始终：
+
+```text
+RunContext != ModelContext
+```
+
+---
+
+### 5.3 metadata
+
+metadata：
+
+* application-owned；
+* Kernel 不解释；
+* Tool / Hook / Resolver 可以读取；
+* 不隐式进入 ModelContext；
+* 不进入 RunResult；
+* 不进入默认 Event serialization；
+* 不进入默认 logging。
+
+---
+
+### 5.4 Modality
+
+```python
+class Modality(Enum):
+    TEXT = "text"
+    IMAGE = "image"
+    AUDIO = "audio"
+    FILE = "file"
+```
+
+没有 VIDEO。
+
+---
+
+### 5.5 ModelCapabilities
+
+```python
+@dataclass(frozen=True, slots=True)
+class ModelCapabilities:
+    input_modalities: frozenset[Modality]
+    output_modalities: frozenset[Modality]
+    tool_result_modalities: frozenset[Modality]
+    supports_tools: bool = False
+```
+
+这是：
+
+> **coarse-grained declaration。**
+
+不是完整 Provider feature matrix。
+
+---
+
+### 5.6 Exact Adapter Validation
+
+例如：
+
+```text
+IMAGE in input_modalities
+```
+
+只表示：
+
+> Adapter 至少支持某种 Image input。
+
+不保证：
+
+```text
+all roles
+all MIME
+all MediaSource
+all provider modes
+```
+
+全部支持。
+
+最终精确校验属于：
+
+```text
+Model Adapter
+```
+
+---
+
+### 5.7 Role-specific Limitations
+
+v1 不建立：
+
+```text
+role × modality × MIME × source
+```
+
+复杂 capability matrix。
+
+例如：
+
+```text
+user image supported
+assistant history image unsupported
+```
+
+由 Adapter request encoding 阶段精确校验。
+
+失败：
+
+```text
+ModelCapabilityError
+    ↓
+FAILED / MODEL_ERROR
+```
+
+---
+
+### 5.8 FILE Capability
+
+```text
+FILE in input_modalities
+```
+
+不意味着任意文件类型都支持。
+
+Adapter 可以：
+
+```text
+accept application/pdf
+reject application/zip
+```
+
+---
+
+### 5.9 Tool Result Modalities
+
+`tool_result_modalities` 单独定义：
+
+```text
+哪些 modality 可以出现在 canonical ToolResult 并进入下一 Model invocation
+```
+
+例如：
+
+```text
+normal input supports AUDIO
+ToolResult does not support AUDIO
+```
+
+是合法能力组合。
+
+---
+
+### 5.10 ToolResolver 与 FrozenToolSet
+
+每 Turn：
+
+```text
+ToolResolver.resolve()
+        ↓
+FrozenToolSet
+        ↓
+┌──────────────┐
+│              │
+▼              ▼
+Model        Executor
+```
+
+推荐：
 
 ```python
 class ToolResolver(Protocol):
@@ -875,194 +2487,599 @@ class ToolResolver(Protocol):
         ...
 ```
 
-流程：
-
-```text
-resolve visible tools
-        ↓
-freeze tool set
-        ↓
-build ModelContext
-using exactly those tool schemas
-        ↓
-Model generates ToolCalls
-        ↓
-Executor resolves calls
-against the same FrozenToolSet
-```
-
 必须保证：
 
-> **模型看到的工具集合和本 Turn Executor 能执行的工具集合完全一致。**
-
-Resolver 可以根据：
-
-```text
-RunContext
-```
-
-进行本地工具过滤。
-
-但不能把：
-
-```text
-RunContext.metadata
-```
-
-自动注入模型。
+> **模型看到的 Tool schemas 与 Executor 可执行的 Tool 集合一致。**
 
 ---
 
-## 4.3 ContextManager
+### 5.11 ContextManager
 
-每个 Turn 都重新执行：
+每 Turn：
 
-```python
-ContextManager.prepare(...)
+```text
+ToolResolver
+      ↓
+FrozenToolSet
+      ↓
+ContextManager.prepare()
 ```
 
-概念输入：
+ContextManager 输入：
 
 ```text
 canonical transcript
 system prompt
-FrozenToolSet definitions
+FrozenToolSet
 explicit model-visible application values
 ```
 
-所谓：
-
-```text
-model-visible runtime values
-```
-
-必须由应用显式提供。
-
-Kernel 不允许：
-
-```text
-RunContext.metadata
-      ↓ automatic extraction
-ModelContext
-```
-
-Context preparation failure：
-
-```text
-RunStatus.FAILED
-RunTerminationReason.CONTEXT_ERROR
-```
-
-现有 context transform 能力应逐渐归入：
-
-```text
-ContextManager pipeline
-```
-
-而不是 Hooks。
+不自动读取 RunContext.metadata 并投影给模型。
 
 ---
 
-## 4.4 AgentLoop
+### 5.12 Multimodal Context
 
-AgentLoop 负责：
+ContextManager 必须以：
 
 ```text
-Run lifecycle
-Turn lifecycle
-
-resolve FrozenToolSet
-Context preparation
-
-Model invocation
-Model streaming
-
-Assistant commit
-
-ToolExecutor orchestration
-ToolResult commit
-
-RunControl observation
-RunControl consumption
-
-termination
+whole Message
 ```
 
-而：
+为基本语义单元。
 
-> **不再负责底层 Tool execution。**
-
-整体：
+不能默认：
 
 ```text
-Run Started
-     │
-     ▼
-resolve FrozenToolSet
-     │
-     ▼
-ContextManager.prepare()
-     │
-     ▼
-invoke Model
-     │
-     ▼
-stream model events
-     │
-     ▼
-commit AssistantMessage
-     │
-     ├── tool calls ───────────────┐
-     │                             │
-     ▼                             │
-ToolExecutor                       │
-     │                             │
-     ▼                             │
-ToolExecutionBatchResult           │
-     │                             │
-     ▼                             │
-commit ToolResultMessages          │
-     │                             │
-     └──────────────┬──────────────┘
-                    ▼
-              safe boundary
-                    │
-           commit controls
-                    │
-             next model turn?
-              │            │
-             yes           no
-              │            │
-              ▼            ▼
-          next turn      terminal
+User(Text + Image)
+    ↓
+Text only
+```
+
+Tool Exchange 同样必须整体保留。
+
+---
+
+### 5.13 Context Budget
+
+v1 不定义：
+
+```text
+image token
+audio token
+file token
+```
+
+统一估算。
+
+行为：
+
+```text
+ContextManager preserves semantic integrity
+        ↓
+Adapter / Model may estimate provider limits
+        ↓
+provider-specific rejection if needed
 ```
 
 ---
 
-## 4.5 RunControl
+### 5.14 Provider Adapter
 
-RunControl 提供：
+负责：
 
 ```text
-cancel
-steer
-follow_up
+coarse capability validation
+exact provider validation
+
+encode canonical Messages
+encode MessageContent
+
+request MediaResolver for external sources
+
+stream provider output
+normalize ToolCall
+normalize finish reason
+normalize multimodal output
+```
+
+Kernel 不知道具体：
+
+```text
+input_text
+image_url
+base64 image
+input_audio
+document block
+tool result role
+```
+
+---
+
+### 5.15 Internal ModelStreamItem
+
+内部 Provider stream 使用：
+
+```python
+ModelStreamItem = (
+    TextDelta
+    | ToolCallDelta
+    | ContentCompleted
+)
+```
+
+它不是 public Event 类型。
+
+---
+
+### 5.16 TextDelta
+
+```python
+@dataclass(frozen=True)
+class TextDelta:
+    text: str
+```
+
+---
+
+### 5.17 ToolCallDelta
+
+v1 不要求 Provider 一开始就提供正式 ToolCall ID。
+
+定义：
+
+```python
+@dataclass(frozen=True)
+class ToolCallDelta:
+    index: int
+    call_id: str | None = None
+    name: str | None = None
+    arguments_delta: str = ""
 ```
 
 其中：
 
 ```text
-steer
-follow_up
+index
+    = 本 Model invocation 内 provisional ToolCall identity
 ```
 
-调用时：
+而：
 
-> **只进入 pending-control queue。**
+```text
+call_id
+    = canonical identity candidate
+```
 
-不能立即写入 transcript。
+---
 
-推荐：
+### 5.18 ToolCall Streaming Normalization
+
+Provider 可能按任意顺序提供：
+
+```text
+arguments
+name
+id
+```
+
+例如：
+
+```text
+index=0, arguments="{"
+index=0, name="read_file"
+index=0, arguments="...}"
+index=0, call_id="call_123"
+```
+
+Adapter / stream builder 必须以：
+
+```text
+index
+```
+
+聚合同一 provisional ToolCall。
+
+---
+
+### 5.19 Canonical ToolCall Formation
+
+Model stream 结束时，每一个 provisional ToolCall 必须最终拥有：
+
+```text
+non-empty canonical id
+non-empty name
+complete valid arguments
+```
+
+才能形成：
+
+```python
+ToolCall(...)
+```
+
+如果缺失：
+
+```text
+id
+name
+valid arguments
+```
+
+则：
+
+```text
+Model protocol normalization failure
+    ↓
+FAILED / MODEL_ERROR
+```
+
+不得进入 ToolExecutor。
+
+---
+
+### 5.20 Provider 不提供 ToolCall ID
+
+如果 Provider 本身没有 call ID：
+
+> **Adapter 可以生成稳定 provider-neutral canonical ID。**
+
+但：
+
+```text
+AgentLoop 不生成 ToolCall ID
+Kernel generic runtime 不猜 Provider identity
+```
+
+ID normalization 属于 Adapter contract。
+
+---
+
+### 5.21 ContentCompleted
+
+```python
+@dataclass(frozen=True)
+class ContentCompleted:
+    content: ImageContent | AudioContent | FileContent
+```
+
+它是：
+
+> **内部 provisional stream item。**
+
+允许持有：
+
+```text
+raw MessageContent
+including BytesSource
+```
+
+但不能直接存入 public Event history。
+
+v1 中 `ContentCompleted` 只表示非文本完整 block。Provider 若以完整 block
+返回文本，Adapter 必须将它归一化为 `TextDelta(text=...)`，不能产生
+`ContentCompleted(TextContent(...))`。这样 text buffer 的合并规则只有一个
+来源。
+
+---
+
+### 5.22 Mixed Multimodal Streaming Order
+
+必须定义有序 content builder。
+
+规则：
+
+#### TextDelta
+
+```text
+append to current text buffer
+```
+
+#### ContentCompleted(non-text)
+
+```text
+flush current text buffer
+    ↓
+append TextContent(buffer) if non-empty
+    ↓
+append non-text MessageContent
+    ↓
+clear text buffer
+```
+
+下一条 TextDelta：
+
+```text
+start / continue new text buffer
+```
+
+---
+
+### 5.23 Mixed Stream 示例
+
+输入：
+
+```text
+TextDelta("A")
+ContentCompleted(Image)
+TextDelta("B")
+```
+
+最终必须：
+
+```python
+(
+    TextContent("A"),
+    ImageContent(...),
+    TextContent("B"),
+)
+```
+
+不能：
+
+```python
+(
+    TextContent("AB"),
+    ImageContent(...),
+)
+```
+
+---
+
+### 5.24 相邻 TextDelta 合并规则
+
+例如：
+
+```text
+TextDelta("A")
+TextDelta("B")
+ContentCompleted(Image)
+TextDelta("C")
+TextDelta("D")
+```
+
+得到：
+
+```python
+(
+    TextContent("AB"),
+    ImageContent(...),
+    TextContent("CD"),
+)
+```
+
+Invariant：
+
+> **只有中间不存在非文本 `ContentCompleted` 的相邻 TextDelta 才能合并。**
+
+---
+
+### 5.25 Provider Block Index
+
+如果 Provider 自身提供：
+
+```text
+content block index
+```
+
+Adapter 应先按照 Provider protocol 正确归一化事件顺序，然后再输出：
+
+```text
+ModelStreamItem
+```
+
+AgentLoop 不直接解释 Provider-specific block index。
+
+---
+
+### 5.26 v1 Streaming Boundary
+
+支持：
+
+```text
+Text
+    incremental
+
+Tool arguments
+    incremental
+
+Image
+Audio
+File
+    complete block only
+```
+
+不支持：
+
+```text
+image byte delta
+audio PCM delta
+file byte delta
+```
+
+---
+
+### 5.27 Provisional vs Committed
+
+所有：
+
+```text
+TextDelta
+ToolCallDelta
+ContentCompleted
+```
+
+都是 provisional。
+
+只能进入：
+
+```text
+internal stream builder
+internal _RunState
+```
+
+不能进入 canonical transcript。
+
+---
+
+### 5.28 Stream Completion
+
+流程：
+
+```text
+Provider stream completes
+        ↓
+finish text buffer
+        ↓
+finalize provisional ToolCalls
+        ↓
+build final AssistantMessage
+        ↓
+canonical structure validation
+        ↓
+message semantic validation
+        ↓
+output capability validation
+        ↓
+commit AssistantMessage to Session
+        ↓
+update _RunState
+        ↓
+emit ModelCompleted
+```
+
+---
+
+### 5.29 ModelCompleted 时序
+
+正式规定：
+
+> **收到 `ModelCompleted` 时，对应 AssistantMessage 已经存在于 `Session.messages`。**
+
+即：
+
+```text
+ModelCompleted
+    implies
+canonical AssistantMessage already committed
+```
+
+Provider socket/stream 停止只是内部事实。
+
+不等于 public `ModelCompleted`。
+
+---
+
+### 5.30 output_modalities
+
+最终 AssistantMessage 中所有 Content：
+
+```text
+modality
+    ∈
+output_modalities
+```
+
+否则：
+
+```text
+no Assistant commit
+ModelFailed
+FAILED / MODEL_ERROR
+```
+
+---
+
+### 5.31 Invalid Provider Output
+
+以下属于：
+
+```text
+MODEL_ERROR
+```
+
+而不是 Kernel invariant failure：
+
+```text
+unknown provider content
+invalid normalized MessageContent
+unsupported output modality
+duplicate ToolCall ID
+incomplete ToolCall
+provider protocol violation
+```
+
+---
+
+### 5.32 Unsupported Input
+
+如果 ModelContext 有 IMAGE，而 Model 不支持：
+
+```text
+ModelCapabilityError
+    ↓
+FAILED / MODEL_ERROR
+```
+
+---
+
+### 5.33 Unsupported ToolResult
+
+如果 ToolResult 有 AUDIO，而：
+
+```text
+AUDIO not in tool_result_modalities
+```
+
+同样：
+
+```text
+FAILED / MODEL_ERROR
+```
+
+---
+
+### 5.34 Realtime Media
+
+必须保持：
+
+```text
+Multimodal Message
+    !=
+Realtime Media Transport
+```
+
+完整 wav：
+
+```text
+AudioContent
+```
+
+可以进入 transcript。
+
+持续 PCM frame：
+
+```text
+不进入 Session.messages
+```
+
+未来：
+
+```text
+RealtimeAudioStream
+       ↓
+Realtime / Speech Adapter
+       ↓
+Agent Turn
+```
+
+属于另一层。
+
+---
+
+## 6. RunControl、Continuation 与 Cancellation
+
+### 6.1 PendingControl
 
 ```python
 @dataclass(frozen=True)
@@ -1072,17 +3089,13 @@ class PendingControl:
     message: UserMessage
 ```
 
-它表示：
-
-> 已经收到，但尚未达到合法 transcript commit boundary 的用户输入。
-
-因此并不是 canonical transcript 的第二份副本。
+steer / follow_up 不立即 commit。
 
 ---
 
-## 4.6 Control API 输入
+### 6.2 Control Input
 
-以下 API：
+以下统一：
 
 ```text
 session.start()
@@ -1090,301 +3103,217 @@ run.steer()
 run.follow_up()
 ```
 
-使用同一个 UserMessage normalization。
-
-公共输入：
+接受：
 
 ```python
 str | UserMessage
 ```
 
-不接受任意 `Message`。
-
-字符串统一转换：
-
-```python
-UserMessage(content=value)
-```
-
-校验：
+字符串 normalize 成：
 
 ```text
-空字符串 → reject
-whitespace-only → reject
-非法 UserMessage → reject
+TextContent
 ```
-
-Message size limit 如果未来存在，也必须由同一套 UserMessage validation 负责。
 
 ---
 
-## 4.7 Terminal Run 上的 Control
+### 6.3 Terminal Control
 
-Run 已 terminal 后：
-
-```python
-run.cancel()
-```
-
-是：
-
-> **幂等 no-op。**
-
-而：
-
-```python
-run.steer(...)
-run.follow_up(...)
-```
-
-必须：
+terminal 后：
 
 ```text
-raise RunFinishedError
-```
+cancel()
+    → idempotent no-op
 
-不能假装接受了用户消息。
+steer()
+follow_up()
+    → RunFinishedError
+```
 
 ---
 
-## 4.8 Observe 与 Consume
+### 6.4 Observe 与 Consume
 
-Steering 可以在 Tool boundary 被观察：
+Runtime 可以：
 
 ```text
 observe pending steer
 ```
 
-此时 policy 可以决定：
+用于：
 
 ```text
-停止启动新 ToolCall
-取消某些已启动 ToolCall
-继续某些已启动 ToolCall
+Tool scheduling / steering policy
 ```
 
-但是：
-
-> **此时不能把 steer 写入 transcript。**
-
-只有安全边界才能：
+但：
 
 ```text
-consume
-     ↓
-commit UserMessage
+observe != transcript commit
 ```
 
-因此：
-
-```text
-observe != consume
-```
+只有 safe boundary 才 consume。
 
 ---
 
-## 4.9 Safe Transcript Boundary
+### 6.5 Safe Transcript Boundary
 
-pending control 可以进入 transcript 的条件：
+pending control 可 commit，当且仅当：
 
-1. 当前不存在未完成 Model stream；
-2. 如果本 Turn 已有 AssistantMessage，则它已经完整 commit；
-3. 如果 AssistantMessage 含 ToolCalls，则所有 ToolCalls 已有 terminal outcome；
-4. ToolResults 已全部按 call order commit；
-5. 下一次 ContextManager.prepare 尚未开始。
+1. 没有未完成 Model stream；
+2. AssistantMessage 若存在，已完整 canonical commit；
+3. ToolCalls 若存在，全部 terminal；
+4. ToolResults 已按 call order commit；
+5. 下一 `ContextManager.prepare()` 尚未开始。
+
+---
+
+### 6.6 无 Assistant 的 Failure
+
+以下 failure：
+
+```text
+ContextManager failure
+MediaResolver failure
+capability failure
+Model failure before Assistant
+```
+
+若当前没有未完成 committed Tool Exchange：
+
+```text
+可以直接形成 safe boundary
+```
+
+然后 commit pending controls。
+
+---
+
+### 6.7 Control Order
+
+所有 pending controls：
+
+```text
+strict receive sequence
+```
+
+Kernel 不：
+
+```text
+reorder
+drop earlier follow-up
+automatically override
+```
 
 例如：
 
 ```text
-Assistant(tool_calls=[A, B])
-ToolResult(A)
-ToolResult(B)
-UserMessage(steer)
+1 follow_up("总结")
+2 steer("先检查测试")
 ```
 
-合法。
-
-而：
+下一 Model Turn 前应按顺序：
 
 ```text
-Assistant(tool_calls=[A, B])
-UserMessage(steer)
-ToolResult(A)
-ToolResult(B)
-```
-
-非法。
-
----
-
-## 4.10 无 AssistantMessage 时的 Safe Boundary
-
-如果本 Turn：
-
-```text
-Context preparation 失败
-```
-
-或者：
-
-```text
-Model 在产生 AssistantMessage 前失败
-```
-
-那么：
-
-> 当前不存在未完成的 Assistant / Tool Exchange。
-
-此时 ToolCall/ToolResult 条件视为满足。
-
-所以可以直接：
-
-```text
-current transcript tail
-      ↓
-commit pending controls
-      ↓
-terminate Run
+User("总结")
+User("先检查测试")
 ```
 
 ---
 
-## 4.11 Control 顺序
+### 6.8 Priority
 
-所有 control entry 都有：
-
-```text
-monotonic sequence
-```
-
-commit 时严格按接收顺序。
-
-例如：
-
-```text
-1. follow_up("总结")
-2. steer("先检查测试")
-```
-
-当 steer 触发下一 Turn 时：
-
-```text
-UserMessage("总结")
-UserMessage("先检查测试")
-```
-
-一起进入 transcript。
-
-因此：
-
-* follow-up 本身不主动打断 Run；
-* steer 可以触发下一 Turn；
-* steer 触发时，位于它之前的 pending controls 一并 commit；
-* Kernel 不重新排序；
-* Kernel 不自动删除旧 follow-up。
-
----
-
-## 4.12 Control Priority
-
-固定优先级：
+固定：
 
 ```text
 cancel
   >
 steer-triggered continuation
   >
-natural follow-up continuation
-```
-
-cancel 被观察后：
-
-```text
-停止启动新 Model
-
-停止启动 pending ToolCall
-
-请求取消已经运行 ToolCall
-
-不再因为 steer/follow-up 创建新 Turn
-```
-
-然后：
-
-```text
-完成 Tool terminal normalization
-      ↓
-commit required ToolResults
-      ↓
-reach safe boundary
-      ↓
-commit pending controls
-      ↓
-terminal Run
+natural follow-up
 ```
 
 ---
 
-## 4.13 Pending Control 在终止时的归宿
+### 6.9 Cancel 行为
 
-以下正常 terminal path：
+Cancel 被观察后：
+
+```text
+stop new Model invocation
+
+stop pending ToolCall start
+
+request running Tool cancellation
+
+request MediaResolver cancellation
+
+do not create new turn from pending controls
+
+normalize current Tool outcomes
+
+commit required ToolResults
+
+reach safe boundary
+
+commit pending controls
+
+terminate
+```
+
+---
+
+### 6.10 Terminal Pending Controls
+
+正常：
 
 ```text
 cancel
 timeout
 max turns
-model error
 context error
-policy FAIL_RUN
+media error
+model error
+tool policy fail
 ```
 
-必须：
+终态前必须：
 
-> **在最终 safe boundary 将所有已经成功接收的 pending controls 按顺序 commit 到 Session。**
+```text
+reach final safe boundary
+commit all received pending controls
+```
 
-但：
-
-> 不再由这些 controls 启动新的 Model Invocation。
-
-因此正常情况：
+正常：
 
 ```python
-RunResult.uncommitted_controls == ()
+uncommitted_controls == ()
 ```
 
-只有出现：
+仅：
 
 ```text
 Kernel invariant failure
 transcript corruption
-unrecoverable internal failure
+unrecoverable Runtime failure
 ```
 
-无法建立 safe boundary 时，才允许：
+允许：
 
-```python
+```text
 uncommitted_controls != ()
 ```
 
-此时必须：
+此时：
 
 ```text
 status == FAILED
-```
-
-并且：
-
-```text
-termination_reason
-in {
-    RUNTIME_ERROR,
-    INVALID_STATE,
-}
+reason in {RUNTIME_ERROR, INVALID_STATE}
 ```
 
 ---
 
-## 4.14 continue_run()
+### 6.11 `continue_run()`
 
 ```python
 run = session.continue_run(
@@ -1394,74 +3323,70 @@ run = session.continue_run(
 
 表示：
 
-> **不新增 UserMessage，从当前 canonical transcript 创建一个新的 AgentRun。**
+> **从现有 canonical transcript 创建新的 AgentRun，不新增 UserMessage。**
 
-例如：
+不是恢复旧 coroutine。
 
-```text
-Run #1
- FAILED
-   │
-   ▼
-continue_run()
-   │
-   ▼
-Run #2
-```
-
-不是恢复 Run #1 的 coroutine。
-
-创建前必须验证：
+创建前：
 
 ```text
 Session non-empty
 no active Run
 canonical transcript valid
 no dangling ToolCall
+all MessageContent structurally valid
 ```
 
 非法：
 
 ```text
-raise InvalidContinuationError
+InvalidContinuationError
 ```
-
-不创建一个立即失败的 AgentRun。
 
 ---
 
-# 5. Cancellation Model
+### 6.12 External Media 与 `continue_run()`
 
-## 5.1 CancellationToken
+Continuation validation：
 
-v1 最小接口：
+```text
+不读取 FileSource
+不下载 UrlSource
+```
+
+只验证 canonical structure。
+
+真正 Provider invocation 时：
+
+```text
+MediaResolver
+```
+
+重新执行访问授权和 resolution。
+
+---
+
+### 6.13 CancellationToken
 
 ```python
 class CancellationToken(Protocol):
 
     @property
-    def cancelled(self) -> bool:
-        ...
+    def cancelled(self) -> bool: ...
 
     @property
-    def reason(self) -> CancellationReason | None:
-        ...
+    def reason(self) -> CancellationReason | None: ...
 
-    async def wait_cancelled(self) -> None:
-        ...
+    async def wait_cancelled(self) -> None: ...
 
-    def throw_if_cancelled(self) -> None:
-        ...
+    def throw_if_cancelled(self) -> None: ...
 
-    def child(self) -> CancellationToken:
-        ...
+    def child(self) -> CancellationToken: ...
 ```
 
 ---
 
-## 5.2 CancellationReason
-
-推荐：
+### 6.14 CancellationReason
 
 ```python
 class CancellationReason(Enum):
@@ -1475,109 +3400,95 @@ class CancellationReason(Enum):
 
 > **first cancellation reason wins。**
 
-例如：
+---
+
+### 6.15 Child Cancellation
+
+Run token：
 
 ```text
-USER cancel
-↓
-timeout later arrives
-↓
-reason remains USER
+USER / TIMEOUT / RUN_TERMINATED
 ```
 
-反之：
+传播给 Tool child。
+
+Tool policy 可以只取消某个 child：
 
 ```text
-TIMEOUT
-↓
-later USER cancel
-↓
-reason remains TIMEOUT
+TOOL_POLICY
 ```
 
-Child Tool token：
-
-```text
-Run cancellation
-    → inherit Run reason
-
-Tool policy cancellation
-    → TOOL_POLICY
-```
-
-已确定的 child reason 不被后续 reason 覆盖。
+已确定 reason 不覆盖。
 
 ---
 
-## 5.3 Timeout
+### 6.16 Timeout
 
-`RunConfig.timeout` 定义为：
+Run timeout：
 
-> **触发 cooperative cancellation 的 wall-clock soft deadline。**
+> **soft cooperative wall-clock deadline。**
 
 起点：
 
 ```text
-AgentRun execution task creation
+execution task creation
 ```
 
-即：
+deadline：
 
 ```text
-session.start()
-     ↓
-create task
-     ↓
-start timeout clock
-```
-
-deadline 到达：
-
-```text
-CancellationRequested(
-    reason=TIMEOUT
-)
-```
-
-随后：
-
-```text
-cooperative cleanup
-tool normalization
-transcript completion
-```
-
-真正 Run terminal 后才发送：
-
-```text
-RunTimedOut
-```
-
-所以：
-
-```text
-deadline reached
-      ↓
 CancellationRequested(TIMEOUT)
-      ↓
+```
+
+然后：
+
+```text
+MediaResolver cancellation
+Model cancellation
+Tool cancellation
 cleanup
-      ↓
+protocol normalization
+safe commit
+```
+
+最后：
+
+```text
 RunTimedOut
 ```
 
-v1 不提供 hard kill guarantee。
-
-如果外部 Model / Tool 不响应 cancellation：
-
-> Run 可能在 deadline 后继续等待其结束。
+不提供 hard kill guarantee。
 
 ---
 
-# 6. Tool Runtime
+## 7. Tool Runtime 与 ToolExecutionPolicy
 
-## 6.1 ToolCallContext
+### 7.1 ToolInvocation
 
-每一个 ToolCall 都拥有 child cancellation token：
+```python
+@dataclass(...)
+class ToolInvocation:
+    call: ToolCall
+    run_context: RunContext
+    tool_context: ToolCallContext
+    model_context: ModelContext | None = None
+```
+
+`model_context` 默认：
+
+```text
+None
+```
+
+显式 opt-in 才提供。
+
+如果提供：
+
+> 必须是当前 Turn immutable ModelContext snapshot。
+
+---
+
+### 7.2 ToolCallContext
 
 ```python
 @dataclass(slots=True)
@@ -1586,94 +3497,125 @@ class ToolCallContext:
     cancellation: CancellationToken
 ```
 
-结构：
+每 ToolCall 有 child token。
+
+---
+
+### 7.3 Tool Result 三层模型
+
+严格区分：
 
 ```text
-Run CancellationToken
-        │
-        ├── Tool A Token
-        ├── Tool B Token
-        └── Tool C Token
-```
-
-Run cancel：
-
-```text
-cancel all children
-```
-
-ToolExecutionPolicy：
-
-```text
-can cancel selected child
-```
-
-因此可以表达：
-
-```text
-A running → continue
-B running → cancel
-C pending → skip
+ToolOutput
+ToolCallOutcome
+ToolExecutionBatchResult
 ```
 
 ---
 
-## 6.2 Tool Result 三层模型
-
-必须严格区分：
-
-```text
-ToolOutput
-
-ToolCallOutcome
-
-ToolExecutionBatchResult
-```
-
-### ToolOutput
-
-表示：
-
-> **Tool handler 原始业务结果。**
-
-推荐兼容现有字段：
+### 7.4 ToolOutput
 
 ```python
 @dataclass(...)
 class ToolOutput:
-    content: Any
-
+    content: tuple[MessageContent, ...] = ()
     is_error: bool = False
-
     error_code: str | None = None
     details: Any | None = None
 ```
 
-现有：
+其中：
 
 ```text
-stop_run
+content
+    model-visible candidate
+
+details
+    runtime/application data
 ```
 
-不再属于 ToolOutput。
-
-因为 Tool handler 不应该直接控制 Agent Run lifecycle。
-
-需要终止 Run 的语义由：
-
-```text
-ToolExecutionPolicy
-```
-
-决定。
+details 不进入 canonical transcript。
 
 ---
 
-## 6.3 ToolCallOutcome
+### 7.5 ToolOutput Compatibility
 
-表示：
+现有 public constructor surface 在 v1 compatibility cycle 中保持。
 
-> **Executor 对一个 ToolCall 的最终 execution state。**
+原则：
+
+> **只迁移 content representation，不借机改变其他已有 public fields 的语义。**
+
+现有例如：
+
+```text
+timestamp
+finish_reason
+usage
+model
+tool_calls
+details
+error_code
+```
+
+等字段，如果属于 public API，应继续保持。
+
+只将：
+
+```text
+content: str
+```
+
+兼容转换成：
+
+```text
+tuple[MessageContent, ...]
+```
+
+---
+
+### 7.6 位置参数兼容
+
+如果旧 API 允许：
+
+```python
+AssistantMessage("hello", tool_calls)
+```
+
+v1 compatibility cycle 中继续支持。
+
+但：
+
+> 新代码与新文档统一推荐 keyword arguments。
+
+---
+
+### 7.7 Deprecation 策略
+
+建议：
+
+```text
+v1
+    legacy text constructor compatibility
+
+v1.x
+    deprecate obsolete text-only internals
+
+v2
+    eligible to remove obsolete legacy-only APIs
+```
+
+但：
+
+```python
+UserMessage("hello")
+```
+
+这种 ergonomic shorthand 可以长期保留。
+
+---
+
+### 7.8 ToolCallStatus
 
 ```python
 class ToolCallStatus(Enum):
@@ -1683,25 +3625,23 @@ class ToolCallStatus(Enum):
     SKIPPED = "skipped"
 ```
 
+---
+
+### 7.9 ToolCallOutcome
+
 ```python
 @dataclass(frozen=True)
 class ToolCallOutcome:
     call_id: str
     tool_name: str
-
     status: ToolCallStatus
-
     output: ToolOutput | None = None
     error: ToolExecutionError | None = None
 ```
 
 ---
 
-## 6.4 ToolExecutionBatchResult
-
-表示：
-
-> **一次 ToolCall batch 的有序最终结果。**
+### 7.10 ToolExecutionBatchResult
 
 ```python
 @dataclass(frozen=True)
@@ -1709,9 +3649,9 @@ class ToolExecutionBatchResult:
     outcomes: tuple[ToolCallOutcome, ...]
 ```
 
-必须满足：
+必须：
 
-```python
+```text
 len(outcomes) == len(tool_calls)
 
 outcomes[i].call_id == tool_calls[i].id
@@ -1719,149 +3659,153 @@ outcomes[i].call_id == tool_calls[i].id
 
 ---
 
-## 6.5 ToolOutput → Outcome
+### 7.11 Invalid ToolOutput
 
-固定映射：
+如果 ToolOutput：
 
-| Handler / Runtime 状态         | ToolCallOutcome |
-| ---------------------------- | --------------- |
-| `ToolOutput(is_error=False)` | `COMPLETED`     |
-| `ToolOutput(is_error=True)`  | `FAILED`        |
-| handler exception            | `FAILED`        |
-| validation failure           | `FAILED`        |
-| unknown tool                 | `FAILED`        |
-| policy reject                | `FAILED`        |
-| 已启动并响应 cancellation          | `CANCELLED`     |
-| 尚未启动且 batch 被停止              | `SKIPPED`       |
+```text
+invalid MessageContent
+invalid MediaSource
+wrong runtime type
+invalid MIME
+oversized BytesSource
+```
+
+则：
+
+```text
+ToolCallOutcome.FAILED
+error = INVALID_TOOL_OUTPUT
+```
+
+这是：
+
+> **单 ToolCall failure。**
+
+不是 Runtime invariant failure。
+
+---
+
+### 7.12 ToolOutput → Outcome
+
+| 情况                 | Outcome   |
+| ------------------ | --------- |
+| success            | COMPLETED |
+| `is_error=True`    | FAILED    |
+| exception          | FAILED    |
+| invalid args       | FAILED    |
+| unknown tool       | FAILED    |
+| policy reject      | FAILED    |
+| invalid ToolOutput | FAILED    |
+| cooperative cancel | CANCELLED |
+| never started      | SKIPPED   |
 
 禁止：
 
 ```text
-ToolOutput(is_error=True)
+is_error=True
 +
-ToolCallStatus.COMPLETED
+COMPLETED
 ```
 
 ---
 
-## 6.6 Canonical ToolResultMessage
+### 7.13 Outcome → ToolResultMessage
 
-ToolCallOutcome 必须转换为 provider-neutral transcript message：
-
-```python
-@dataclass(frozen=True)
-class ToolResultMessage:
-    tool_call_id: str
-    tool_name: str
-
-    status: ToolCallStatus
-
-    content: Any = None
-
-    error: ToolExecutionError | None = None
-    details: Any | None = None
-```
-
-### COMPLETED
+#### COMPLETED
 
 ```text
-status  = COMPLETED
-content = ToolOutput.content
-details = ToolOutput.details
-error   = None
+status = COMPLETED
+content = output.content
 ```
 
-### FAILED
+#### FAILED
 
 ```text
 status = FAILED
-
-content =
-    sanitized model-visible error message
-
-error =
-    structured safe ToolExecutionError
+content = sanitized TextContent error
+error = safe ToolExecutionError
 ```
 
-### CANCELLED
+默认不携带 handler 的 media failure payload。
+
+#### CANCELLED
 
 ```text
-status = CANCELLED
-
-content =
-    generic cancellation result
+generic TextContent cancellation result
 ```
 
-### SKIPPED
+#### SKIPPED
 
 ```text
-status = SKIPPED
-
-content =
-    generic skipped result
+generic TextContent skipped result
 ```
-
-Provider Adapter 负责：
-
-> 将这些 provider-neutral 状态映射成具体模型 API 所接受的 ToolResult 格式。
 
 ---
 
-## 6.7 ToolExecutor
+### 7.14 Tool 成功但 Model 不能消费结果
 
-ToolExecutor pipeline：
+场景：
 
 ```text
-ToolCall Batch
-      │
-      ▼
-resolve against FrozenToolSet
-      │
-      ▼
-validate
-      │
-      ▼
+Tool success
+    ↓
+ImageContent
+    ↓
+Outcome COMPLETED
+    ↓
+ToolResult committed
+    ↓
+next Model cannot consume IMAGE ToolResult
+```
+
+规则：
+
+```text
+Tool remains COMPLETED
+```
+
+然后：
+
+```text
+ModelCapabilityError
+    ↓
+Run FAILED / MODEL_ERROR
+```
+
+Canonical ToolResult 保留。
+
+不能倒改 Tool execution truth。
+
+---
+
+### 7.15 ToolExecutor
+
+负责：
+
+```text
+resolve Tool
+validate call
 before policy
-      │
-      ▼
 schedule
-      │
-      ▼
 execute
-      │
-      ▼
-normalize ToolOutput / exception
-      │
-      ▼
-after hook
-      │
-      ▼
-ToolCallOutcome
-      │
-      ▼
+normalize ToolOutput
+validate ToolOutput
+produce terminal Outcome
 stable ordering
-      │
-      ▼
-ToolExecutionBatchResult
 ```
 
-ToolExecutor：
-
-> 不持有 Session，不负责 transcript commit。
-
-AgentLoop 才负责：
+不负责：
 
 ```text
-ToolExecutionBatchResult
-        ↓
-ToolResultMessage[]
-        ↓
-Session commit
+Session ownership
+transcript commit
+media semantic interpretation
 ```
 
 ---
 
-## 6.8 Execution Mode
+### 7.16 ToolExecutionMode
 
 ```python
 class ToolExecutionMode(Enum):
@@ -1875,15 +3819,11 @@ class ToolExecutionMode(Enum):
 SEQUENTIAL
 ```
 
-原因不是领域安全，而是：
-
-> Sequential 是最确定、最简单的通用默认执行语义。
-
-需要 parallel 时显式配置。
+因为它是最确定的通用默认，不是领域安全规则。
 
 ---
 
-## 6.9 max_concurrency
+### 7.17 ToolExecutionConfig
 
 ```python
 @dataclass(frozen=True)
@@ -1892,88 +3832,52 @@ class ToolExecutionConfig:
     max_concurrency: int | None = None
 ```
 
-定义：
-
-> **单个 Tool batch 内的本地并发上限。**
-
 规则：
 
 ```text
-None
-    → no additional concurrency limit
-
-positive integer
-    → maximum parallel ToolCalls
-
-0 / negative
-    → invalid configuration
+None → no additional limit
+positive → valid
+0 / negative → invalid
 ```
 
-Sequential 模式下：
+只表示单 batch 本地并发上限。
 
-```text
-max_concurrency ignored
-```
+Sequential 模式忽略。
 
 ---
 
-## 6.10 Stable Ordering
-
-模型：
+### 7.18 Stable Ordering
 
 ```text
-ToolCall A
-ToolCall B
-ToolCall C
-```
+calls:
+A B C
 
-实际并行完成：
+completion:
+B C A
 
-```text
-B
-C
-A
-```
+events:
+B C A
 
-Events 可以：
+BatchResult:
+A B C
 
-```text
-ToolCompleted(B)
-ToolCompleted(C)
-ToolCompleted(A)
-```
-
-但 BatchResult 必须：
-
-```text
-AOutcome
-BOutcome
-COutcome
-```
-
-Transcript 必须：
-
-```text
-ToolResult(A)
-ToolResult(B)
-ToolResult(C)
+Transcript:
+A B C
 ```
 
 因此：
 
 ```text
-execution completion order
-        !=
-transcript order
+runtime completion order
+    !=
+canonical transcript order
 ```
+
+是正式行为。
 
 ---
 
-# 7. ToolExecutionPolicy
-
-## 7.1 RunConfig 与 Policy Factory
-
-RunConfig：
+### 7.19 ToolPolicyFactory
 
 ```python
 ToolPolicyFactory = Callable[
@@ -1982,79 +3886,31 @@ ToolPolicyFactory = Callable[
 ]
 ```
 
-```python
-@dataclass(frozen=True)
-class RunConfig:
-    max_turns: int = 32
-    timeout: float | None = None
-
-    tool_execution: ToolExecutionConfig = field(
-        default_factory=ToolExecutionConfig
-    )
-
-    tool_policy_factory: ToolPolicyFactory | None = None
-```
-
-每个 Run：
-
-```text
-factory(run_context)
-      ↓
-private ToolExecutionPolicy instance
-```
-
-如果：
-
-```python
-tool_policy_factory is None
-```
-
-Kernel 必须创建：
-
-```python
-DefaultToolExecutionPolicy()
-```
-
-因此无配置情况下行为唯一确定。
+每 Run 独立 policy instance。
 
 ---
 
-## 7.2 DefaultToolExecutionPolicy
+### 7.20 DefaultToolExecutionPolicy
 
-默认行为固定为：
+factory=None 时：
 
 ```text
 before_call
     → ALLOW
 
-ToolCall FAILED
+Tool FAILED
     → STOP_BATCH
 
-steering + PENDING ToolCall
+steering + PENDING
     → SKIP
 
-steering + RUNNING ToolCall
+steering + RUNNING
     → CONTINUE
-```
-
-设计目标：
-
-> **确定、保守、不主动中断已经开始的 Tool。**
-
-Default policy 不实现：
-
-```text
-retry
-approval
-permission
-resource lock
-rate limit
-domain safety
 ```
 
 ---
 
-## 7.3 BeforeToolAction
+### 7.21 BeforeToolAction
 
 ```python
 class BeforeToolAction(Enum):
@@ -2064,83 +3920,22 @@ class BeforeToolAction(Enum):
     FAIL_RUN = "fail_run"
 ```
 
-固定行为：
+| Action   | 当前调用    | 后续未启动   | Run                 |
+| -------- | ------- | ------- | ------------------- |
+| ALLOW    | execute | normal  | continue            |
+| REJECT   | FAILED  | normal  | continue            |
+| SKIP     | SKIPPED | normal  | continue            |
+| FAIL_RUN | FAILED  | SKIPPED | FAILED / TOOL_ERROR |
 
-| Action     | 当前 ToolCall             | 后续未启动 ToolCall | Run                   |
-| ---------- | ----------------------- | -------------- | --------------------- |
-| `ALLOW`    | 正常执行                    | 正常执行           | 继续                    |
-| `REJECT`   | `FAILED(policy_denied)` | 正常执行           | 继续                    |
-| `SKIP`     | `SKIPPED`               | 正常执行           | 继续                    |
-| `FAIL_RUN` | `FAILED(policy_denied)` | `SKIPPED`      | `FAILED / TOOL_ERROR` |
-
-### ALLOW
-
-```text
-validate
-  ↓
-ALLOW
-  ↓
-execute handler
-```
-
-最终 outcome 由实际执行决定。
-
-### REJECT
-
-不执行 handler：
-
-```text
-FAILED(policy_denied)
-```
-
-但：
-
-> batch 继续。
-
-REJECT 不等于 STOP_BATCH。
-
-### SKIP
-
-不执行 handler：
-
-```text
-SKIPPED
-```
-
-且：
-
-> 不触发 `on_error()`。
-
-### FAIL_RUN
-
-当前调用：
-
-```text
-FAILED(policy_denied)
-```
-
-尚未启动 sibling：
-
-```text
-SKIPPED
-```
-
-已经运行 sibling：
+FAIL_RUN 时 running sibling：
 
 ```text
 request child cancellation
 ```
 
-完成 terminal normalization 后：
-
-```text
-RunStatus.FAILED
-RunTerminationReason.TOOL_ERROR
-```
-
 ---
 
-## 7.4 ToolErrorAction
+### 7.22 ToolErrorAction
 
 ```python
 class ToolErrorAction(Enum):
@@ -2149,48 +3944,23 @@ class ToolErrorAction(Enum):
     FAIL_RUN = "fail_run"
 ```
 
-### CONTINUE
-
-| 调用状态        | 行为   |
-| ----------- | ---- |
-| 未启动 sibling | 正常执行 |
-| 已启动 sibling | 正常完成 |
-
-### STOP_BATCH
-
-| 调用状态        | 行为        |
-| ----------- | --------- |
-| 未启动 sibling | `SKIPPED` |
-| 已启动 sibling | 继续运行并等待完成 |
-
-所以：
-
-> STOP_BATCH 只阻止新的调用启动，不撤销已经发生的工作。
-
-### FAIL_RUN
-
-| 调用状态        | 行为                         |
-| ----------- | -------------------------- |
-| 未启动 sibling | `SKIPPED`                  |
-| 已启动 sibling | request child cancellation |
-
-然后等待所有 ToolCall 达到 terminal outcome。
-
-若 Tool 忽略 cancellation：
+STOP_BATCH：
 
 ```text
-允许最终 COMPLETED
+pending → SKIPPED
+running → continue to terminal
 ```
 
-但整个 Run 仍：
+FAIL_RUN：
 
 ```text
-FAILED / TOOL_ERROR
+pending → SKIPPED
+running → request cancellation
 ```
 
 ---
 
-## 7.5 SteeringAction
+### 7.23 SteeringAction
 
 ```python
 class SteeringAction(Enum):
@@ -2199,39 +3969,31 @@ class SteeringAction(Enum):
     SKIP = "skip"
 ```
 
-ToolCallState：
-
 ```python
 class ToolCallState(Enum):
     PENDING = "pending"
     RUNNING = "running"
 ```
 
-### PENDING
+PENDING：
 
 ```text
-CONTINUE → 正常启动
-
+CONTINUE → start
 SKIP → SKIPPED
-
-CANCEL → 等价于 SKIP
+CANCEL → SKIPPED
 ```
 
-### RUNNING
+RUNNING：
 
 ```text
-CONTINUE → 等待完成
-
-CANCEL → request child cancellation
-
-SKIP → invalid action
+CONTINUE → continue
+CANCEL → child cancellation
+SKIP → invalid
 ```
-
-已经运行的 Tool 不能重新解释为“从未发生”。
 
 ---
 
-## 7.6 Policy Scope
+### 7.24 Policy Scope
 
 Policy 可以决定：
 
@@ -2244,30 +4006,24 @@ fail run
 steering response
 ```
 
-Policy 不负责：
+不负责：
 
 ```text
 task graph
-priority scheduling
+priority scheduler
 resource allocation
 generic retry engine
 ```
 
-Sequential / Parallel / semaphore scheduling 固定由 Executor 管理。
-
-v1 不内置 retry。
+v1 不内置 generic retry。
 
 ---
 
-# 8. Hooks 与 Events
+## 8. Hooks、Events、History、Result 与安全边界
 
-## 8.1 Hooks
+### 8.1 Hooks
 
-Hooks 是：
-
-> **observer / integration callback。**
-
-建议：
+Hooks：
 
 ```text
 on_run_start
@@ -2283,59 +4039,31 @@ on_tool_start
 on_tool_end
 ```
 
-其中：
-
-```text
-on_tool_end
-```
-
-接收：
+`on_tool_end` 接收：
 
 ```text
 ToolCallOutcome
 ```
 
-而不是裸 `ToolOutput`。
-
-这样能够观察：
+Hook exception：
 
 ```text
-COMPLETED
-FAILED
-CANCELLED
-SKIPPED
+log only
+does not fail Run
 ```
 
-### Hook Exception
-
-Hook 异常：
-
-> 只记录 log，不产生正式生命周期 Event，也不使 Run 失败。
-
-因此 v1 不增加：
+Hooks 不：
 
 ```text
-HookError
+modify Outcome
+modify RunControl
+participate in allow/deny
+perform scheduling
 ```
-
-公共事件。
-
-Hooks 默认：
-
-* 可异步；
-* 按注册顺序执行；
-* 不修改 ToolCallOutcome；
-* 不修改 RunControl；
-* 不负责 allow / deny；
-* 不参与 scheduling。
-
-Policy 和 Hook 必须保持职责分离。
 
 ---
 
-## 8.2 Events
-
-正式事件：
+### 8.2 Public Event Types
 
 ```text
 RunStarted
@@ -2365,253 +4093,342 @@ RunTimedOut
 RunMaxTurns
 ```
 
-每个 Run：
+每 Run：
 
-> **恰好产生一个 terminal Run event。**
-
-Terminal events 互斥：
-
-```text
-RunCompleted
-RunFailed
-RunCancelled
-RunTimedOut
-RunMaxTurns
-```
+> **恰好一个 terminal Event。**
 
 ---
 
-## 8.3 Event Sequence
+### 8.3 Internal ModelStreamItem 与 Public Event 分层
 
-单个 Run 内：
+严格区分：
+
+```text
+ModelStreamItem
+```
+
+和：
+
+```text
+AgentEvent
+```
+
+内部：
+
+```text
+TextDelta
+ToolCallDelta
+ContentCompleted(raw MessageContent)
+```
+
+可以持有 raw Runtime object。
+
+Public Event history：
+
+> **不能持有 raw media payload。**
+
+---
+
+### 8.4 ContentSummary
+
+推荐统一：
 
 ```python
-event.sequence
+@dataclass(frozen=True, slots=True)
+class ContentSummary:
+    modality: Modality
+    media_type: str | None = None
+    source_kind: str | None = None
+    size: int | None = None
 ```
 
-严格单调递增。
-
-Parallel Tool events：
-
-> 按真实 execution order 产生。
-
-例如：
-
-```text
-ToolStarted(A)
-ToolStarted(B)
-ToolCompleted(B)
-ToolCompleted(A)
-```
-
-这与 transcript：
-
-```text
-ToolResult(A)
-ToolResult(B)
-```
-
-不存在冲突。
+对于 Text 可以附加受控 preview，也可以只记录长度，具体 public event schema 可进一步细化。
 
 ---
 
-## 8.4 Event History
+### 8.5 ContentCompletedSummary
 
-RoboAgent v1 固定采用：
-
-> **每个 AgentRun 保留完整 Event History。**
-
-不实现：
-
-```text
-bounded event history
-EventHistoryTruncated
-```
-
-Run 生命周期：
-
-```text
-AgentRun alive
-    ↓
-complete event history retained
-
-AgentRun released
-    ↓
-event history released
-```
-
-未来如果长期 Run 产生巨大 ModelDelta 流，再考虑：
-
-```text
-bounded history
-delta compaction
-external trace sink
-persistent tracing
-```
-
-不进入 v1。
-
----
-
-## 8.5 events() Subscription
+当内部：
 
 ```python
-async for event in run.events():
-    ...
+ContentCompleted(
+    content=MessageContent
+)
 ```
 
-无论订阅发生于：
+到达时：
 
 ```text
-刚启动
-运行中
-已经 terminal
+raw content
+    ↓
+summarize/redact
+    ↓
+ContentSummary
+    ↓
+ModelDelta Event
 ```
 
-都必须：
+而不是把原始 `ContentCompleted` 放进 Event history。
+
+---
+
+### 8.6 Public RunState 与 Event 使用同一媒体摘要规则
+
+Public RunState 中的：
 
 ```text
-replay complete current history
-        ↓
-continue live events
+streaming_content
 ```
 
-terminal 后订阅：
+和 Event 中的媒体 summary：
+
+> 应复用相同的 `ContentSummary` / redaction rules。
+
+这样：
 
 ```text
-replay complete history
-        ↓
-iterator ends
+Event
+RunState
+logs
 ```
 
-### Replay 与 Live 原子性
+不会形成三个不同的媒体暴露边界。
 
-必须在同一 runtime synchronization boundary 内完成：
+---
+
+### 8.7 Subscriber 获得的内容
+
+默认 subscriber：
+
+> **获得 public media-safe Event representation。**
+
+不获得：
+
+```text
+raw BytesSource
+full local file
+raw audio/image payload
+```
+
+---
+
+### 8.8 Event Sequence
+
+每 Event：
+
+```text
+sequence
+```
+
+Run 内单调递增。
+
+Parallel Tool events 按实际 execution order。
+
+ToolResult transcript 仍按 call order。
+
+---
+
+### 8.9 Event History
+
+v1：
+
+> **AgentRun 生命周期内完整保留 public Event history。**
+
+不实现 bounded truncation。
+
+但：
+
+```text
+history stores only media-safe summaries
+```
+
+---
+
+### 8.10 Replay + Live 原子性
+
+必须原子：
 
 ```text
 capture history snapshot
 +
-register live subscriber
+register subscriber
 ```
 
-逻辑：
-
-```text
-critical section
-   │
-   ├── snapshot history
-   └── register subscriber from next sequence
-```
-
-随后：
+然后：
 
 ```text
 replay snapshot
-     ↓
-consume live queue
+    ↓
+live queue
 ```
 
 保证：
 
-> **既不重复，也不遗漏事件。**
+```text
+no duplicate
+no gap
+```
 
 ---
 
-## 8.6 Multiple Subscribers
+### 8.11 Multiple Subscribers
 
 多个 subscriber：
 
-* 相互独立；
-* 各自 replay 完整 history；
-* 各自拥有 live queue；
-* 一个慢 subscriber 不影响其他 subscriber；
-* subscriber 不允许阻塞 Agent execution。
+```text
+independent
+own queue
+own replay state
+```
 
-Slow subscriber：
+互不阻塞。
+
+---
+
+### 8.12 Slow Subscriber
+
+queue 满：
 
 ```text
-queue full
-    ↓
 disconnect subscriber
 ```
 
-但 Event History 仍保留在 AgentRun。
+不能阻塞 AgentRun。
 
-调用方以后可以重新订阅并重新 replay。
-
----
-
-## 8.7 result()
-
-```python
-result = await run.result()
-```
-
-必须：
-
-* 支持多个 coroutine 同时 await；
-* terminal 后缓存 immutable RunResult；
-* 多次调用获得同一逻辑结果。
-
-如果某个调用方取消：
-
-```python
-await run.result()
-```
-
-自己的 waiter：
-
-> **不能取消底层 AgentRun。**
-
-只有：
-
-```python
-run.cancel()
-```
-
-可以请求 Runtime cancellation。
+之后调用方可以重新订阅并 replay。
 
 ---
 
-# 9. RunResult 与错误模型
+### 8.13 Media Redaction
 
-## 9.1 RunResult
+Events / RunState / logs / errors 默认不能包含：
+
+```text
+raw bytes
+full local path
+URL credentials
+URL query
+URL fragment
+raw image/audio payload
+```
+
+统一：
+
+```python
+sanitize_media_reference(...)
+```
+
+至少：
+
+```text
+strip credentials
+strip query
+strip fragment
+redact path root
+```
+
+---
+
+### 8.14 EventStore Boundary
+
+当前 text-oriented JSONL EventStore：
+
+> **不构成 multimodal durable persistence。**
+
+v1：
+
+```text
+in-memory public Event history
+    supported
+
+text-safe / redacted EventStore
+    supported
+
+raw multimodal durable persistence
+    unsupported
+```
+
+不能：
+
+```text
+bytes → str()
+```
+
+然后声称可 round-trip。
+
+---
+
+### 8.15 Event Serialization
+
+必须使用：
+
+```text
+dedicated Event codec
+```
+
+保存：
+
+```text
+redacted media summaries
+```
+
+不能保存 raw BytesSource。
+
+---
+
+### 8.16 Session Persistence
+
+v1 不实现 Session persistence。
+
+因此不定义：
+
+```text
+BytesSource persistent base64 schema
+FileSource cross-host replay
+UrlSource replay guarantee
+blob storage
+transcript migration schema
+```
+
+---
+
+### 8.17 RunResult
 
 ```python
 @dataclass(frozen=True)
 class RunResult:
     status: RunStatus
-
     final_message: AssistantMessage | None
-
     turns: int
-
     termination_reason: RunTerminationReason
-
     error: RunError | None = None
-
     uncommitted_controls: tuple[PendingControl, ...] = ()
 ```
 
-### final_message
+---
+
+### 8.18 final_message
 
 表示：
 
-> **本 Run 已经 commit 到 Session 的最后一个 AssistantMessage。**
+> **本 Run 已 commit 的最后一个 AssistantMessage。**
 
-它不保证：
+可以包含：
 
 ```text
-是自然语言最终答案
-没有 ToolCall
-是整个 Session 最后 Assistant
+Text
+Image
+Audio
+File
+ToolCalls
+mixed content
 ```
 
-应用层需要自行解释业务意义。
+不保证是自然语言最终答案。
 
 ---
 
-## 9.2 RunTerminationReason
+### 8.19 RunTerminationReason
 
 ```python
 class RunTerminationReason(Enum):
@@ -2628,57 +4445,46 @@ class RunTerminationReason(Enum):
     RUNTIME_ERROR = "runtime_error"
 ```
 
-合法映射：
+普通 Media capability / resolution failure：
 
-| RunStatus   | termination_reason                                                         |
-| ----------- | -------------------------------------------------------------------------- |
-| `COMPLETED` | `COMPLETED`                                                                |
-| `CANCELLED` | `CANCELLED`                                                                |
-| `TIMED_OUT` | `TIMED_OUT`                                                                |
-| `MAX_TURNS` | `MAX_TURNS`                                                                |
-| `FAILED`    | `MODEL_ERROR / TOOL_ERROR / CONTEXT_ERROR / INVALID_STATE / RUNTIME_ERROR` |
+```text
+MODEL_ERROR
+```
+
+但由 Run cancel / timeout 引起的 Resolver failure：
+
+```text
+CANCELLED / TIMED_OUT
+```
+
+保持原终止语义。
 
 ---
 
-## 9.3 RunError
-
-推荐：
+### 8.20 RunError
 
 ```python
 @dataclass(frozen=True)
 class RunError:
     code: str
     message: str
-
     retryable: bool = False
-
     cause_type: str | None = None
 ```
 
-详细 Python exception：
+不能暴露：
 
 ```text
 traceback
-repr
-internal paths
-secret values
+exception repr
+secret
+credential URL
+full local path
 ```
-
-不得自动暴露给 Model。
-
-Tool error 同样必须经过：
-
-```text
-sanitization
-```
-
-后才能进入 `ToolResultMessage`。
 
 ---
 
-# 10. RunConfig
-
-推荐：
+### 8.21 RunConfig
 
 ```python
 @dataclass(frozen=True)
@@ -2693,136 +4499,470 @@ class RunConfig:
     tool_policy_factory: ToolPolicyFactory | None = None
 ```
 
-Agent 持有：
-
-```text
-default_run_config
-```
-
-调用：
-
-```python
-session.start(
-    prompt,
-    config=None,
-)
-
-session.run(
-    prompt,
-    config=None,
-)
-
-session.continue_run(
-    config=None,
-)
-```
+不包含 MediaLimits。
 
 规则：
 
 ```text
-config is None
-    ↓
-use Agent.default_run_config
+config=None
+    → Agent.default_run_config
+
+provided config
+    → complete replacement
 ```
 
-```text
-config is not None
-    ↓
-use provided RunConfig completely
-```
-
-即：
-
-> **per-run config 整体替换 Agent default。**
-
-不执行隐式字段级 merge。
+不做 field merge。
 
 ---
 
-# 11. Runtime Invariants
+## 9. Compatibility Migration Contract
 
-RoboAgent v1 固定以下不变量。
+### 9.1 迁移原则
 
-1. `Agent` 是 immutable reusable definition。
-2. `Session.messages` 是唯一 canonical transcript。
-3. `start()` 必须先获取 active-run ownership，再提交 initial UserMessage。
-4. `start()` 立即启动 execution。
-5. 失败的 `start()` 不得污染 transcript。
-6. 外部不能直接修改 Session transcript。
-7. `Run` 只代表一次 execution。
-8. `RunContext` 与 `ModelContext` 严格隔离。
-9. metadata 不隐式进入 ModelContext、Events、RunResult 或默认日志。
-10. RunState 对外只能提供 snapshot。
-11. canonical transcript 必须满足正式 grammar。
-12. Tool Exchange 必须连续、完整、顺序一致。
-13. 同一 AssistantMessage 内 ToolCall.id 唯一。
-14. ToolResult 不能独立出现。
-15. 连续 UserMessage 合法。
-16. Assistant text + ToolCall 合法。
-17. partial Model stream 不进入 transcript。
-18. steer/follow-up 调用时只进入 pending controls。
-19. observe control 与 consume control 是不同阶段。
-20. pending control 只能在 safe boundary commit。
-21. 无 AssistantMessage 的失败 Turn 也可以形成 safe boundary。
-22. pending controls 按 receive sequence commit。
-23. cancel 优先于 steer / follow-up。
-24. 正常 terminal path 必须清空 pending controls。
-25. `uncommitted_controls != ()` 只能表示 internal Runtime failure。
-26. committed ToolCall 和 terminal ToolResult 之间不能插入 UserMessage。
-27. 每个 committed ToolCall 必须产生一个 terminal ToolResult。
-28. Tool handler result 与 Tool execution outcome 是不同类型。
-29. `ToolOutput.is_error=True` 必须映射 FAILED。
-30. ToolCallOutcome 必须映射 canonical ToolResultMessage。
-31. ToolCallOutcome 顺序必须与模型 ToolCall 顺序一致。
-32. Provider Adapter 负责 Provider protocol 差异。
-33. Kernel transcript 始终 provider-neutral。
-34. Model 与 Executor 使用同一个 FrozenToolSet。
-35. ToolCall 可以拥有 child cancellation token。
-36. first cancellation reason wins。
-37. STOP_BATCH 不取消已经运行的 sibling。
-38. FAIL_RUN 请求取消已经运行的 sibling。
-39. 不响应 cancellation 的 Tool 允许最终 COMPLETED。
-40. 单 ToolCall FAILED 不自动等于 Run FAILED。
-41. `tool_policy_factory=None` 使用 `DefaultToolExecutionPolicy`。
-42. 每个 Run 获得独立 policy instance。
-43. Default Tool failure action 是 STOP_BATCH。
-44. Default steering：PENDING → SKIP，RUNNING → CONTINUE。
-45. Hooks 默认只观察，不决定 execution。
-46. Hook failure 不使 Run 失败。
-47. 每个 Run 恰好产生一个 terminal event。
-48. Events 按真实 runtime 顺序产生。
-49. Transcript ToolResults 始终按 ToolCall 顺序 commit。
-50. Event history 在 AgentRun 生命周期内完整保留。
-51. replay snapshot 与 live subscriber 注册必须原子。
-52. 慢 subscriber 不允许阻塞 Run。
-53. 一个 result waiter 被取消不会取消 AgentRun。
-54. `continue_run()` 创建新 Run。
-55. `continue_run()` 前必须验证 transcript。
-56. terminal `cancel()` 是 idempotent no-op。
-57. terminal `steer/follow_up()` 必须抛 `RunFinishedError`。
-58. Run timeout 是 soft cooperative deadline。
-59. `RunTimedOut` 只在 cleanup 完成后产生。
-60. per-run RunConfig 整体替换 Agent default。
-61. Kernel 不解释任何领域 policy。
+多模态迁移是：
+
+> **内部 canonical representation 的破坏性变更，但 public text usage 尽可能兼容。**
+
+目标：
+
+```text
+legacy public call
+        ↓
+compat normalize
+        ↓
+new canonical protocol
+```
+
+不维护两套 transcript。
 
 ---
 
-# 12. 推荐实现顺序
+### 9.2 Message 旧字段兼容
 
-## Phase 1：Canonical Runtime Types
-
-首先实现和冻结：
+现有 public Message types 中已有的：
 
 ```text
-UserMessage
+timestamp
+finish_reason
+usage
+model
+tool_calls
+```
+
+等字段：
+
+> **不得因为多模态迁移随意删除或改变语义。**
+
+重点只迁移：
+
+```text
+content: str
+```
+
+到：
+
+```text
+content: tuple[MessageContent, ...]
+```
+
+---
+
+### 9.3 旧构造器兼容
+
+例如旧：
+
+```python
+UserMessage(
+    "hello",
+    timestamp=timestamp,
+)
+```
+
+继续工作。
+
+内部：
+
+```text
+"hello"
+    ↓
+TextContent("hello")
+```
+
+---
+
+### 9.4 AssistantMessage 兼容
+
+例如：
+
+```python
+AssistantMessage(
+    "hello",
+    tool_calls=tool_calls,
+    finish_reason=finish_reason,
+    usage=usage,
+    model=model,
+    timestamp=timestamp,
+)
+```
+
+仍应保持原字段语义。
+
+只有 content representation 发生 normalization。
+
+---
+
+### 9.5 位置参数兼容
+
+如果当前已有：
+
+```python
+AssistantMessage("hello", tool_calls)
+```
+
+这种 public 使用：
+
+> v1 compatibility cycle 应继续接受。
+
+但新代码和新文档：
+
+> 推荐 keyword arguments。
+
+---
+
+### 9.6 ToolExecutionResult Migration
+
+现有：
+
+```text
+ToolExecutionResult
+```
+
+逐步迁移：
+
+```text
+ToolOutput
+```
+
+可以提供：
+
+```text
+alias
+DeprecationWarning
+compat adapter
+```
+
+一个过渡周期。
+
+---
+
+### 9.7 Speech Compatibility
+
+现有 cascade Speech：
+
+```text
 AssistantMessage
-ToolCall
-ToolResultMessage
+      ↓
+extract TextContent
+      ↓
+TTS
+```
 
+如果没有 TextContent：
+
+```text
+Speech layer decides ignore / reject
+```
+
+Kernel 不自动做 media → text 转换。
+
+---
+
+### 9.8 EventStore Compatibility
+
+旧 text EventStore：
+
+```text
+text-safe compatibility mode
+```
+
+多模态 Event：
+
+```text
+redacted summary codec
+```
+
+禁止 raw bytes stringify。
+
+---
+
+## 10. Runtime Invariants
+
+### Ownership
+
+1. Agent 是 immutable reusable definition。
+2. Session.messages 是唯一 canonical transcript。
+3. `start()` 先获取 active ownership。
+4. ownership 成功后才能 commit initial UserMessage。
+5. failed `start()` 不污染 transcript。
+6. start 成功后 eager execution。
+7. terminal Run 自动释放 Session ownership。
+8. 外部不能直接修改 transcript。
+9. 一个 Run 只表示一次 execution。
+
+### Media Configuration
+
+10. MediaLimits 属于 Agent definition。
+11. Session 创建时固定 capture MediaLimits。
+12. Session 生命周期内 MediaLimits 不变。
+13. RunConfig 不改变 canonical media validity。
+14. MediaResolver 属于 Agent execution dependency。
+15. shared MediaResolver 必须 concurrency-safe。
+
+### Context / State
+
+16. `RunContext != ModelContext`。
+17. metadata 不隐式进入 ModelContext。
+18. Resolver 可以读取 RunContext，但不能修改它。
+19. Resolver 读取 metadata 不代表 metadata 可进入模型。
+20. metadata 不进入默认 Event / Result / logs。
+21. `Session.messages != RunState != Events`。
+22. internal `_RunState` 不属于 canonical truth。
+23. Public RunState 必须 immutable。
+24. Public RunState 不暴露 raw media payload。
+25. `_RunState` 可以持有 raw provisional media。
+26. 状态机必须 `CREATED → RUNNING → exactly one terminal`。
+27. terminal 后不能恢复。
+28. single Tool failure 不写 RunState.error。
+29. Run FAILED 才写 error。
+
+### Canonical Message
+
+30. MessageContent 是 closed union。
+31. MediaSource 是 closed union。
+32. unknown Content/Source 必须显式失败。
+33. canonical content collection 一律 tuple。
+34. public Sequence 必须 normalize。
+35. str/bytes/bytearray 不作为 Sequence of Content。
+36. MessageContent order 属于 canonical semantics。
+37. UserMessage 至少一个有效 Content。
+38. text-only UserMessage 至少一条非空白 text。
+39. mixed UserMessage 可包含空 TextContent。
+40. BytesSource non-empty。
+41. BytesSource 受 max_inline_bytes 限制。
+42. FileSource 依当前宿主 `pathlib.Path.is_absolute()` 语义为 absolute。
+43. UrlSource absolute http/https。
+44. Image MIME 为 image/*。
+45. Audio MIME 为 audio/*。
+46. File MIME 可一般 MIME。
+47. MIME canonical form 不含参数。
+
+### Media Semantics
+
+48. BytesSource 是 snapshot-like inline payload。
+49. FileSource 是 external live reference。
+50. UrlSource 是 external live reference。
+51. v1 不保证 external reference replay determinism。
+52. source provenance 不等于 access authorization。
+53. User/Tool/Provider/history 产生的 File/URL 都必须重新经 MediaResolver。
+54. Kernel 不自动 OCR/STT/caption/conversion。
+55. AudioContent.transcript 不自动 model-visible。
+56. ImageContent.detail 只是 optional hint。
+57. MediaResolver 默认不自动访问 File/URL。
+58. `resolve()` 必须获得当前 RunContext。
+59. `resolve()` 必须获得 canonical expected_media_type。
+60. Resolver 检测 MIME 必须与 expected_media_type 比较，冲突为 MEDIA_TYPE_MISMATCH。
+61. 同一 invocation 并行 resolve 不得改变 canonical content order。
+62. ordinary sibling resolve failure 使用 first-observed primary failure，并 cleanup 已成功资源。
+63. ResolvedMedia 是单 Provider consumption scope resource。
+64. ResolvedMedia payload 在 close 前保持可用。
+65. ResolvedMedia 必须显式声明 BORROWED / OWNED。
+66. BORROWED payload 不得被 close 删除。
+67. OWNED payload 应由 close best-effort cleanup。
+68. close 必须 async/idempotent/best-effort。
+69. Resolver 只 cleanup 自己拥有的资源。
+70. user-provided FileSource.path 不得被删除。
+71. Resolver 必须响应 cancellation。
+72. Resolver ordinary failure → MODEL_ERROR。
+73. Resolver deadline/user cancellation 保持 timeout/cancel semantics。
+
+### Transcript
+
+70. transcript 必须满足 formal grammar。
+71. Tool Exchange 连续。
+72. ToolResult count/order/call ID 对应。
+73. Tool Exchange 中间不能插入 User。
+74. ToolCall ID 同一 Assistant 内唯一。
+75. orphan ToolResult 非法。
+76. consecutive User 合法。
+77. multimodal Assistant + tools 合法。
+78. partial Model output 不进入 transcript。
+79. history import 与 continue 使用同一 validator。
+
+### Model / Capability
+
+80. ModelCapabilities 是 coarse declaration。
+81. exact Provider validation 属于 Adapter。
+82. unsupported capability → MODEL_ERROR。
+83. FILE capability 不代表所有文件。
+84. ToolResult capability 单独声明。
+85. output modality 在 commit 前验证。
+86. unsupported final output 不 commit。
+87. invalid provider-normalized output → MODEL_ERROR。
+88. text/tool args 可 incremental streaming。
+89. non-text media v1 complete-block only。
+90. realtime frame 不属于 normal ModelStreamItem。
+
+### Mixed Streaming
+
+91. ModelStreamItem 顺序必须保持 Provider-normalized logical order；`ContentCompleted` 只允许承载非文本完整 block，Provider complete text block 必须归一化为 `TextDelta`。
+92. TextDelta 累积到当前 text buffer。
+93. 非文本 ContentCompleted 前必须 flush 当前 text buffer。
+94. ContentCompleted 必须占据最终 content 的流顺序位置。
+95. 非文本 ContentCompleted 后的新 TextDelta 必须开始新的 text buffer。
+96. 中间有非文本 ContentCompleted 的 TextDelta 不得跨 block 合并。
+
+### ToolCall Streaming
+
+97. ToolCallDelta 使用 index 作为 provisional identity。
+98. Provider 可在 stream 后期提供 id/name。
+99. Adapter 必须按 index 聚合 ToolCall fragments。
+100. stream 完成后才形成 canonical ToolCall。
+101. canonical ToolCall 必须具有 valid id/name/arguments。
+102. 缺 id/name/valid arguments → MODEL_ERROR。
+103. Provider 无 ID 时 Adapter 可以生成 canonical ID。
+104. AgentLoop / generic Kernel 不负责生成 Provider ToolCall identity。
+
+### Model Event Timing
+
+105. `ModelCompleted` 只能在 Assistant canonical commit 后产生。
+106. 收到 ModelCompleted 时 Session.messages 已包含 Assistant。
+107. Provider stream socket completion 不等于 public ModelCompleted。
+
+### Control
+
+108. steer/follow_up 先 pending。
+109. observe != consume。
+110. only safe-boundary commit。
+111. early failure 也可形成 safe boundary。
+112. pending control 按 receive sequence。
+113. cancel > steer > follow-up。
+114. cancel 后不启动新 Model。
+115. cancel 后不启动 pending Tool。
+116. normal terminal 不遗留 uncommitted controls。
+117. terminal cancel no-op。
+118. terminal steer/follow_up → RunFinishedError。
+119. continue_run 创建新 Run。
+
+### Cancellation
+
+120. Run 有 cancellation token。
+121. Tool 有 child token。
+122. first cancellation reason wins。
+123. Run cancel 传播 child。
+124. policy 可 local cancel。
+125. timeout 是 soft deadline。
+126. RunTimedOut 在 cleanup 后。
+127. non-cooperative Model/Tool/Resolver 可晚结束。
+
+### Tool
+
+128. ToolOutput != ToolCallOutcome。
+129. ToolOutput.content 必须 normalize。
+130. invalid ToolOutput → ToolCall FAILED。
+131. invalid ToolOutput 不直接 Run FAILED。
+132. is_error=True → FAILED。
+133. Outcome → ToolResultMessage。
+134. ToolResult 不含 mutable details。
+135. outcome 顺序跟 call 顺序。
+136. execution completion order 可不同。
+137. Tool 可返回 Text/Image/Audio/File。
+138. Tool success 不因 Model consumption failure 被改写。
+139. STOP_BATCH 不取消 running sibling。
+140. FAIL_RUN 请求 running sibling cancel。
+141. non-cooperative Tool 可 COMPLETED。
+142. single Tool failure 不自动 Run FAILED。
+
+### Policy
+
+143. factory=None → DefaultToolExecutionPolicy。
+144. 每 Run 独立 policy。
+145. default before_call ALLOW。
+146. default failure STOP_BATCH。
+147. default steer pending SKIP。
+148. default steer running CONTINUE。
+149. Policy 不做 task graph。
+150. Policy 不做 resource scheduling。
+151. v1 无 generic retry。
+
+### Events / Privacy
+
+152. 每 Run 恰好一个 terminal Event。
+153. Event sequence 单调。
+154. parallel Tool Event 按真实 execution 顺序。
+155. ToolResult transcript 按 call order。
+156. internal ModelStreamItem 可持 raw media。
+157. public Event history 不持 raw media。
+158. ContentCompleted raw object 不直接进入 Event history。
+159. subscriber 默认获得 media-safe summary。
+160. Public RunState 使用同一 media-safe summary policy。
+161. Event history 完整保留到 Run release。
+162. replay + live registration 原子。
+163. slow subscriber 不阻塞 Run。
+164. waiter cancellation 不取消 Run。
+165. logs/events/errors 必须 media-redacted。
+166. current EventStore 不构成 multimodal durable persistence。
+
+---
+
+## 11. 推荐实现顺序
+
+### Phase 1 — Canonical Message Protocol
+
+实现：
+
+```text
+MessageContent closed union
+MediaSource closed union
+
+TextContent
+ImageContent
+AudioContent
+FileContent
+
+MediaLimits
+
+runtime type validation
+normalization
+MIME validation
 TranscriptValidator
+```
 
+---
+
+### Phase 2 — Compatibility Layer
+
+实现：
+
+```text
+string → TextContent shorthand
+
+legacy UserMessage fields
+legacy AssistantMessage fields
+legacy positional constructors
+
+ToolExecutionResult compatibility
+```
+
+确保 text-only tests 继续通过。
+
+---
+
+### Phase 3 — Runtime Types
+
+```text
 RunContext
-RunState
+_RunState
+public RunState
 RunStatus
 RunPhase
 
@@ -2832,334 +4972,802 @@ RunError
 
 CancellationToken
 CancellationReason
-
-ToolOutput
-ToolCallContext
-ToolCallOutcome
-ToolExecutionBatchResult
 ```
-
-这一阶段的目标是：
-
-> **先用类型和 validator 锁住 Runtime Protocol。**
 
 ---
 
-## Phase 2：Session 与 AgentRun
-
-实现：
+### Phase 4 — Media Runtime
 
 ```text
-Session atomic start()
-
-eager AgentRun execution
-
-active-run ownership
-
-read-only transcript
-
-result() multi-await
-
-full Event History
+MediaResolver
+MediaOwnership
+ResolvedMedia
+MediaResolutionError
+media sanitization
 ```
 
 ---
 
-## Phase 3：RunControl
+### Phase 5 — Model Capabilities
 
-实现：
+```text
+Modality
+ModelCapabilities
+ModelCapabilityError
+coarse validation
+exact Adapter validation
+```
+
+---
+
+### Phase 6 — Session / AgentRun
+
+```text
+atomic start
+eager execution
+active ownership
+Session-fixed MediaLimits
+
+read-only transcript
+multi-await result
+```
+
+---
+
+### Phase 7 — RunControl
 
 ```text
 cancel
-
 steer
-
 follow_up
 
-pending-control queue
-
-receive sequence
-
-observation
-
+PendingControl
+sequence
+observe
 safe commit
-
 terminal flush
 ```
 
 ---
 
-## Phase 4：ToolExecutor
-
-先实现：
+### Phase 8 — Tool Runtime
 
 ```text
-sequential execution
-```
+ToolOutput
+ToolCallOutcome
+ToolExecutionBatchResult
 
-并尽量保持当前行为等价。
-
-随后实现：
-
-```text
-parallel execution
-
+Sequential
+Parallel
 max_concurrency
 
-ToolCall child cancellation
-
-DefaultToolExecutionPolicy
-
+child cancellation
+Default Policy
 STOP_BATCH
-
 FAIL_RUN
-
-stable outcome ordering
+stable ordering
 ```
 
 ---
 
-## Phase 5：AgentLoop
-
-重构当前 Loop：
+### Phase 9 — Model Streaming
 
 ```text
-resolve FrozenToolSet
+TextDelta
+ToolCallDelta
+ContentCompleted
 
-ContextManager.prepare()
+provisional ToolCall builder
+ordered content builder
 
-Model streaming
+mixed multimodal ordering
+final Assistant build
+```
 
-Assistant safe commit
+---
+
+### Phase 10 — AgentLoop Integration
+
+```text
+FrozenToolSet
+ContextManager
+
+MediaResolver
+
+Model invocation
+Assistant validation
+Assistant commit
 
 ToolExecutor
+ToolResult commit
 
-ToolResult safe commit
-
-RunControl observation
-
-RunControl consumption
-
+RunControl
 termination
 ```
 
----
-
-## Phase 6：Adapters、Events 与 Semantic Tests
-
-最后稳定：
+要求：
 
 ```text
-Provider Adapter protocol
-
-Event replay
-
-Hooks
-
-continue_run()
-
-semantic tests
+no modality-specific AgentLoop control-flow branch
 ```
-
-目录调整应放在语义实现之后。
-
-优先级：
-
-> **公共语义与测试 > 文件组织。**
 
 ---
 
-# 13. v1 Semantic Tests
+### Phase 11 — Event Layer
 
-v1 发布前必须重点测试运行语义。
+实现：
 
-## Transcript
+```text
+ContentSummary
+ModelDelta Event summary
+
+media-safe RunState
+media-safe Event history
+
+replay
+subscriber queues
+redaction
+```
+
+---
+
+### Phase 12 — Image Adapter
+
+至少一个真实 Adapter：
+
+```text
+text input/output
+text + image input
+image ToolResult
+```
+
+通过真实 integration tests。
+
+---
+
+### Phase 13 — EventStore Migration
+
+实现：
+
+```text
+safe Event codec
+legacy text store compatibility
+multimodal summary persistence
+```
+
+raw multimodal persistence 不进入 v1。
+
+---
+
+### Phase 14 — Semantic Tests
+
+完成全部 semantic test matrix。
+
+---
+
+## 12. Semantic Tests
+
+### 12.1 Canonical Types
+
+```text
+wrong TextContent.text type rejected
+
+wrong ImageContent.detail type rejected
+
+wrong AudioContent.transcript type rejected
+
+BytesSource.data not bytes rejected
+
+list accepted
+tuple accepted
+
+str Sequence rejected
+bytes Sequence rejected
+
+unknown Content rejected
+unknown Source rejected
+```
+
+---
+
+### 12.2 Media Validation
+
+```text
+empty BytesSource rejected
+oversized BytesSource rejected
+
+relative FileSource rejected
+absolute FileSource accepted
+cross-platform absolute-path rule follows current host pathlib semantics
+
+invalid URL rejected
+http accepted
+https accepted
+
+Image + image/* accepted
+Image + audio/* rejected
+
+Audio + audio/* accepted
+Audio + image/* rejected
+
+File + application/pdf accepted
+```
+
+---
+
+### 12.3 UserMessage
+
+```text
+empty rejected
+
+whitespace text-only rejected
+
+empty Text + Image accepted
+
+Image-only accepted
+Audio-only accepted
+File-only accepted
+```
+
+---
+
+### 12.4 Transcript Grammar
 
 ```text
 valid Tool Exchange
 
-reversed ToolResult order rejected
-
-missing ToolResult rejected
-
-orphan ToolResult rejected
+reversed result rejected
+missing result rejected
+orphan result rejected
 
 duplicate ToolCall ID rejected
 
-consecutive UserMessage accepted
+consecutive User accepted
 
-Assistant text + ToolCalls accepted
+Assistant + multimodal + ToolCall accepted
 
-empty Assistant semantics
+ToolResult Image accepted
+ToolResult Audio accepted
 
-history import validation
+content order preserved
 ```
 
-## Session
+---
+
+### 12.5 Media Replay
 
 ```text
-concurrent start() only one succeeds
+BytesSource stable
 
-failed start() does not mutate transcript
+FileSource file modified between turns
+    → live reference semantics
 
-start() immediately executes
+UrlSource expired before continue_run
+    → resolve failure
 
-terminal Run releases active ownership
-
-external transcript mutation impossible
+history validation does not resolve media
 ```
 
-## Control
+---
+
+### 12.6 MediaResolver RunContext
 
 ```text
-steer immediately after start()
+resolver receives correct session_id
+
+resolver receives correct run_id
+
+resolver receives expected metadata view
+
+resolver cannot alter Kernel RunContext semantics
+
+concurrent Runs receive distinct RunContexts
+```
+
+---
+
+### 12.7 MediaResolver Access
+
+```text
+BytesSource resolves
+
+FileSource denied without resolver
+
+UrlSource denied without resolver
+
+allowed root accepted
+
+path escape rejected
+
+private network URL rejected by application resolver
+
+redirect policy enforced
+
+cancel during resolve
+
+timeout during resolve
+```
+
+---
+
+### 12.8 ResolvedMedia Ownership
+
+```text
+BORROWED FileSource path survives close
+
+OWNED temp Path removed on close
+
+BORROWED bytes not destroyed
+
+OWNED bytes released
+
+close idempotent
+
+multiple close calls safe
+```
+
+---
+
+### 12.9 ResolvedMedia Lifecycle
+
+```text
+payload usable until close
+
+close after Provider success
+
+close after Adapter encoding failure
+
+close after Provider request failure
+
+close after Provider response failure
+
+close after cancellation
+
+close after timeout
+
+cleanup failure doesn't override primary result
+```
+
+---
+
+### 12.10 Media Type Resolution
+
+```text
+canonical MIME + matching detected MIME
+    → accepted
+
+canonical MIME + conflicting detected MIME
+    → MEDIA_TYPE_MISMATCH
+
+canonical MIME=None
+    → resolver may detect MIME
+
+detected MIME does not mutate canonical Message
+
+Adapter passes canonical media_type as expected_media_type to resolver
+```
+
+### 12.10.1 同一 Invocation 多媒体 Resolution
+
+```text
+multiple external media resolve in parallel
+    → encoded provider content remains canonical order
+
+one ordinary resolve fails
+    → unfinished siblings cancelled
+    → resolved siblings closed
+    → first observed ordinary failure is primary
+
+Run cancellation / timeout during parallel resolve
+    → CANCELLED / TIMED_OUT dominates ordinary failure
+```
+
+---
+
+### 12.11 Media Provenance
+
+```text
+User UrlSource
+    → resolver
+
+Tool UrlSource
+    → resolver
+
+Provider UrlSource
+    → resolver
+
+history-imported UrlSource
+    → resolver
+```
+
+No provenance bypass.
+
+---
+
+### 12.12 Capabilities
+
+```text
+TEXT-only accepts text
+
+TEXT-only rejects image
+
+vision accepts image
+
+FILE coarse capability + PDF accepted
+
+FILE coarse capability + ZIP rejected
+
+ToolResult IMAGE accepted
+
+ToolResult AUDIO rejected
+
+unsupported input
+    → MODEL_ERROR
+
+unsupported output
+    → MODEL_ERROR
+```
+
+---
+
+### 12.13 Mixed Multimodal Streaming
+
+```text
+TextDelta("A")
+Image
+TextDelta("B")
+
+→
+
+[
+  Text("A"),
+  Image,
+  Text("B")
+]
+```
+
+必须保证。
+
+Provider complete TextContent block
+    → normalized into TextDelta
+    → never emitted as ContentCompleted(TextContent)
+
+---
+
+### 12.14 Adjacent Text Streaming
+
+```text
+TextDelta("A")
+TextDelta("B")
+Image
+TextDelta("C")
+TextDelta("D")
+
+→
+
+[
+  Text("AB"),
+  Image,
+  Text("CD")
+]
+```
+
+---
+
+### 12.15 Multiple Media Blocks
+
+```text
+Text("A")
+Image1
+Image2
+Text("B")
+Audio
+Text("C")
+```
+
+最终顺序必须严格一致。
+
+---
+
+### 12.16 ToolCall Streaming
+
+覆盖：
+
+```text
+arguments before id
+
+name before id
+
+id before name
+
+late id
+
+late name
+
+multiple ToolCalls interleaved by index
+
+missing final id
+
+missing final name
+
+invalid final arguments
+```
+
+---
+
+### 12.17 Provider Without ToolCall ID
+
+```text
+Provider has no ID
+    ↓
+Adapter generates canonical ID
+    ↓
+ID unique within AssistantMessage
+```
+
+Kernel AgentLoop 不生成。
+
+---
+
+### 12.18 Model Streaming
+
+```text
+TextDelta provisional
+
+ToolCallDelta provisional
+
+ContentCompleted raw internal only
+
+ContentSummary public only
+
+raw BytesSource absent from Event history
+
+stream failure
+    → no Assistant commit
+
+successful stream
+    → final validation
+    → Session commit
+    → ModelCompleted
+```
+
+---
+
+### 12.19 ModelCompleted Timing
+
+```text
+subscriber receives ModelCompleted
+    ↓
+Session.messages already contains AssistantMessage
+```
+
+必须始终成立。
+
+---
+
+### 12.20 Public RunState Safety
+
+```text
+internal _RunState contains raw BytesSource
+
+public RunState contains ContentSummary only
+
+public RunState contains no raw bytes
+
+public RunState contains no credential URL
+
+public RunState contains no full local path
+```
+
+---
+
+### 12.21 Session
+
+```text
+concurrent start only one succeeds
+
+failed start no transcript mutation
+
+invalid media input no transcript mutation
+
+start eager
+
+terminal releases ownership
+
+Session uses fixed MediaLimits
+```
+
+---
+
+### 12.22 Control
+
+```text
+steer immediately after start
+
+steer with image
+
+follow_up with audio
 
 steer during Model
 
-steer during sequential Tool batch
+steer during MediaResolver
 
-steer during parallel Tool batch
+steer during sequential tools
 
-follow-up during execution
+steer during parallel tools
 
-follow-up + steer preserves receive order
+follow_up + steer receive order
 
-cancel dominates pending controls
+cancel dominates
 
 terminal steer rejected
-
-terminal follow-up rejected
-
-terminal cancel is no-op
+terminal follow_up rejected
+terminal cancel no-op
 
 normal terminal leaves no uncommitted controls
 ```
 
-## Cancellation
+---
+
+### 12.23 Cancellation
 
 ```text
-user cancellation
+USER cancellation
 
-timeout cancellation
+TIMEOUT cancellation
 
-first cancellation reason wins
+first reason wins
 
-Run cancellation propagates to Tool children
+Run cancel → Tool child
 
-Tool policy can cancel one child
+Run cancel → MediaResolver
 
-non-cooperative Tool may complete after cancel request
+policy local Tool cancel
+
+non-cooperative Tool may complete
+
+RunTimedOut after cleanup
 ```
 
-## Tool
+---
+
+### 12.24 ToolOutput
 
 ```text
-ToolOutput → ToolCallOutcome
+string shorthand
 
-ToolCallOutcome → ToolResultMessage
+text output
 
-BeforeToolAction.ALLOW
+image output
 
-BeforeToolAction.REJECT
+audio output
 
-BeforeToolAction.SKIP
+file output
 
-BeforeToolAction.FAIL_RUN
+mixed output
 
-STOP_BATCH sequential
+invalid media → Tool FAILED
 
-STOP_BATCH parallel
+details not in ToolResult
 
-FAIL_RUN sequential
-
-FAIL_RUN parallel
-
-stable result ordering
-
-ToolCall child cancellation
-
-ToolOutput.is_error mapping
-
-unknown Tool
-
-validation failure
+is_error=True → FAILED
 ```
 
-## Default Policy
+---
+
+### 12.25 ToolPolicy
 
 ```text
-factory=None creates DefaultToolExecutionPolicy
+factory=None → DefaultPolicy
 
-before_call → ALLOW
+before_call ALLOW
 
-Tool failure → STOP_BATCH
+Tool FAILED → STOP_BATCH
 
-steering PENDING → SKIP
+PENDING steering → SKIP
 
-steering RUNNING → CONTINUE
+RUNNING steering → CONTINUE
+
+REJECT
+SKIP
+FAIL_RUN
 ```
 
-## Resolver / Context
+---
+
+### 12.26 Parallel Tools
 
 ```text
-Model and Executor use same FrozenToolSet
+A B C start
 
-ToolResolver can filter with RunContext
+B finishes first
 
-metadata does not leak to ModelContext
+events reflect B-first
 
-explicit model-visible input works
+BatchResult A B C
 
-ContextManager prepares each Turn
+ToolResults A B C
+
+STOP_BATCH:
+pending skipped
+running continue
+
+FAIL_RUN:
+pending skipped
+running cancel requested
 ```
 
-## Events
+---
+
+### 12.27 ToolResult Capability
 
 ```text
-late subscriber receives replay
-
-terminal subscriber receives full replay
-
-multiple subscribers
-
-snapshot + live registration has no gap
-
-no duplicated replay/live event
-
-slow subscriber does not block Run
-
-parallel events preserve actual completion order
-
-exactly one terminal event
+Tool COMPLETED with Image
+        ↓
+ToolResult committed
+        ↓
+next Model can't consume Image
+        ↓
+Run FAILED / MODEL_ERROR
+        ↓
+Tool stays COMPLETED
 ```
 
-## result()
+---
+
+### 12.28 Context
 
 ```text
-multiple concurrent awaiters
+Model + Executor same FrozenToolSet
 
-repeat result()
+metadata never leaks
 
-waiter cancellation does not cancel Run
+whole multimodal Message preserved
 
-terminal result cached
+ToolExchange atomic
+
+explicit model-visible app content works
 ```
 
-## RunState
+---
+
+### 12.29 Events
 
 ```text
-CREATED → RUNNING → terminal
+exactly one terminal Event
 
-valid phase transitions
+late subscriber replay
 
-terminal phase
+terminal subscriber replay
 
-error only for Run terminal failure
+multiple subscribers independent
 
-no transition out of terminal
+snapshot/live no gap
+
+slow subscriber disconnected
+
+no raw media bytes
+
+redacted path/URL
 ```
 
-## continue_run()
+---
+
+### 12.30 Result
+
+```text
+multiple awaiters
+
+repeat result
+
+waiter cancellation doesn't cancel Run
+
+multimodal final_message preserved
+```
+
+---
+
+### 12.31 `continue_run()`
 
 ```text
 empty Session rejected
@@ -3168,93 +5776,256 @@ active Run rejected
 
 dangling ToolCall rejected
 
-valid User-ending transcript accepted
+invalid transcript rejected
 
-valid Assistant-ending transcript accepted
+valid multimodal history accepted
 
-valid ToolResult-ending transcript accepted
+external media not resolved during validation
 
-imported history uses same validator
-```
-
-## Isolation
-
-```text
-multiple Sessions sharing same Agent remain isolated
-
-each Run has independent policy
-
-metadata never enters Events
-
-metadata never enters ModelContext
+same Session MediaLimits used
 ```
 
 ---
 
-# 14. v1 完成标准
-
-RoboAgent v1 的完成标准不是：
+### 12.32 Compatibility
 
 ```text
-目录数量
-功能数量
-测试覆盖率百分比
+UserMessage("x")
+    → TextContent
+
+AssistantMessage("x")
+    → TextContent
+
+old timestamp preserved
+
+old finish_reason preserved
+
+old usage/model preserved
+
+old ToolCall fields preserved
+
+old positional call works
+
+ToolExecutionResult compatibility works
+
+text-only tests remain green
+
+speech text extraction remains compatible
 ```
 
-而是：
+---
 
-> **Runtime ownership、transcript grammar、control、tool execution、cancellation、state transition、events 和 termination semantics 都已经拥有明确且唯一的解释，并通过 semantic tests 锁定。**
+### 12.33 Real Adapter Acceptance
 
-最终核心结构保持：
+v1 必须至少：
 
 ```text
-                    Agent
-                      │
-                      ▼
-                   Session
-                      │
-                      ▼
-                     Run
-                      │
-       ┌──────────────┼──────────────┐
-       ▼              ▼              ▼
-  RunContext      RunState      RunControl
-       │              │              │
-       └──────────────┼──────────────┘
-                      ▼
-                 AgentLoop
-              ┌───────┴───────┐
-              ▼               ▼
-       ContextManager     ToolExecutor
-              │               │
-              ▼               ▼
-        ModelContext          Tool
-              │
-              ▼
-             Model
+text E2E
+
+text + image E2E
+
+image ToolResult E2E
 ```
 
-并稳定以下协议：
+不能只依赖 mock capability tests。
+
+---
+
+## 13. 推荐代码结构
+
+目录只作为建议：
 
 ```text
-Session.messages
-    =
-canonical conversation truth
+roboagent/
+├── agent/
+│   ├── agent.py
+│   ├── session.py
+│   ├── run.py
+│   ├── loop.py
+│   ├── control.py
+│   ├── executor.py
+│   ├── hooks.py
+│   └── types.py
+│
+├── message/
+│   ├── message.py
+│   ├── content.py
+│   ├── media.py
+│   ├── normalize.py
+│   └── validator.py
+│
+├── context/
+│   └── manager.py
+│
+├── model/
+│   ├── model.py
+│   ├── capabilities.py
+│   ├── stream.py
+│   └── ...
+│
+├── runtime/
+│   ├── context.py
+│   ├── state.py
+│   ├── event.py
+│   ├── store.py
+│   └── ...
+│
+└── tool/
+    └── ...
 ```
 
+如果当前类型已经位于：
+
 ```text
-RunContext
-    !=
+runtime/types.py
+```
+
+等现有位置：
+
+> **不需要为了文档先移动代码。**
+
+优先级：
+
+```text
+public semantics
+    >
+semantic tests
+    >
+directory organization
+```
+
+---
+
+## 14. v1 完成标准
+
+RoboAgent v1 最终定位：
+
+> **Generic Async Modality-Agnostic Agent Runtime Kernel**
+
+必须同时具备：
+
+```text
+provider-neutral
+model-agnostic
+tool-agnostic
+modality-agnostic
+async
+embeddable
+```
+
+核心消息关系：
+
+```text
+Message
+  ↓
+ordered MessageContent[]
+  ├── TextContent
+  ├── ImageContent
+  ├── AudioContent
+  └── FileContent
+```
+
+媒体关系：
+
+```text
+MediaSource
+  ├── BytesSource
+  ├── FileSource
+  └── UrlSource
+          │
+          ▼
+     MediaResolver
+          │
+          ▼
+     ResolvedMedia
+       ├── payload
+       ├── media_type
+       ├── size
+       └── ownership
+          │
+          ▼
+       Adapter
+```
+
+输入流程：
+
+```text
+Raw Input
+    ↓
+Normalize
+    ↓
+Canonical Structure Validation
+    ↓
+Message Semantic Validation
+    ↓
+Canonical Transcript
+    ↓
+ContextManager
+    ↓
 ModelContext
+    ↓
+Coarse Capability Validation
+    ↓
+Exact Adapter Validation
+    ↓
+MediaResolver
+    ↓
+Provider
 ```
 
+模型流：
+
 ```text
-Session.messages
-    !=
-RunState
-    !=
-Events
+Provider Stream
+      │
+      ├── TextDelta
+      ├── ToolCallDelta(index-based provisional identity)
+      └── ContentCompleted(raw)
+      │
+      ▼
+ordered stream builders
+      ├── content builder
+      └── ToolCall builder
+      │
+      ▼
+final AssistantMessage
+      ↓
+Canonical Validation
+      ↓
+Output Capability Validation
+      ↓
+Session commit
+      ↓
+ModelCompleted
 ```
+
+公共观测：
+
+```text
+internal _RunState / ModelStreamItem
+        │
+        ▼
+   summarize / redact
+        │
+        ├── public RunState
+        └── public Events
+```
+
+Tool：
+
+```text
+Tool
+  ↓
+ToolOutput
+  ↓
+Canonical Output Validation
+  ↓
+ToolCallOutcome
+  ↓
+ToolResultMessage
+```
+
+Control：
 
 ```text
 Pending Control
@@ -3266,59 +6037,57 @@ safe boundary
 consume / commit
 ```
 
-```text
-Assistant(tool_calls)
-        ↓
-ordered terminal ToolResults
-        ↓
-next User / Assistant
-```
+Realtime：
 
 ```text
-Tool
-  ↓
-ToolOutput
-  ↓
-ToolExecutor
-  ↓
-ToolCallOutcome
-  ↓
-ToolResultMessage
+Realtime Media Stream
+        │
+        ▼
+Realtime / Speech Adapter
+        │
+        ▼
+Agent Turn / Model
 ```
+
+Realtime transport 与 canonical transcript 永远保持分层。
+
+最终原则：
+
+> **多模态扩展 Runtime 的数据协议、媒体访问边界、Provider Adapter 和 Tool I/O，但不扩张 Agent Runtime 控制流。**
+
+v1 必须至少完成：
 
 ```text
-ToolResolver
-      ↓
-FrozenToolSet
-   ↙          ↘
-Model       Executor
+canonical Text/Image/Audio/File protocol
+
+MediaLimits
+
+MediaResolver with RunContext
+ResolvedMedia ownership + lifecycle
+
+ModelCapabilities
+exact Adapter validation
+
+ordered mixed multimodal streaming
+ToolCall streaming normalization
+
+Text/Image real E2E
+Image ToolResult real E2E
+
+safe Assistant commit
+ModelCompleted commit ordering
+
+ToolOutput / Outcome / ToolResult split
+
+cancel / steer / follow-up
+
+parallel Tool semantics
+
+media-safe public RunState
+media-safe Event history
+Event replay
+
+legacy text compatibility
 ```
 
-以及：
-
-```text
-Runtime Events
-    follow actual execution order
-
-Canonical Transcript
-    follows protocol commit order
-```
-
-当这些语义全部实现并通过测试后，RoboAgent v1 即可视为：
-
-> **一个成熟的、模型无关、工具无关、可嵌入的通用异步 Agent Runtime Kernel。**
-
-后续的：
-
-```text
-Memory
-MCP
-Handoff
-Sub-Agent
-Multi-Agent
-Approval
-Safety
-Gateway
-```
-
-都应建立在这一 Kernel 之上，而不再改变 Kernel 的核心运行协议。
+只有当这些语义全部实现，并由 semantic tests 锁定后，RoboAgent v1 才可以视为真正稳定的长期 Agent Runtime Kernel。
