@@ -1,28 +1,7 @@
-"""Public exports for the RoboAgent tool subsystem."""
+from .tool import InvalidToolOutputError, Tool, ToolCallContext, ToolInvocation, ToolOutput
 
-from roboagent.tool.errors import (
-    DuplicateToolError,
-    ToolError,
-    ToolNotFoundError,
-    ToolRegistrationError,
-)
-from roboagent.tool.manager import ToolManager
-from roboagent.tool.registry import ToolRegistry
-from roboagent.tool.resolver import ResolutionContext, ResolvedToolSet, ToolResolver
-from roboagent.tool.schema import ToolSpec
-from roboagent.tool.tool import Tool, ToolInvocation
+# v1 keeps the former public name as a thin compatibility alias.  Both names
+# normalize into the single canonical ToolOutput representation.
+ToolExecutionResult = ToolOutput
 
-__all__ = [
-    "DuplicateToolError",
-    "ResolutionContext",
-    "ResolvedToolSet",
-    "Tool",
-    "ToolInvocation",
-    "ToolError",
-    "ToolManager",
-    "ToolNotFoundError",
-    "ToolRegistrationError",
-    "ToolRegistry",
-    "ToolResolver",
-    "ToolSpec",
-]
+__all__ = ["Tool", "ToolCallContext", "ToolInvocation", "ToolOutput", "ToolExecutionResult", "InvalidToolOutputError"]

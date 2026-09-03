@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import gradio as gr
 
 from roboagent.agent import Agent, AgentSession
-from roboagent.runtime import MessageDeltaEvent
+from roboagent.runtime import AgentEvent, RunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +206,8 @@ async def chat(
         yield view_update(conversation, state)
         assistant_text = ""
         async for event in run.events():
-            if isinstance(event, MessageDeltaEvent) and event.kind == "text":
-                assistant_text += event.delta
+            if isinstance(event, AgentEvent) and event.type == "model_delta" and event.text:
+                assistant_text += event.text
                 conversation.history = [
                     *conversation.history[:-1],
                     {"role": "assistant", "content": assistant_text},
@@ -216,15 +216,15 @@ async def chat(
                 yield view_update(conversation, state)
 
         result = await run.result()
-        if result.status != "completed":
-            logger.error("RoboAgent chat run failed: run_id=%s status=%s error=%s", result.run_id, result.status, result.error)
+        if result.status is not RunStatus.COMPLETED:
+            logger.error("RoboAgent chat run failed: run_id=%s status=%s error=%s", run.run_id, result.status.value, result.error)
             conversation.history = [
                 *conversation.history[:-1],
                 {"role": "assistant", "content": ERROR_MESSAGE},
             ]
             yield view_update(conversation, state)
     except asyncio.CancelledError:
-        run.cancel("user")
+        run.cancel()
         with suppress(asyncio.CancelledError):
             await asyncio.shield(run.result())
         raise

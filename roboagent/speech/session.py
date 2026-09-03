@@ -8,7 +8,7 @@ import re
 from dataclasses import replace
 from time import monotonic
 
-from roboagent.runtime import MessageDeltaEvent
+from roboagent.runtime import AgentEvent
 from roboagent.agent.session import SessionBusyError
 
 from .asr.base import ASR, ASRSession
@@ -356,12 +356,12 @@ class SpeechSession:
             await self._emit(ResponseStartedEvent())
             async for event in run.events():
                 if generation != self._response_generation:
-                    run.cancel("superseded")
+                    run.cancel()
                     return
-                if isinstance(event, MessageDeltaEvent) and event.kind == "text":
+                if isinstance(event, AgentEvent) and event.type == "model_delta" and event.text:
                     self._metrics_by_response.get(generation, self._metrics).mark("agent_first_token_at")
-                    await self._emit(ResponseTextEvent(delta=event.delta))
-                    for segment in self.segmenter.push(event.delta):
+                    await self._emit(ResponseTextEvent(delta=event.text))
+                    for segment in self.segmenter.push(event.text):
                         await self._tts_queue.put((segment, generation))
             tail = self.segmenter.flush()
             if tail:
@@ -372,7 +372,7 @@ class SpeechSession:
             await self._emit_metrics_if_complete(generation)
         except asyncio.CancelledError:
             if run is not None:
-                run.cancel("speech_interrupt")
+                run.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(run.result())
             raise
@@ -442,7 +442,7 @@ class SpeechSession:
         self._response_generation += 1
         self._response_id = None
         if self._agent_run is not None:
-            self._agent_run.cancel(reason)
+            self._agent_run.cancel()
         if self._agent_task is not None:
             self._agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

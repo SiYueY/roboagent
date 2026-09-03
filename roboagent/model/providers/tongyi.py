@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -71,6 +72,7 @@ def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> Ope
     base_settings = config.params.model_dump(exclude_none=True)
     settings = merge_model_settings(base_settings, overrides)
     settings["model_name"] = settings.pop("model")
+    settings["api_key"] = settings.get("api_key") or os.getenv("DASHSCOPE_API_KEY")
     settings["base_url"] = settings.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
     settings.pop("streaming", None)
     return OpenAICompatibleChatModel(**settings)

@@ -8,29 +8,34 @@ import unittest
 from pathlib import Path
 
 from roboagent.agent import Agent
-from roboagent.runtime import AssistantMessage, ModelEvent
+from roboagent.runtime import AssistantMessage, ModelCapabilities, ModelCompleted, Modality, TextDelta
+
+try:
+    import gradio as _gradio
+    _HAS_GRADIO6 = hasattr(_gradio, "themes")
+except ImportError:
+    _HAS_GRADIO6 = False
 
 
 class ScriptedModel:
     model_name = "test-model"
+    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False)
 
     async def stream(self, _request, _cancellation):
-        yield ModelEvent("start")
-        yield ModelEvent("text_delta", delta="测试回复")
-        yield ModelEvent("done", message=AssistantMessage("测试回复"))
+        yield TextDelta("测试回复")
+        yield ModelCompleted(AssistantMessage("测试回复"))
 
 
 class CancellableModel:
     model_name = "test-model"
+    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False)
 
     async def stream(self, _request, cancellation):
-        yield ModelEvent("start")
         while not cancellation.cancelled:
             await asyncio.sleep(0)
-        yield ModelEvent("cancelled")
 
 
-@unittest.skipUnless(importlib.util.find_spec("gradio"), "requires the gradio optional extra")
+@unittest.skipUnless(_HAS_GRADIO6, "requires the gradio>=6 optional extra")
 class ChatExampleTests(unittest.TestCase):
     BROWSER_ACTIONS = (
         "toggleSidebar",

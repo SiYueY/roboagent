@@ -1,58 +1,32 @@
-"""Immutable Agent definition."""
-
+"""Immutable reusable V1 Agent definition."""
 from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Sequence
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-
-from roboagent.agent.types import AgentHooks
-from roboagent.context import ContextManager, FullContextManager
-from roboagent.model.client import ChatModel
-from roboagent.runtime import Message
-from roboagent.tool import Tool
-
+from roboagent.agent.types import RunConfig
+from roboagent.agent.hooks import AgentHooks
+from roboagent.context.manager import ContextManager, FullContextManager
+from roboagent.runtime.types import MediaLimits, MediaResolver
+from roboagent.tool.tool import Tool
+from roboagent.tool.resolver import StaticToolResolver, ToolResolver
 
 @dataclass(frozen=True, slots=True)
 class Agent:
-    """Reusable, immutable definition of a model-backed agent."""
-
-    model: ChatModel
+    model: object
     tools: tuple[Tool, ...]
     system_prompt: str | None
-    hooks: AgentHooks
     context_manager: ContextManager
-    max_turns: int
-    run_timeout: float | None
-
-    def __init__(
-        self,
-        model: ChatModel,
-        *,
-        tools: Sequence[Tool] = (),
-        system_prompt: str | None = None,
-        hooks: AgentHooks | None = None,
-        context_manager: ContextManager | None = None,
-        max_turns: int = 32,
-        run_timeout: float | None = None,
-    ) -> None:
-        if max_turns < 1:
-            raise ValueError("max_turns must be positive.")
-        if run_timeout is not None and run_timeout <= 0:
-            raise ValueError("run_timeout must be positive.")
-        object.__setattr__(self, "model", model)
-        object.__setattr__(self, "tools", tuple(tools))
-        object.__setattr__(self, "system_prompt", system_prompt)
-        object.__setattr__(self, "hooks", hooks or AgentHooks())
-        object.__setattr__(self, "context_manager", context_manager or FullContextManager())
-        object.__setattr__(self, "max_turns", max_turns)
-        object.__setattr__(self, "run_timeout", run_timeout)
-
-    def new_session(
-        self,
-        messages: Sequence[Message] = (),
-        *,
-        session_id: str | None = None,
-    ) -> "AgentSession":
+    default_run_config: RunConfig
+    media_limits: MediaLimits
+    media_resolver: MediaResolver | None = None
+    tool_resolver: ToolResolver = field(default_factory=StaticToolResolver)
+    hooks: AgentHooks | None = None
+    def __init__(self, model: object, *, tools: Sequence[Tool] = (), system_prompt: str | None = None, context_manager: ContextManager | None = None, hooks: AgentHooks | None = None, default_run_config: RunConfig = RunConfig(), media_limits: MediaLimits = MediaLimits(), media_resolver: MediaResolver | None = None, tool_resolver: ToolResolver | None = None) -> None:
+        object.__setattr__(self, "model", model); object.__setattr__(self, "tools", tuple(tools)); object.__setattr__(self, "system_prompt", system_prompt)
+        object.__setattr__(self, "context_manager", context_manager or FullContextManager()); object.__setattr__(self, "default_run_config", default_run_config)
+        object.__setattr__(self, "media_limits", media_limits); object.__setattr__(self, "media_resolver", media_resolver)
+        object.__setattr__(self, "tool_resolver", tool_resolver or StaticToolResolver())
+        object.__setattr__(self, "hooks", hooks)
+    def new_session(self, messages: Sequence[object] = (), *, session_id: str | None = None) -> "AgentSession":
         from roboagent.agent.session import AgentSession
-
         return AgentSession(self, messages, session_id)

@@ -39,6 +39,7 @@ class FullContextManager:
         tools: Sequence[ToolDefinition],
         cancellation: CancellationToken,
     ) -> ModelContext:
+        cancellation.throw_if_cancelled()
         return ModelContext(system_prompt, tuple(messages), tuple(tools))
 
 
@@ -58,11 +59,13 @@ class WindowContextManager:
         tools: Sequence[ToolDefinition],
         cancellation: CancellationToken,
     ) -> ModelContext:
+        cancellation.throw_if_cancelled()
         groups = _message_groups(messages)
         if len(messages) <= self.max_messages:
             selected = tuple(messages)
         else:
             selected = _select_recent_groups(groups, self.max_messages)
+        cancellation.throw_if_cancelled()
         return ModelContext(system_prompt, selected, tuple(tools))
 
 
@@ -99,6 +102,8 @@ def _message_groups(messages: Sequence[Message]) -> tuple[tuple[Message, ...], .
                     raise ValueError("Tool result does not match the preceding assistant tool call.")
                 result_ids.add(result.tool_call_id)
                 end += 1
+            if result_ids and result_ids != call_ids:
+                raise ValueError("Incomplete tool exchange cannot enter ModelContext.")
             groups.append(tuple(messages[index:end]))
             index = end
         else:

@@ -1,86 +1,49 @@
-"""Conversation state and session-level run exclusion."""
-
+"""Session owns the only canonical transcript and one active V1 run."""
 from __future__ import annotations
-
-import asyncio
-import inspect
-import logging
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Sequence
 from uuid import uuid4
 
-from roboagent.agent.agent import Agent
-from roboagent.runtime import AgentEvent, Message, UserMessage
+from roboagent.agent.types import RunConfig, RunResult
+from roboagent.message import Message, ProtocolError, TranscriptValidator, UserMessage
 
-logger = logging.getLogger(__name__)
-Observer = Callable[[AgentEvent], object]
-
-
-class SessionBusyError(RuntimeError):
-    """Raised when code starts a second run in the same session."""
-
+class SessionBusyError(RuntimeError): pass
+class InvalidContinuationError(ProtocolError): pass
 
 @dataclass(slots=True)
 class AgentSession:
-    """Mutable transcript and best-effort observers for one conversation."""
-
-    agent: Agent
-    messages: list[Message]
+    agent: object
     session_id: str
-    _active: bool = field(default=False, init=False, repr=False)
-    _observers: set[Observer] = field(default_factory=set, init=False, repr=False)
-
-    def __init__(
-        self,
-        agent: Agent,
-        messages: Sequence[Message] = (),
-        session_id: str | None = None,
-    ) -> None:
-        self.agent = agent
-        self.messages = list(messages)
-        self.session_id = session_id or uuid4().hex
-        self._active = False
-        self._observers = set()
-
-    def subscribe(self, observer: Observer) -> Callable[[], None]:
-        self._observers.add(observer)
-
-        def unsubscribe() -> None:
-            self._observers.discard(observer)
-
-        return unsubscribe
-
-    def start(self, prompt: str | UserMessage) -> "AgentRun":
-        if self._active:
-            raise SessionBusyError("This session already has an active run.")
-        self._active = True
-        from roboagent.agent.run import AgentRun
-
-        message = prompt if isinstance(prompt, UserMessage) else UserMessage(prompt)
-        return AgentRun(self, message)
-
-    async def run(self, prompt: str | UserMessage):
-        return await self.start(prompt).result()
-
-    def _notify(self, event: AgentEvent) -> None:
-        for observer in tuple(self._observers):
-            try:
-                outcome = observer(event)
-                if inspect.isawaitable(outcome):
-                    task = asyncio.create_task(outcome)
-                    task.add_done_callback(_log_observer_failure)
-            except Exception:
-                logger.exception("agent session observer failed")
-
-    def _commit(self, messages: list[Message]) -> None:
-        self.messages[:] = messages
-
-    def _finish(self, _run: object) -> None:
-        self._active = False
-
-
-def _log_observer_failure(task: asyncio.Task[object]) -> None:
-    try:
-        task.result()
-    except Exception:
-        logger.exception("agent session observer failed")
+    _messages: list[Message] = field(default_factory=list)
+    _active: object | None = field(default=None, init=False, repr=False)
+    def __init__(self, agent: object, messages: Sequence[Message] = (), session_id: str | None = None) -> None:
+        self.agent = agent; self.session_id = session_id or uuid4().hex; self._messages = list(messages); self._active = None
+        TranscriptValidator(agent.media_limits).validate(self._messages)
+    @property
+    def messages(self) -> tuple[Message, ...]: return tuple(self._messages)
+    def start(self, prompt: str | UserMessage, *, config: RunConfig | None = None, metadata: dict[str, object] | None = None) -> "AgentRun":
+        if self._active is not None: raise SessionBusyError("Session already has an active run.")
+        message = prompt if isinstance(prompt, UserMessage) else UserMessage(prompt, limits=self.agent.media_limits)
+        # Validate prospective complete history before mutating, then atomically own and commit.
+        TranscriptValidator(self.agent.media_limits).validate((*self._messages, message))
+        from .run import AgentRun
+        run = AgentRun(self, config or self.agent.default_run_config, metadata or {})
+        self._active = run; self._messages.append(message)
+        run.start_eager()
+        return run
+    async def run(self, prompt: str | UserMessage, *, config: RunConfig | None = None, metadata: dict[str, object] | None = None) -> RunResult:
+        return await self.start(prompt, config=config, metadata=metadata).result()
+    def continue_run(self, *, config: RunConfig | None = None, metadata: dict[str, object] | None = None) -> "AgentRun":
+        if self._active is not None: raise SessionBusyError("Session already has an active run.")
+        if not self._messages: raise InvalidContinuationError("Cannot continue an empty Session.")
+        try: TranscriptValidator(self.agent.media_limits).validate(self._messages)
+        except ProtocolError as exc: raise InvalidContinuationError(str(exc)) from exc
+        from .run import AgentRun
+        run = AgentRun(self, config or self.agent.default_run_config, metadata or {})
+        self._active = run; run.start_eager(); return run
+    def _append(self, message: Message) -> None:
+        TranscriptValidator(self.agent.media_limits).validate((*self._messages, message), complete=False)
+        self._messages.append(message)
+    def _finish(self, run: object) -> None:
+        if self._active is run: self._active = None
+        TranscriptValidator(self.agent.media_limits).validate(self._messages)
