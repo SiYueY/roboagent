@@ -1,7 +1,7 @@
 """FastAPI WebSocket adapter for the framework-independent speech runtime."""
+
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import asdict, is_dataclass
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 class ConversationRegistry:
     """In-memory page-private capabilities for chat speech connections."""
+
     def __init__(self) -> None:
         self._items: dict[str, Any] = {}
 
@@ -67,7 +68,10 @@ class WebSocketSpeechTransport(SpeechTransport):
             text = message.get("text")
             if text:
                 payload = json.loads(text)
-                if payload.get("type") == "playback.started" and self._first_playback_started_at is None:
+                if (
+                    payload.get("type") == "playback.started"
+                    and self._first_playback_started_at is None
+                ):
                     self._first_playback_started_at = monotonic()
                 if payload.get("type") in {"session.cancel", "session.close"}:
                     return
@@ -82,20 +86,30 @@ class WebSocketSpeechTransport(SpeechTransport):
         if payload.get("type") == "speech.metrics":
             # Safe structured telemetry: event payload intentionally has no
             # transcript, PCM data, or credentials.
-            logger.info("speech_metrics %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            logger.info(
+                "speech_metrics %s",
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            )
         await self.websocket.send_text(json.dumps(payload, ensure_ascii=False))
 
     async def clear_output(self) -> None:
-        await self.websocket.send_text(json.dumps({
-            "type": "playback.clear", "response_id": self._active_response_id,
-        }))
+        await self.websocket.send_text(
+            json.dumps(
+                {
+                    "type": "playback.clear",
+                    "response_id": self._active_response_id,
+                }
+            )
+        )
         self._active_response_id = None
 
     async def close(self) -> None:
         self._closed = True
 
 
-def install_speech_route(app: FastAPI, registry: ConversationRegistry, config: SpeechConfig) -> None:
+def install_speech_route(
+    app: FastAPI, registry: ConversationRegistry, config: SpeechConfig
+) -> None:
     @app.websocket("/speech")
     async def speech(websocket: WebSocket) -> None:
         token = websocket.query_params.get("token")
@@ -107,27 +121,49 @@ def install_speech_route(app: FastAPI, registry: ConversationRegistry, config: S
         logger.info("Speech WebSocket connected for the active chat conversation.")
         transport = WebSocketSpeechTransport(websocket)
         try:
-            session = create_speech_session(agent_session=conversation.session, transport=transport, config=config)
+            session = create_speech_session(
+                agent_session=conversation.session, transport=transport, config=config
+            )
         except SpeechConfigurationError as exc:
             await transport.send_event({"type": "error", "error": str(exc)})
             await websocket.close(code=1011, reason="Invalid speech configuration")
             return
+
         async def record_events() -> None:
             original = transport.send_event
+
             async def record(event):
-                event_type = event.get("type") if isinstance(event, dict) else event.type
-                if event_type == "transcript.final" and session._is_meaningful_transcript(event.text):
-                    conversation.history += [{"role": "user", "content": event.text}, {"role": "assistant", "content": "正在思考…"}]
+                event_type = (
+                    event.get("type") if isinstance(event, dict) else event.type
+                )
+                if (
+                    event_type == "transcript.final"
+                    and session._is_meaningful_transcript(event.text)
+                ):
+                    conversation.history += [
+                        {"role": "user", "content": event.text},
+                        {"role": "assistant", "content": "正在思考…"},
+                    ]
                     if len(conversation.history) == 2:
                         conversation.title = event.text[:24] or "新对话"
                     conversation.updated_at = time()
                 elif event_type == "response.delta" and conversation.history:
-                    conversation.history[-1] = {"role": "assistant", "content": conversation.history[-1]["content"].replace("正在思考…", "") + event.delta}
+                    conversation.history[-1] = {
+                        "role": "assistant",
+                        "content": conversation.history[-1]["content"].replace(
+                            "正在思考…", ""
+                        )
+                        + event.delta,
+                    }
                     conversation.updated_at = time()
                 await original(event)
+
             transport.send_event = record
+
         await record_events()
-        await transport.send_event({"type": "session.ready", "timestamp": time(), "mode": config.mode})
+        await transport.send_event(
+            {"type": "session.ready", "timestamp": time(), "mode": config.mode}
+        )
         try:
             await session.run()
         except WebSocketDisconnect:

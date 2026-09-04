@@ -32,6 +32,25 @@ speech-alsa = [
     "pyalsaaudio>=0.11.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.11",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E701", "E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true

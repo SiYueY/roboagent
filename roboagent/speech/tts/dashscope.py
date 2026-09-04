@@ -1,4 +1,5 @@
 """DashScope realtime synthesis adapter."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +9,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
+from .._dashscope import get_field
 from ..config import DashScopeTTSConfig
 from ..errors import TTSError
 from ..types import AudioChunk, DEFAULT_OUTPUT_FORMAT
@@ -33,9 +35,15 @@ class DashScopeTTS:
             return
         try:
             import dashscope
-            from dashscope.audio.qwen_tts_realtime import AudioFormat, QwenTtsRealtime, QwenTtsRealtimeCallback
+            from dashscope.audio.qwen_tts_realtime import (
+                AudioFormat,
+                QwenTtsRealtime,
+                QwenTtsRealtimeCallback,
+            )
         except ImportError as exc:
-            raise TTSError("DashScope speech support requires `pip install roboagent[speech]`.") from exc
+            raise TTSError(
+                "DashScope speech support requires `pip install roboagent[speech]`."
+            ) from exc
 
         loop = asyncio.get_running_loop()
         owner = self
@@ -47,17 +55,22 @@ class DashScopeTTS:
                 if queue is not None:
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
-                        TTSError("DashScope realtime TTS connection closed unexpectedly."),
+                        TTSError(
+                            "DashScope realtime TTS connection closed unexpectedly."
+                        ),
                     )
 
             def on_event(self, response: Any) -> None:
                 try:
-                    event_type = _field(response, "type")
+                    event_type = get_field(response, "type")
                     queue = owner._response_queue
                     if queue is None:
                         return
                     if event_type == "response.audio.delta":
-                        loop.call_soon_threadsafe(queue.put_nowait, base64.b64decode(_field(response, "delta")))
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait,
+                            base64.b64decode(get_field(response, "delta")),
+                        )
                     elif event_type in {"response.done", "session.finished"}:
                         loop.call_soon_threadsafe(queue.put_nowait, None)
                 except Exception as exc:
@@ -95,7 +108,9 @@ class DashScopeTTS:
                 break
             self._client = client
             return
-        raise TTSError(f"DashScope realtime TTS connection failed: {last_error}") from last_error
+        raise TTSError(
+            f"DashScope realtime TTS connection failed: {last_error}"
+        ) from last_error
 
     async def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
         if not text.strip():
@@ -139,8 +154,8 @@ class DashScopeTTS:
 
 
 def _tts_url(region: str) -> str:
-    return "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime" if region == "singapore" else "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-
-
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+    return (
+        "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+        if region == "singapore"
+        else "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    )

@@ -8,15 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
-def _normalize_string_sequence(value: Any) -> tuple[str, ...]:
-    if value is None or value == "":
-        return ()
-    if isinstance(value, str):
-        return tuple(dict.fromkeys(part for part in value.split() if part))
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return tuple(dict.fromkeys(str(part).strip() for part in value if str(part).strip()))
-    raise ValueError("Expected a string or sequence of strings.")
+from ._normalization import normalize_string_sequence
 
 
 def _normalize_path_sequence(value: Any) -> tuple[Path, ...]:
@@ -34,11 +26,22 @@ class SkillConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    sources: tuple[Path, ...] = Field(default=(), description="Directories scanned for SKILL.md packages.")
-    enabled_skills: tuple[str, ...] = Field(default=(), description="Optional allowlist of skill names.")
-    disabled_skills: tuple[str, ...] = Field(default=(), description="Skill names disabled after loading.")
-    allowed_permissions: tuple[str, ...] = Field(default=(), description="Permission identifiers allowed at execution time.")
-    require_permissions: bool = Field(default=True, description="Whether executable skills must satisfy permission checks.")
+    sources: tuple[Path, ...] = Field(
+        default=(), description="Directories scanned for SKILL.md packages."
+    )
+    enabled_skills: tuple[str, ...] = Field(
+        default=(), description="Optional allowlist of skill names."
+    )
+    disabled_skills: tuple[str, ...] = Field(
+        default=(), description="Skill names disabled after loading."
+    )
+    allowed_permissions: tuple[str, ...] = Field(
+        default=(), description="Permission identifiers allowed at execution time."
+    )
+    require_permissions: bool = Field(
+        default=True,
+        description="Whether executable skills must satisfy permission checks.",
+    )
     loading_policy: Literal["skip-invalid", "strict"] = Field(
         default="skip-invalid",
         description="How invalid skill files should be handled during loading.",
@@ -49,10 +52,12 @@ class SkillConfig(BaseModel):
     def normalize_sources(cls, value: Any) -> tuple[Path, ...]:
         return _normalize_path_sequence(value)
 
-    @field_validator("enabled_skills", "disabled_skills", "allowed_permissions", mode="before")
+    @field_validator(
+        "enabled_skills", "disabled_skills", "allowed_permissions", mode="before"
+    )
     @classmethod
     def normalize_string_sequences(cls, value: Any) -> tuple[str, ...]:
-        return _normalize_string_sequence(value)
+        return normalize_string_sequence(value)
 
     @model_validator(mode="after")
     def validate_skill_toggles(self) -> SkillConfig:
