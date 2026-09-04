@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -33,6 +35,30 @@ class CancellableModel:
     async def stream(self, _request, cancellation):
         while not cancellation.cancelled:
             await asyncio.sleep(0)
+        if False:
+            yield TextDelta("")
+
+
+class RecordingModel:
+    model_name = "test-model"
+    capabilities = ModelCapabilities(
+        frozenset({Modality.TEXT, Modality.IMAGE}), frozenset({Modality.TEXT}),
+        frozenset({Modality.TEXT, Modality.IMAGE}), False,
+    )
+
+    def __init__(self) -> None:
+        self.request = None
+
+    async def stream(self, request, _cancellation):
+        self.request = request
+        yield ModelCompleted(AssistantMessage("seen"))
+
+
+class TextOnlyRecordingModel(RecordingModel):
+    capabilities = ModelCapabilities(
+        frozenset({Modality.TEXT}), frozenset({Modality.TEXT}),
+        frozenset({Modality.TEXT}), False,
+    )
 
 
 @unittest.skipUnless(_HAS_GRADIO6, "requires the gradio>=6 optional extra")
@@ -87,10 +113,12 @@ class ChatExampleTests(unittest.TestCase):
         self.assertEqual(components["voice-more"]["props"]["interactive"], False)
 
         browser_javascript = [dependency["js"] for dependency in config["dependencies"] if dependency.get("js")]
+        action_javascript = [item for item in browser_javascript if item.startswith("() =>")]
         self.assertEqual(
-            browser_javascript,
+            action_javascript,
             [f"() => window.roboagentChat?.{action}()" for action in self.BROWSER_ACTIONS],
         )
+        self.assertTrue(any("captureCameraSnapshot" in item for item in browser_javascript))
 
         for selector in (
             "#session-list",
@@ -150,6 +178,7 @@ class ChatExampleTests(unittest.TestCase):
             "activeResponseId",
             "speechMetrics",
             "getSpeechMetrics",
+            "captureCameraSnapshot",
         ):
             self.assertIn(contract, frontend)
         for action in self.BROWSER_ACTIONS:
@@ -222,6 +251,29 @@ class ChatExampleTests(unittest.TestCase):
             self.app.conversation_title("x" * (self.app.TITLE_LIMIT + 1)),
             "x" * self.app.TITLE_LIMIT + "…",
         )
+
+    def test_camera_snapshot_becomes_verified_image_content(self) -> None:
+        jpeg = bytes.fromhex("ffd8ffc00011080002000303011100021100031100ffd9")
+        snapshot = json.dumps({"data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(), "width": 3, "height": 2})
+        model = RecordingModel()
+        state = self.app.create_page_state(Agent(model))
+
+        async def check() -> None:
+            async for _ in self.app.chat("what is this?", None, state, snapshot):
+                pass
+        asyncio.run(check())
+        assert model.request is not None
+        contents = model.request.context.messages[-1].content
+        self.assertEqual(contents[0].text, "what is this?")
+        self.assertEqual(contents[1].source.data, jpeg)
+        frame = self.app.active_conversation(state).vision_context.latest()
+        self.assertEqual((frame.width, frame.height), (3, 2))
+
+    def test_camera_snapshot_rejects_invalid_or_mismatched_input(self) -> None:
+        self.assertIsNone(self.app._frame_from_data_url("not-json"))
+        jpeg = bytes.fromhex("ffd8ffc00011080002000303011100021100031100ffd9")
+        snapshot = json.dumps({"data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(), "width": 2, "height": 2})
+        self.assertIsNone(self.app._frame_from_data_url(snapshot))
 
     def test_new_select_and_limit_conversations(self) -> None:
         agent = Agent(ScriptedModel())

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import sys
 from collections.abc import AsyncIterator, Sequence
@@ -21,7 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import gradio as gr
 
 from roboagent.agent import Agent, AgentSession
-from roboagent.runtime import AgentEvent, RunStatus
+from roboagent.runtime import AgentEvent, BytesSource, ImageContent, RunStatus, TextContent, UserMessage, modality
+from roboagent.vision import VisionContext, VisionFrame
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ ERROR_MESSAGE = "RoboAgent could not complete the request."
 DEFAULT_TITLE = "新对话"
 MAX_CONVERSATIONS = 20
 TITLE_LIMIT = 24
+MAX_CAMERA_SNAPSHOT_BYTES = 5 * 1024 * 1024
+MAX_CAMERA_SNAPSHOT_WIDTH = 4096
+MAX_CAMERA_SNAPSHOT_HEIGHT = 4096
+MAX_CAMERA_SNAPSHOT_PIXELS = 16 * 1024 * 1024
 
 ChatHistory = list[dict[str, str]]
 ChatViewUpdate = tuple[ChatHistory, "ChatPageState", str, object, str]
@@ -65,6 +72,7 @@ class BrowserConversation:
     title: str = DEFAULT_TITLE
     updated_at: float = field(default_factory=time)
     voice_token: str = ""
+    vision_context: VisionContext = field(default_factory=VisionContext)
 
 
 @dataclass(slots=True)
@@ -184,6 +192,7 @@ async def chat(
     message: str,
     _history: ChatHistory | None,
     state: ChatPageState,
+    camera_snapshot: str = "",
 ) -> AsyncIterator[ChatViewUpdate]:
     """Run one turn against the active conversation and stream display-only history."""
     text = message.strip()
@@ -194,13 +203,26 @@ async def chat(
 
     if not conversation.history:
         conversation.title = conversation_title(text)
+    contents = [TextContent(text)]
+    frame = _frame_from_data_url(camera_snapshot)
+    display_text = text
+    if frame is not None:
+        image = ImageContent(BytesSource(frame.data), media_type=frame.mime_type)
+        capabilities = conversation.session.agent.model.capabilities
+        if modality(image) in capabilities.input_modalities:
+            conversation.vision_context.update(frame)
+            contents.append(image)
+        else:
+            display_text = f"{text}\n\n*当前模型不支持相机画面，已按文本发送。*"
+    elif camera_snapshot:
+        display_text = f"{text}\n\n*相机画面未能附加，已按文本发送。*"
     conversation.history = [
         *conversation.history,
-        {"role": "user", "content": text},
+        {"role": "user", "content": display_text},
         {"role": "assistant", "content": "正在思考…"},
     ]
     conversation.updated_at = time()
-    run = conversation.session.start(text)
+    run = conversation.session.start(UserMessage(contents))
 
     try:
         yield view_update(conversation, state)
@@ -235,6 +257,70 @@ async def chat(
             {"role": "assistant", "content": ERROR_MESSAGE},
         ]
         yield view_update(conversation, state)
+
+
+def _frame_from_data_url(value: str) -> VisionFrame | None:
+    try:
+        snapshot = json.loads(value)
+        data_url, browser_width, browser_height = snapshot["data_url"], snapshot["width"], snapshot["height"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(data_url, str) or not isinstance(browser_width, int) or not isinstance(browser_height, int):
+        return None
+    if browser_width <= 0 or browser_height <= 0 or not data_url.startswith("data:image/jpeg;base64,"):
+        return None
+    encoded = data_url.split(",", 1)[1]
+    if len(encoded) > (MAX_CAMERA_SNAPSHOT_BYTES * 4 + 2) // 3:
+        return None
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, IndexError):
+        return None
+    if len(data) > MAX_CAMERA_SNAPSHOT_BYTES:
+        return None
+    dimensions = _jpeg_dimensions(data)
+    if dimensions is None:
+        return None
+    width, height = dimensions
+    if width > MAX_CAMERA_SNAPSHOT_WIDTH or height > MAX_CAMERA_SNAPSHOT_HEIGHT or width * height > MAX_CAMERA_SNAPSHOT_PIXELS:
+        return None
+    if (width, height) != (browser_width, browser_height):
+        return None
+    return VisionFrame(data=data, mime_type="image/jpeg", width=width, height=height, source="browser-camera")
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 10 or not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
+        return None
+    index = 2
+    sof_markers = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
+    while index < len(data):
+        while index < len(data) and data[index] == 0xFF:
+            index += 1
+        if index >= len(data):
+            return None
+        marker = data[index]
+        index += 1
+        if marker == 0xD9:
+            return None
+        if marker in {0x01, *range(0xD0, 0xD8)}:
+            continue
+        if index + 2 > len(data):
+            return None
+        length = int.from_bytes(data[index:index + 2], "big")
+        if length < 2 or index + length > len(data):
+            return None
+        if marker in sof_markers:
+            if length < 8:
+                return None
+            height = int.from_bytes(data[index + 3:index + 5], "big")
+            width = int.from_bytes(data[index + 5:index + 7], "big")
+            components = data[index + 7]
+            if not width or not height or not components or length != 8 + 3 * components:
+                return None
+            return width, height
+        index += length
+    return None
 
 
 def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
@@ -307,6 +393,7 @@ def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
                             max_lines=8,
                             elem_id="message-input",
                         )
+                        camera_snapshot = gr.Textbox(value="", visible=False, elem_id="camera-snapshot")
                         with gr.Row(elem_id="composer-actions", equal_height=True):
                             gr.Markdown(
                                 "Qwen3.7-Flash",
@@ -356,10 +443,11 @@ def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
                 elem_id="mobile-sidebar-close",
             )
 
-        chat_inputs: Sequence[gr.components.Component] = [textbox, chatbot, page_state]
+        chat_inputs: Sequence[gr.components.Component] = [textbox, chatbot, page_state, camera_snapshot]
         chat_outputs: Sequence[gr.components.Component] = [chatbot, page_state, textbox, session_list, title]
-        send_button.click(chat, inputs=chat_inputs, outputs=chat_outputs)
-        textbox.submit(chat, inputs=chat_inputs, outputs=chat_outputs)
+        snapshot_js = "(message, history, state, snapshot) => [message, history, state, window.roboagentChat?.captureCameraSnapshot() || '']"
+        send_button.click(chat, inputs=chat_inputs, outputs=chat_outputs, js=snapshot_js)
+        textbox.submit(chat, inputs=chat_inputs, outputs=chat_outputs, js=snapshot_js)
         new_button.click(
             lambda state: create_conversation(state, agent, speech_registry),
             inputs=page_state,

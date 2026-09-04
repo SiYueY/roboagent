@@ -131,7 +131,7 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
         microphoneSink : null,
         pendingAudio : [],
         playbackTime : 0,
-        playbackSources : new Set(),
+        playbackSources: new Set(),
         playbackStartTimers : new Set(),
         responseCaption : "",
         responseActive : false,
@@ -323,7 +323,7 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
           state.playbackStartTimers.delete(startTimer);
           if (state.speechSocket?.readyState === WebSocket.OPEN) {
             state.speechSocket.send(
-                JSON.stringify({type : "playback.started"}));
+                JSON.stringify({type: "playback.started"}));
           }
         }, delayMs);
         state.playbackStartTimers.add(startTimer);
@@ -378,6 +378,21 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
           if (reportError) setStatus("无法访问摄像头，请允许浏览器访问摄像头");
           return false;
         }
+      };
+      const captureCameraSnapshot = () => {
+        if (!state.videoEnabled || !cameraVideo || !cameraVideo.videoWidth || !cameraVideo.videoHeight)
+          return "";
+        const canvas = document.createElement("canvas");
+        canvas.width = cameraVideo.videoWidth;
+        canvas.height = cameraVideo.videoHeight;
+        const context = canvas.getContext("2d");
+        if (!context) return "";
+        context.drawImage(cameraVideo, 0, 0, canvas.width, canvas.height);
+        return JSON.stringify({
+          data_url: canvas.toDataURL("image/jpeg", 0.85),
+          width: canvas.width,
+          height: canvas.height,
+        });
       };
 
       // User actions -------------------------------------------------------
@@ -631,6 +646,7 @@ registerProcessor("roboagent-pcm", RoboAgentPCMProcessor);
         toggleCaptions,
         toggleSpeaker,
         switchCamera,
+        captureCameraSnapshot,
         getSpeechMetrics : () => [...state.speechMetrics],
       };
       const cleanup = () => {

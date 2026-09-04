@@ -22,6 +22,23 @@ async for event in run.events():
 result = await run.result()
 ```
 
+Messages use immutable multimodal content parts. Text remains convenient at the
+session boundary, while media is explicit:
+
+```python
+from roboagent.runtime import BytesSource, ImageContent, TextContent, UserMessage
+
+run = session.start(UserMessage((
+    TextContent("What is in this image?"),
+    ImageContent(BytesSource(image_bytes), media_type="image/jpeg"),
+)))
+```
+
+Each model declares its supported modalities. The included
+OpenAI-compatible adapter currently implements text and image inputs and text
+outputs; audio, video, and files are runtime contracts awaiting a provider
+implementation.
+
 `Agent` is immutable. `AgentSession` owns a conversation transcript and accepts
 one run at a time. `AgentRun` owns cancellation, streamed events, and the final
 `AgentRunResult`. `run.result()` completes whether or not an event stream is
