@@ -6,12 +6,13 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from roboagent.agent import Agent, RunConfig, ToolExecutionConfig, ToolExecutionMode
 from roboagent.message import (AssistantMessage, AudioContent, BytesSource, FileContent, ImageContent,
     ProtocolError, TextContent, ToolCall, ToolCallStatus, ToolResultMessage, TranscriptValidator, UserMessage)
 from roboagent.runtime import AgentEvent, ContentCompleted, ContentSummary, JsonlEventStore, MediaResolutionError, MediaResolutionErrorCode, ModelCapabilities, ModelCompleted, ModelFailed, Modality, RunPhase, TextDelta, ToolCallDelta
-from roboagent.runtime import FileSource, MediaOwnership, ModelContext, ModelRequest, ResolvedMedia, RunContext, RuntimeCancellation
+from roboagent.runtime import FileSource, MediaLimits, MediaOwnership, ModelContext, ModelRequest, ResolvedMedia, RunContext, RuntimeCancellation
 from roboagent.model.client import _content, _messages, _stream_chunks
 from roboagent.tool import Tool, ToolExecutionResult, ToolOutput
 
@@ -25,6 +26,44 @@ class _Model:
         yield ModelCompleted(reply)
 
 class KernelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_session_captures_media_limits_at_creation(self):
+        capabilities = ModelCapabilities(
+            frozenset({Modality.TEXT, Modality.IMAGE}), frozenset({Modality.TEXT}),
+            frozenset({Modality.TEXT, Modality.IMAGE}), False,
+        )
+        original_limits = MediaLimits(max_inline_bytes=2)
+        original_model = _Model(("done",)); original_model.capabilities = capabilities
+        session = Agent(original_model, media_limits=original_limits).new_session()
+        replacement_model = _Model(("done",)); replacement_model.capabilities = capabilities
+        session.agent = Agent(replacement_model, media_limits=MediaLimits(max_inline_bytes=1))
+
+        result = await session.run(UserMessage((ImageContent(BytesSource(b"ok"), "image/png"),), limits=original_limits))
+
+        self.assertEqual(result.status.value, "completed")
+        self.assertIs(session._media_limits, original_limits)
+        TranscriptValidator(original_limits).validate(session.messages)
+
+    async def test_failed_eager_start_rolls_back_session_state(self):
+        session = Agent(_Model(("done",))).new_session()
+
+        with patch("roboagent.agent.run.AgentRun.start_eager", side_effect=RuntimeError("loop unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "loop unavailable"):
+                session.start("go")
+
+        self.assertEqual(session.messages, ())
+        self.assertIsNone(session._active)
+
+    async def test_failed_eager_continuation_releases_session_ownership(self):
+        session = Agent(_Model(("done",))).new_session((UserMessage("previous"),))
+        original_messages = session.messages
+
+        with patch("roboagent.agent.run.AgentRun.start_eager", side_effect=RuntimeError("loop unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "loop unavailable"):
+                session.continue_run()
+
+        self.assertEqual(session.messages, original_messages)
+        self.assertIsNone(session._active)
+
     async def test_multi_tool_exchange_is_complete_and_ordered(self):
         calls = (ToolCall("a", "tool", "{}", {}), ToolCall("b", "tool", "{}", {}))
         model = _Model((AssistantMessage((), calls), "done"))

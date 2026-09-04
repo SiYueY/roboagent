@@ -48,7 +48,7 @@ class AgentRun:
     def follow_up(self, message: str | UserMessage) -> None: self._receive_control("follow_up", message)
     def _receive_control(self, kind: str, message: str | UserMessage) -> None:
         if self._terminalizing or self._result is not None and self._result.done(): raise RunFinishedError("Run is already terminal.")
-        user = message if isinstance(message, UserMessage) else UserMessage(message, limits=self.session.agent.media_limits)
+        user = message if isinstance(message, UserMessage) else UserMessage(message, limits=self.session._media_limits)
         self._control_sequence += 1; self._controls.append(PendingControl(self._control_sequence, kind, user)); self._control_signal.set()
         # Events are safe: only type and text are exposed, not raw media.
         asyncio.create_task(self._emit(kind + "_received", text=None))

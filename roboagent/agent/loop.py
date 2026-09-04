@@ -139,12 +139,12 @@ async def run_loop(*, agent: object, session: object, run_context: RunContext, c
                 continue
             return final, turn
         policy = config.tool_policy_factory(run_context) if config.tool_policy_factory else DefaultToolExecutionPolicy()
-        executor = ToolExecutor(tools, agent.media_limits, config.tool_execution, policy, emit=emit, hook=hook, observe_controls=observe_controls, wait_for_control=wait_for_control)
+        executor = ToolExecutor(tools, session._media_limits, config.tool_execution, policy, emit=emit, hook=hook, observe_controls=observe_controls, wait_for_control=wait_for_control)
         update_state(RunPhase.TOOL, turn, pending_tool_calls=tuple(ToolCallSummary(call.id, call.name) for call in message.tool_calls))
         await emit("tool_batch_started", turn=turn)
         batch = await executor.execute(message.tool_calls, run_context, context)
         for outcome in batch.outcomes:
-            result = tool_result(outcome, limits=agent.media_limits); session._append(result)
+            result = tool_result(outcome, limits=session._media_limits); session._append(result)
         update_state(RunPhase.BETWEEN_TURNS, turn)
         await emit("turn_completed", turn=turn)
         await hook("on_turn_end", run_context)
