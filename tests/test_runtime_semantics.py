@@ -275,17 +275,34 @@ def test_cancelled_side_effect_is_retained_and_exchange_not_committed() -> None:
 def test_input_enqueued_during_cleanup_remains_for_next_run() -> None:
     async def check() -> None:
         session = None
+        ended = 0
 
         class Hook:
             async def on_run_end(self, context):
+                nonlocal ended
                 assert session is not None
-                await session.follow_up(UserMessage("next"))
+                if ended == 0:
+                    await session.follow_up(UserMessage("older"))
+                ended += 1
 
-        session = Agent(Replies((AssistantMessage("done"),)), hooks=(Hook(),)).new_session()
+        session = Agent(
+            Replies((AssistantMessage("first done"), AssistantMessage("second done"))),
+            hooks=(Hook(),),
+        ).new_session()
         result = await session.run(UserMessage("first"))
         assert result.status is RunStatus.COMPLETED
         pending = await session.pending_inputs()
-        assert len(pending) == 1 and pending[0].message.content[0] == TextContent("next")
+        assert len(pending) == 1 and pending[0].message.content[0] == TextContent("older")
+
+        result = await session.run(UserMessage("newer"))
+        assert result.status is RunStatus.COMPLETED
+        user_text = [
+            message.content[0].text
+            for message in session.messages
+            if isinstance(message, UserMessage)
+        ]
+        assert user_text == ["first", "older", "newer"]
+        assert await session.pending_inputs() == ()
 
     asyncio.run(check())
 
@@ -468,6 +485,7 @@ def test_concurrent_completion_does_not_reorder_transcript_results() -> None:
         assert result.status is RunStatus.COMPLETED
         committed = [message for message in session.messages if isinstance(message, ToolResultMessage)]
         assert [message.tool_call_id for message in committed] == ["a", "b", "c"]
+        assert [effect.call_id for effect in result.effects] == ["a", "b", "c"]
 
     asyncio.run(check())
 

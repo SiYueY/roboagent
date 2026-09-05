@@ -25,6 +25,7 @@ from roboagent.tool import ToolEffectRecord, ToolExecutor, retry_safe
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from roboagent.message import UserMessage
     from roboagent.agent.session import Session
 
 
@@ -39,6 +40,8 @@ class Run:
     _result: asyncio.Future[RunResult] | None = field(default=None, init=False, repr=False)
     _state: RunState = field(default_factory=lambda: RunState(RunPhase.IDLE, 0), init=False, repr=False)
     _skill_catalog: object | None = field(default=None, init=False, repr=False)
+    _initial_message: "UserMessage | None" = field(default=None, init=False, repr=False)
+    _initial_pending_sequence: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._events = RunEventEmitter(self.run_id)
@@ -82,6 +85,12 @@ class Run:
         try:
             await self._events.emit("run.started")
             await self._invoke_hooks("on_run_start", RunHookContext(context))
+            await self.session._commit_initial_input(
+                self.run_id,
+                self._initial_message,
+                self._initial_pending_sequence,
+                self._cancellation,
+            )
             tool_executor = ToolExecutor(
                 registry=self.session.agent.tool_registry,
                 policy=self.session.agent.tool_policy,

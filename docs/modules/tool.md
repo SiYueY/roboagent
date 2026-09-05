@@ -9,6 +9,9 @@ normalization, effect recording, and after-hooks in that order. A normal batch
 returns one result per call in original order. Cancellation and `FAIL_RUN`
 abort without a partial batch.
 
+Normal `ToolBatchResult.effects` and the corresponding final Run effect view also
+follow original ToolCall order, regardless of concurrent completion order.
+
 Timeout remains a model-visible timeout result, while its effect record reflects
 cleanup evidence independently. An interrupted read-only Tool may be `TIMED_OUT`
 or `CANCELLED`; an interrupted side-effecting Tool defaults to `UNKNOWN` unless it

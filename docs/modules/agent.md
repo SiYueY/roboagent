@@ -8,6 +8,10 @@ active `Run` atomically and owns the ordered pending-input queue. `steer()` and
 `follow_up()` accept only `UserMessage`; queued input is consumed once at a
 legal turn boundary.
 
+When a new Run also supplies an initial message, pending inputs that predate
+`start()` are committed first in receipt order, followed by the Run-local initial
+message at the initial legal boundary.
+
 Session and Run async operations are same-event-loop contracts. The ownership
 lock does not make a Session generally thread-safe or safe across event loops.
 

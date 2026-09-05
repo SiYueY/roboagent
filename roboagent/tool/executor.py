@@ -119,7 +119,7 @@ class ToolExecutor:
 
     async def _concurrent(self, calls: tuple[ToolCall, ...], context: ToolContext) -> ToolBatchResult:
         results: list[ToolExecutionResult | None] = [None] * len(calls)
-        effects: list[ToolEffectRecord] = []
+        effects: list[ToolEffectRecord | None] = [None] * len(calls)
         running: dict[asyncio.Task[tuple[ToolExecutionResult, ToolEffectRecord | None]], int] = {}
         next_index = 0
 
@@ -140,18 +140,27 @@ class ToolExecutor:
                         result, effect = task.result()
                     except ToolBatchAborted as exc:
                         cancelled_effects = await self._cancel_tasks(running)
-                        raise ToolBatchAborted(exc.reason, (*effects, *exc.effects, *cancelled_effects)) from exc
+                        raise ToolBatchAborted(
+                            exc.reason,
+                            (*_present_effects(effects), *exc.effects, *cancelled_effects),
+                        ) from exc
                     except ToolBatchCancelled as exc:
                         cancelled_effects = await self._cancel_tasks(running)
-                        raise ToolBatchCancelled((*effects, *exc.effects, *cancelled_effects)) from exc
+                        raise ToolBatchCancelled(
+                            (*_present_effects(effects), *exc.effects, *cancelled_effects)
+                        ) from exc
                     results[index] = result
                     if effect:
-                        effects.append(effect)
+                        effects[index] = effect
                 fill()
         except asyncio.CancelledError:
             cancelled_effects = await self._cancel_tasks(running)
-            raise ToolBatchCancelled((*effects, *cancelled_effects))
-        return ToolBatchResult(calls, tuple(item for item in results if item is not None), tuple(effects))
+            raise ToolBatchCancelled((*_present_effects(effects), *cancelled_effects))
+        return ToolBatchResult(
+            calls,
+            tuple(item for item in results if item is not None),
+            _present_effects(effects),
+        )
 
     async def _cancel_tasks(self, running: dict[asyncio.Task[object], int]) -> tuple[ToolEffectRecord, ...]:
         for task in running:
@@ -504,3 +513,9 @@ def _consume_task_result(task: asyncio.Task[object]) -> None:
         task.exception()
     except (asyncio.CancelledError, Exception):
         pass
+
+
+def _present_effects(
+    effects: list[ToolEffectRecord | None],
+) -> tuple[ToolEffectRecord, ...]:
+    return tuple(effect for effect in effects if effect is not None)

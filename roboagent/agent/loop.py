@@ -120,7 +120,8 @@ async def _run_loop_impl(
     for turn in range(1, config.max_turns + 1):
         progress.turns = turn
         run_context.cancellation.raise_if_cancelled()
-        await session.consume_pending(run_context.run_id, run_context.cancellation)
+        if turn > 1:
+            await session.consume_pending(run_context.run_id, run_context.cancellation)
         update_state(RunPhase.PREPARING_CONTEXT, turn)
         snapshot = ContextSnapshot(
             session.messages,

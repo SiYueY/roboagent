@@ -100,6 +100,7 @@ def test_concurrent_batch_is_bounded_and_results_keep_call_order() -> None:
         batch = await ToolExecutor(registry=ToolRegistry((tool,)), config=ToolExecutorConfig(max_concurrency=2)).execute(calls, _context())
         assert peak == 2
         assert [result.call_id for result in batch.results] == ["0", "1", "2", "3"]
+        assert [effect.call_id for effect in batch.effects] == ["0", "1", "2", "3"]
         assert all(not effect.transcript_committed for effect in batch.effects)
 
     asyncio.run(check())

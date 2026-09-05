@@ -159,6 +159,35 @@ class Session:
                     self._pending.clear()
         return pending
 
+    async def _commit_initial_input(
+        self,
+        run_id: str,
+        message: UserMessage | None,
+        pending_through_sequence: int,
+        cancellation: CancellationToken,
+    ) -> tuple[PendingInput, ...]:
+        if self.active_run_id != run_id:
+            raise SessionOwnershipError("Only the active Run may commit initial input.")
+        async with self._queue_lock:
+            async with self._transcript_lock:
+                cancellation.raise_if_cancelled()
+                count = 0
+                for item in self._pending:
+                    if item.receipt.sequence > pending_through_sequence:
+                        break
+                    count += 1
+                pending = tuple(self._pending[:count])
+                block = (
+                    *(item.message for item in pending),
+                    *((message,) if message is not None else ()),
+                )
+                if block:
+                    prospective = (*self._messages, *block)
+                    TranscriptValidator(self._media_limits).validate(prospective)
+                    self._messages.extend(block)
+                    del self._pending[:count]
+        return pending
+
     async def pending_inputs(self) -> tuple[PendingInput, ...]:
         async with self._queue_lock:
             return tuple(self._pending)
@@ -170,8 +199,9 @@ class Session:
             raise TypeError("Session.start accepts UserMessage or None.")
         run = Run(self, config or self.agent.default_run_config)
         self._acquire_run_nowait(run.run_id)
+        run._initial_message = message
+        run._initial_pending_sequence = self._sequence
         skill_bound = False
-        message_appended = False
         if message is not None:
             try:
                 TranscriptValidator(self._media_limits).validate((*self._messages, message))
@@ -182,9 +212,6 @@ class Session:
             if self.agent.skill_manager is not None:
                 run._skill_catalog = self.agent.skill_manager.bind_run(run.run_id)
                 skill_bound = True
-            if message is not None:
-                self._messages.append(message)
-                message_appended = True
             run.start_eager()
         except BaseException:
             if skill_bound and self.agent.skill_manager is not None:
@@ -192,8 +219,6 @@ class Session:
                     self.agent.skill_manager.release_run(run.run_id)
                 except Exception:
                     pass
-            if message_appended:
-                self._messages.pop()
             self._release_run_nowait(run.run_id)
             raise
         return run

@@ -579,6 +579,19 @@ steer / follow_up
 
 下一次 Run 成为 consumer。
 
+如果下一次 Run 同时通过 `Session.start(message)` 提供新输入，启动前已经存在的
+pending input 必须先于该 `message` 提交：
+
+```text
+existing pending (receipt sequence order)
+→ new Run input
+→ first ModelContext snapshot
+```
+
+`Session.start()` 保持同步；它只保留 Run-local initial input 和启动时的 pending
+sequence boundary，实际 transcript mutation 在 Run 的 initial legal boundary 原子完成。
+start 返回后才入队的输入不得越过该 Run initial input。
+
 如果 Session 已关闭：
 
 ```text
@@ -2015,6 +2028,9 @@ results[i].name == calls[i].name
 ```
 
 `results` 永远按原始 ToolCall 顺序。
+
+正常完成 batch 的 `effects` 同样按其对应 ToolCall 的原始顺序排列；实际并发完成
+顺序不得影响 `ToolBatchResult.effects` 或后续 `RunResult.effects` 的确定性。
 
 该不变量只适用于正常完成的 batch。以下情况不返回部分 `ToolBatchResult`：
 
@@ -4425,10 +4441,9 @@ reject remaining queued inputs
 
 ## 6. Public API、迁移与验收
 
-本章及全文定义的是 **V1.1 目标接口与目标语义**，不是对当前 Runtime
-实现状态的声明。当前 Runtime 仍可能使用旧的 Run-level `steer()` /
-`follow_up()` 和旧 `ToolExecutor`；这些实现必须在后续实现阶段迁移，才可宣称
-符合本规范。
+V1.1 canonical Session-level pending-input API 和 canonical `ToolExecutor` 已实现。
+Runtime 不支持旧 Run-level `steer()` / `follow_up()` 的立即 transcript mutation
+语义；迁移适配器只能规范化为 `UserMessage` 并转交 Session queue。
 
 ### 6.1 Package path
 
@@ -4644,7 +4659,7 @@ Session.steer(UserMessage) / Session.follow_up(UserMessage)
 → queue only
 ```
 
-当前 Run-level `steer()` / `follow_up()` 属于旧接口；迁移 adapter 至多将用户
+旧实现中的 Run-level `steer()` / `follow_up()` 属于历史接口；迁移 adapter 至多将用户
 文本规范化为 `UserMessage` 后转交 Session queue，绝不能接受或合成 assistant/tool
 message，也不得恢复立即写 transcript 的旧行为。
 
