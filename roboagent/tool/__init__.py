@@ -1,5 +1,13 @@
 """Canonical tool runtime and explicit builtin capability factories."""
 
+from .approval import (
+    ApprovalDecision,
+    ApprovalProvider,
+    ApprovalRequest,
+    ApprovalResponse,
+    ApprovalSettings,
+)
+
 from .executor import (
     ToolBatchCancelled,
     ToolExecutor,
@@ -9,15 +17,26 @@ from .executor import (
     retry_safe,
 )
 from .filesystem import (
+    FilesystemWorkspace,
     FilesystemConfig,
-    Workspace,
     create_filesystem_tools,
     validate_relative_glob,
     validate_relative_path,
 )
+from .materializer import (
+    InlineToolResultMaterializer,
+    ToolMaterializationError,
+    ToolOutputLimits,
+    ToolResultMaterializer,
+    WorkspaceToolResultMaterializer,
+)
 from .shell import ShellConfig, create_shell_tool
 from .tool import (
     AllowAllToolPolicy,
+    BinaryToolContent,
+    RawToolContent,
+    RawToolResult,
+    ResourceToolContent,
     Tool,
     ToolBatchAborted,
     ToolBatchResult,
@@ -35,15 +54,35 @@ from .tool import (
     ToolExecutionFailure,
     ToolExecutionPolicy,
     ToolExecutionResult,
+    ToolPolicyDecision,
     ToolJsonContent,
     ToolRegistrationError,
     ToolRegistry,
     ToolTextContent,
 )
+from .workspace import (
+    InMemoryWorkspace,
+    LocalWorkspace,
+    Workspace,
+    WorkspaceEntry,
+    WorkspaceError,
+    WorkspaceMissingError,
+    WorkspacePermissionError,
+)
 
 __all__ = [
     "AllowAllToolPolicy",
+    "ApprovalDecision",
+    "ApprovalProvider",
+    "ApprovalRequest",
+    "ApprovalResponse",
+    "ApprovalSettings",
     "FilesystemConfig",
+    "FilesystemWorkspace",
+    "BinaryToolContent",
+    "RawToolContent",
+    "RawToolResult",
+    "ResourceToolContent",
     "ShellConfig",
     "Tool",
     "ToolBatchAborted",
@@ -63,6 +102,10 @@ __all__ = [
     "ToolExecutionFailure",
     "ToolExecutionPolicy",
     "ToolExecutionResult",
+    "ToolPolicyDecision",
+    "ToolMaterializationError",
+    "ToolOutputLimits",
+    "ToolResultMaterializer",
     "ToolExecutor",
     "ToolExecutorConfig",
     "ToolJsonContent",
@@ -70,6 +113,14 @@ __all__ = [
     "ToolRegistry",
     "ToolTextContent",
     "Workspace",
+    "WorkspaceEntry",
+    "WorkspaceError",
+    "WorkspaceMissingError",
+    "WorkspacePermissionError",
+    "WorkspaceToolResultMaterializer",
+    "InMemoryWorkspace",
+    "InlineToolResultMaterializer",
+    "LocalWorkspace",
     "committed_effects",
     "create_filesystem_tools",
     "create_shell_tool",

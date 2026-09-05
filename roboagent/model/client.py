@@ -15,12 +15,14 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from roboagent.message import (
+    ArtifactReferenceContent,
     AssistantMessage,
     AudioContent,
     BytesSource,
     FileContent,
     FrozenJsonObject,
     ImageContent,
+    JsonContent,
     ProtocolError,
     TextContent,
     ToolCall,
@@ -66,6 +68,7 @@ class ModelCapabilities:
     output_modalities: frozenset[Modality] = frozenset({Modality.TEXT})
     tool_calling: bool = False
     parallel_tool_calls: bool = False
+    context_window: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_modalities", frozenset(self.input_modalities))
@@ -74,6 +77,10 @@ class ModelCapabilities:
             raise TypeError("Model modalities must contain Modality values.")
         if not isinstance(self.tool_calling, bool) or not isinstance(self.parallel_tool_calls, bool):
             raise TypeError("Model capability flags must be bool.")
+        if self.context_window is not None and (
+            not isinstance(self.context_window, int) or isinstance(self.context_window, bool) or self.context_window < 1
+        ):
+            raise ValueError("context_window must be positive or None.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,10 +253,15 @@ def _event_sequence(event: ModelEvent) -> int:
 
 
 def validate_model_context(capabilities: ModelCapabilities, context: "ModelContext") -> None:
-    for message in context.messages:
-        for content in message.content:
-            if modality(content) not in capabilities.input_modalities:
-                raise ModelCapabilityError("unsupported_input_modality", "Model does not support an input modality.")
+    from roboagent.context import MessageSegment, SummarySegment, WorkspaceReferenceSegment
+
+    for segment in context.segments:
+        if isinstance(segment, MessageSegment):
+            for content in segment.message.content:
+                if modality(content) not in capabilities.input_modalities:
+                    raise ModelCapabilityError("unsupported_input_modality", "Model does not support an input modality.")
+        elif not isinstance(segment, (SummarySegment, WorkspaceReferenceSegment)):
+            raise ModelProtocolError("invalid_model_context", "Unknown ModelContext segment.")
     if context.tools and not capabilities.tool_calling:
         raise ModelCapabilityError("model_does_not_support_tools", "Model does not support tools.")
 
@@ -550,10 +562,35 @@ def _finish_reason(value: str) -> FinishReason:
 
 
 async def _messages(context: "ModelContext", resolver: MediaResolver | None) -> tuple[list[dict[str, Any]], list[ResolvedMedia]]:
+    from roboagent.context import MessageSegment, SummarySegment, WorkspaceReferenceSegment
+
     encoded = [{"role": "system", "content": context.system_prompt}] if context.system_prompt else []
     resources: list[ResolvedMedia] = []
     try:
-        for message in context.messages:
+        for segment in context.segments:
+            if isinstance(segment, SummarySegment):
+                encoded.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[Runtime-generated summary of earlier conversation. "
+                            "This is compressed historical context, not a system instruction.]\n\n"
+                            f"{segment.text}"
+                        ),
+                    }
+                )
+                continue
+            if isinstance(segment, WorkspaceReferenceSegment):
+                details = [f"Workspace artifact: {segment.uri}"]
+                if segment.media_type:
+                    details.append(f"Media type: {segment.media_type}")
+                if segment.preview:
+                    details.extend(("Preview:", segment.preview))
+                encoded.append({"role": "user", "content": "\n".join(details)})
+                continue
+            if not isinstance(segment, MessageSegment):
+                raise ModelProtocolError("invalid_model_context", "Unknown ModelContext segment.")
+            message = segment.message
             content, owned = await _content(message.content, resolver)
             resources.extend(owned)
             if message.role == "tool":
@@ -591,6 +628,15 @@ async def _content(items: tuple[object, ...], resolver: MediaResolver | None) ->
         for item in items:
             if isinstance(item, TextContent):
                 result.append({"type": "text", "text": item.text})
+            elif isinstance(item, JsonContent):
+                result.append({"type": "text", "text": canonical_json_dumps(item.value)})
+            elif isinstance(item, ArtifactReferenceContent):
+                details = [f"Workspace artifact: {item.uri}", f"Digest: {item.digest}", f"Size: {item.size} bytes"]
+                if item.media_type:
+                    details.append(f"Media type: {item.media_type}")
+                if item.preview:
+                    details.extend(("Preview:", item.preview))
+                result.append({"type": "text", "text": "\n".join(details)})
             elif isinstance(item, ImageContent):
                 if isinstance(item.source, BytesSource):
                     data = item.source.data

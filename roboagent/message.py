@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import base64
 import math
 import re
 from collections.abc import Iterable, Iterator, Mapping
@@ -135,6 +137,94 @@ def canonical_json_dumps(value: object) -> str:
     return json.dumps(thaw_json(freeze_json(value)), ensure_ascii=False, separators=(",", ":"))
 
 
+def canonical_json_digest(value: object) -> str:
+    encoded = json.dumps(
+        thaw_json(freeze_json(value)),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def canonical_message_data(message: "AgentMessage") -> dict[str, object]:
+    """Return the stable JSON value used by digests and persistence codecs."""
+    contents: list[dict[str, object]] = []
+    for content in message.content:
+        if isinstance(content, TextContent):
+            contents.append({"type": "text", "text": content.text})
+        elif isinstance(content, JsonContent):
+            contents.append({"type": "json", "value": thaw_json(content.value)})
+        elif isinstance(content, ArtifactReferenceContent):
+            contents.append(
+                {
+                    "type": "artifact_reference",
+                    "uri": content.uri,
+                    "media_type": content.media_type,
+                    "size": content.size,
+                    "digest": content.digest,
+                    "preview": content.preview,
+                }
+            )
+        elif isinstance(content, (ImageContent, AudioContent, FileContent)):
+            source = content.source
+            if isinstance(source, BytesSource):
+                encoded_source: dict[str, object] = {
+                    "type": "bytes",
+                    "data": base64.b64encode(source.data).decode("ascii"),
+                }
+            elif isinstance(source, FileSource):
+                encoded_source = {"type": "file", "path": source.path}
+            elif isinstance(source, UrlSource):
+                encoded_source = {"type": "url", "url": source.url}
+            else:  # pragma: no cover - canonical constructors prevent this
+                raise UnsupportedMediaSourceError(type(source).__name__)
+            item: dict[str, object] = {
+                "type": "image" if isinstance(content, ImageContent) else "audio" if isinstance(content, AudioContent) else "file",
+                "source": encoded_source,
+                "media_type": content.media_type,
+            }
+            if isinstance(content, ImageContent):
+                item["detail"] = content.detail
+            elif isinstance(content, AudioContent):
+                item["transcript"] = content.transcript
+            else:
+                item["filename"] = content.filename
+            contents.append(item)
+    data: dict[str, object] = {
+        "type": message.role,
+        "content": contents,
+        "timestamp": message.timestamp,
+    }
+    if isinstance(message, AssistantMessage):
+        data["tool_calls"] = [
+            {"id": call.id, "name": call.name, "arguments": thaw_json(call.arguments)} for call in message.tool_calls
+        ]
+    elif isinstance(message, ToolResultMessage):
+        data.update(
+            {
+                "tool_call_id": message.tool_call_id,
+                "tool_name": message.tool_name,
+                "status": message.status.value,
+                "error": None
+                if message.error is None
+                else {
+                    "code": getattr(message.error, "code"),
+                    "message": getattr(message.error, "message"),
+                    "retryable": getattr(message.error, "retryable"),
+                },
+            }
+        )
+    return data
+
+
+def canonical_message_digest(messages: Iterable["AgentMessage"]) -> str:
+    payload = [canonical_message_data(message) for message in messages]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class MediaLimits:
     max_inline_bytes: int = 8 * 1024 * 1024
@@ -203,6 +293,44 @@ class TextContent:
 
 
 @dataclass(frozen=True, slots=True)
+class JsonContent:
+    value: JsonValue
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", freeze_json(self.value))
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReferenceContent:
+    uri: str
+    media_type: str | None
+    size: int
+    digest: str
+    preview: str | None = None
+
+    def __post_init__(self) -> None:
+        parsed = urlparse(self.uri) if isinstance(self.uri, str) else None
+        if (
+            parsed is None
+            or parsed.scheme != "workspace"
+            or parsed.netloc not in {"blobs", "files"}
+            or parsed.query
+            or parsed.fragment
+            or "%" in self.uri
+            or "//" in parsed.path
+            or any(part in {"", ".", ".."} for part in parsed.path.split("/")[1:])
+        ):
+            raise ProtocolError("Artifact URI must be a normalized workspace:// URI.")
+        _mime(self.media_type)
+        if not isinstance(self.size, int) or isinstance(self.size, bool) or self.size < 0:
+            raise ProtocolError("Artifact size must be non-negative.")
+        if not isinstance(self.digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.digest):
+            raise ProtocolError("Artifact digest must be canonical sha256.")
+        if self.preview is not None and (not isinstance(self.preview, str) or len(self.preview.encode("utf-8")) > 4096):
+            raise ProtocolError("Artifact preview must be UTF-8 text of at most 4096 bytes.")
+
+
+@dataclass(frozen=True, slots=True)
 class ImageContent:
     source: MediaSource
     media_type: str | None = None
@@ -241,7 +369,7 @@ class FileContent:
             raise ProtocolError("FileContent.filename must be str | None.")
 
 
-MessageContent: TypeAlias = TextContent | ImageContent | AudioContent | FileContent
+MessageContent: TypeAlias = TextContent | JsonContent | ImageContent | AudioContent | FileContent | ArtifactReferenceContent
 
 
 def normalize_content(value: Iterable[MessageContent] | str, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS) -> tuple[MessageContent, ...]:
@@ -256,7 +384,7 @@ def normalize_content(value: Iterable[MessageContent] | str, limits: MediaLimits
     if len(result) > limits.max_contents_per_message:
         raise ProtocolError("Too many content blocks.")
     for item in result:
-        if not isinstance(item, (TextContent, ImageContent, AudioContent, FileContent)):
+        if not isinstance(item, (TextContent, JsonContent, ImageContent, AudioContent, FileContent, ArtifactReferenceContent)):
             raise UnsupportedContentTypeError(type(item).__name__)
         source = getattr(item, "source", None)
         if isinstance(source, BytesSource) and len(source.data) > limits.max_inline_bytes:

@@ -29,7 +29,7 @@ from roboagent.tool import (
     ToolRegistrationError,
     ToolRegistry,
     ToolTextContent,
-    Workspace,
+    FilesystemWorkspace,
     create_filesystem_tools,
     create_shell_tool,
     retry_safe,
@@ -283,7 +283,7 @@ def test_cancel_effect_status_is_conservative_for_side_effects() -> None:
 
 def test_filesystem_tools_are_scoped_atomic_and_deterministic(tmp_path: Path) -> None:
     async def check() -> None:
-        workspace = Workspace(tmp_path)
+        workspace = FilesystemWorkspace(tmp_path)
         tools = {tool.definition.name: tool for tool in create_filesystem_tools(FilesystemConfig(workspace))}
         context = _context()
         written = await tools["write_file"].execute(FrozenJsonObject({"path": "a/file.txt", "content": "héllo", "create_parents": True}), context)
@@ -305,7 +305,7 @@ def test_shell_is_noninteractive_scoped_and_bounded(tmp_path: Path) -> None:
     async def check() -> None:
         (tmp_path / "sub").mkdir()
         before = dict(os.environ)
-        shell = create_shell_tool(ShellConfig(Workspace(tmp_path), max_stdout_bytes=3, env=FrozenJsonObject({"ROBOAGENT_TEST": "yes"})))
+        shell = create_shell_tool(ShellConfig(FilesystemWorkspace(tmp_path), max_stdout_bytes=3, env=FrozenJsonObject({"ROBOAGENT_TEST": "yes"})))
         result = await shell.execute(FrozenJsonObject({"command": "printf 12345; printf err >&2; printf $ROBOAGENT_TEST > marker", "cwd": "sub"}), _context())
         assert isinstance(result, ToolJsonContent)
         assert result.value["stdout"] == "123" and result.value["stdout_truncated"] is True
@@ -313,7 +313,7 @@ def test_shell_is_noninteractive_scoped_and_bounded(tmp_path: Path) -> None:
         assert (tmp_path / "sub" / "marker").read_text() == "yes"
         assert dict(os.environ) == before
 
-        background = create_shell_tool(ShellConfig(Workspace(tmp_path), cancellation_grace_period=0.02))
+        background = create_shell_tool(ShellConfig(FilesystemWorkspace(tmp_path), cancellation_grace_period=0.02))
         completed = await asyncio.wait_for(
             background.execute(FrozenJsonObject({"command": "sleep 10 &"}), _context()),
             timeout=1,

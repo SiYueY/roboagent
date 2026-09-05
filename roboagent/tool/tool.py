@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from roboagent.message import (
+    ArtifactReferenceContent,
     FrozenJsonObject,
     JsonValue,
     ToolCall,
@@ -58,6 +59,19 @@ class ToolDecision(Enum):
     ALLOW = "allow"
     REJECT = "reject"
     FAIL_RUN = "fail_run"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPolicyDecision:
+    action: ToolDecision
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.action, ToolDecision):
+            raise TypeError("ToolPolicyDecision.action must be ToolDecision.")
+        if self.reason is not None and not isinstance(self.reason, str):
+            raise TypeError("ToolPolicyDecision.reason must be str or None.")
 
 
 class ToolEffectStatus(Enum):
@@ -122,7 +136,49 @@ class ToolJsonContent:
         object.__setattr__(self, "value", freeze_json(self.value))
 
 
-ToolContent = ToolTextContent | ToolJsonContent
+@dataclass(frozen=True, slots=True)
+class BinaryToolContent:
+    data: bytes
+    media_type: str
+
+    def __post_init__(self) -> None:
+        from roboagent.message import _mime
+
+        if type(self.data) is not bytes:
+            raise TypeError("BinaryToolContent.data must be bytes.")
+        _mime(self.media_type)
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceToolContent:
+    uri: str
+    data: bytes | None = None
+    media_type: str | None = None
+
+    def __post_init__(self) -> None:
+        from urllib.parse import urlparse
+        from roboagent.message import _mime
+
+        parsed = urlparse(self.uri) if isinstance(self.uri, str) else None
+        if parsed is None or not parsed.scheme:
+            raise ValueError("ResourceToolContent.uri must be absolute.")
+        if self.data is not None and type(self.data) is not bytes:
+            raise TypeError("ResourceToolContent.data must be bytes or None.")
+        _mime(self.media_type)
+
+
+ToolContent = ToolTextContent | ToolJsonContent | ArtifactReferenceContent
+RawToolContent = ToolTextContent | ToolJsonContent | BinaryToolContent | ResourceToolContent
+
+
+@dataclass(frozen=True, slots=True)
+class RawToolResult:
+    content: tuple[RawToolContent, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
+        if not all(isinstance(item, (ToolTextContent, ToolJsonContent, BinaryToolContent, ResourceToolContent)) for item in self.content):
+            raise ToolContractError("RawToolResult contains non-canonical content.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,14 +204,16 @@ class ToolErrorInfo:
 class ToolExecutionResult:
     call_id: str
     name: str
-    content: ToolContent | None = None
+    content: tuple[ToolContent, ...] | None = None
     error: ToolErrorInfo | None = None
 
     def __post_init__(self) -> None:
         if not self.call_id or not self.name:
             raise ValueError("ToolExecutionResult must identify its ToolCall.")
-        if self.content is not None and not isinstance(self.content, (ToolTextContent, ToolJsonContent)):
-            raise TypeError("ToolExecutionResult content must be canonical ToolContent.")
+        if self.content is not None:
+            object.__setattr__(self, "content", tuple(self.content))
+            if not all(isinstance(item, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)) for item in self.content):
+                raise TypeError("ToolExecutionResult content must contain canonical ToolContent.")
         if self.error is not None and not isinstance(self.error, ToolErrorInfo):
             raise TypeError("ToolExecutionResult error must be ToolErrorInfo.")
         if bool(self.content is not None) == bool(self.error is not None):
@@ -179,7 +237,7 @@ class ToolEffectRecord:
             raise TypeError("ToolEffectRecord kind and status must be canonical enums.")
         if not isinstance(self.transcript_committed, bool):
             raise TypeError("transcript_committed must be bool.")
-        if self.content is not None and not isinstance(self.content, (ToolTextContent, ToolJsonContent)):
+        if self.content is not None and not isinstance(self.content, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)):
             raise TypeError("ToolEffectRecord content must be canonical ToolContent.")
         if self.error is not None and not isinstance(self.error, ToolErrorInfo):
             raise TypeError("ToolEffectRecord error must be ToolErrorInfo.")
@@ -229,7 +287,7 @@ class ToolBatchAborted(RuntimeError):
         super().__init__(reason.message)
 
 
-ToolHandler = Callable[[FrozenJsonObject, ToolContext], ToolContent | Awaitable[ToolContent]]
+ToolHandler = Callable[[FrozenJsonObject, ToolContext], ToolContent | RawToolResult | Awaitable[ToolContent | RawToolResult]]
 TimeoutResolver = Callable[[FrozenJsonObject], float | None]
 
 
@@ -250,11 +308,11 @@ class Tool:
         if self.timeout is not None and (isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float)) or self.timeout <= 0):
             raise ValueError("Tool timeout must be positive.")
 
-    async def execute(self, arguments: FrozenJsonObject, context: ToolContext) -> ToolContent:
+    async def execute(self, arguments: FrozenJsonObject, context: ToolContext) -> ToolContent | RawToolResult:
         value = self.handler(arguments, context)
         if inspect.isawaitable(value):
             value = await value
-        if not isinstance(value, (ToolTextContent, ToolJsonContent)):
+        if not isinstance(value, (ToolTextContent, ToolJsonContent, RawToolResult)):
             raise ToolContractError("Tool must return canonical ToolContent.")
         return value
 
@@ -266,12 +324,12 @@ class Tool:
 
 
 class ToolExecutionPolicy(Protocol):
-    async def evaluate(self, call: ToolCall, tool: Tool | None, context: ToolContext) -> ToolDecision: ...
+    async def evaluate(self, call: ToolCall, tool: Tool | None, context: ToolContext) -> ToolDecision | ToolPolicyDecision: ...
 
 
 class AllowAllToolPolicy:
-    async def evaluate(self, call: ToolCall, tool: Tool | None, context: ToolContext) -> ToolDecision:
-        return ToolDecision.ALLOW
+    async def evaluate(self, call: ToolCall, tool: Tool | None, context: ToolContext) -> ToolPolicyDecision:
+        return ToolPolicyDecision(ToolDecision.ALLOW)
 
 
 class ToolRegistry:

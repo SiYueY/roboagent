@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from roboagent.message import FrozenJsonObject, freeze_json_object
 
-from .filesystem import Workspace, validate_relative_path
+from .filesystem import FilesystemWorkspace, validate_relative_path
 from .tool import (
     Tool,
     ToolContext,
@@ -24,7 +24,7 @@ from .tool import (
 
 @dataclass(frozen=True, slots=True)
 class ShellConfig:
-    workspace: Workspace
+    workspace: FilesystemWorkspace
     max_command_bytes: int = 64 * 1024
     max_stdout_bytes: int = 256 * 1024
     max_stderr_bytes: int = 256 * 1024
@@ -38,8 +38,8 @@ class ShellConfig:
         byte_limits = (self.max_command_bytes, self.max_stdout_bytes, self.max_stderr_bytes)
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in byte_limits):
             raise ValueError("Shell byte limits must be positive.")
-        if not isinstance(self.workspace, Workspace):
-            raise TypeError("ShellConfig requires a Workspace.")
+        if not isinstance(self.workspace, FilesystemWorkspace):
+            raise TypeError("ShellConfig requires a FilesystemWorkspace.")
         if self.default_timeout is not None and (isinstance(self.default_timeout, bool) or not isinstance(self.default_timeout, (int, float)) or self.default_timeout <= 0):
             raise ValueError("default_timeout must be positive.")
         if self.max_timeout is not None and (isinstance(self.max_timeout, bool) or not isinstance(self.max_timeout, (int, float)) or self.max_timeout <= 0):

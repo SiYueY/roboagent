@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from roboagent.agent.hooks import HookDecision, ModelHookContext
 from roboagent.agent.types import RunConfig
-from roboagent.context import ContextSnapshot, ModelContext
+from roboagent.context import ContextRequest, ContextSnapshot, ContextSummary, ModelContext, PreparedContext, SummarySegment
 from roboagent.message import AssistantMessage
 from roboagent.model import Model, ModelError, ModelResponse, ModelSettings, TextDelta, Usage, collect_model_stream
 from roboagent.runtime.event import RunEventEmitter
@@ -123,21 +123,39 @@ async def _run_loop_impl(
         if turn > 1:
             await session.consume_pending(run_context.run_id, run_context.cancellation)
         update_state(RunPhase.PREPARING_CONTEXT, turn)
-        snapshot = ContextSnapshot(
-            session.messages,
-            agent.prompt,
-            agent.tool_registry.definitions(),
-            guidance_metadata,
-        )
         try:
-            model_context = await agent.context_manager.prepare(snapshot, run_context.cancellation)
+            while True:
+                transcript, current_compaction = await session.capture_context_state(run_context.run_id)
+                request = ContextRequest(
+                    snapshot=ContextSnapshot(
+                        session_id=session.session_id,
+                        transcript=transcript,
+                        prompt=agent.prompt,
+                        tool_definitions=agent.tool_registry.definitions(),
+                        skill_metadata=guidance_metadata,
+                    ),
+                    model_settings=config.model_settings or ModelSettings(),
+                    model_capabilities=agent.model.capabilities,
+                    current_compaction=current_compaction,
+                )
+                prepared = await agent.context_manager.prepare(request, run_context.cancellation)
+                if not isinstance(prepared, PreparedContext):
+                    raise TypeError("ContextManager must return PreparedContext.")
+                _validate_prepared_summary(prepared, current_compaction)
+                usage = _merge_usage(usage, prepared.usage_delta)
+                progress.usage = usage
+                if prepared.compaction_update is None:
+                    break
+                if await session.commit_compaction(run_context.run_id, prepared.compaction_update):
+                    break
+            model_context = prepared.model_context
             if not isinstance(model_context, ModelContext):
-                raise TypeError("ContextManager must return ModelContext.")
+                raise TypeError("PreparedContext must contain ModelContext.")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             raise _RunFailure(
-                RunError("context_error", "Context preparation failed.", cause_type=type(exc).__name__),
+                RunError(getattr(exc, "code", "context_error"), "Context preparation failed.", cause_type=type(exc).__name__),
                 tuple(effects), output, usage, turn,
             ) from exc
         hook_context = ModelHookContext(run_context, model_context)
@@ -224,6 +242,17 @@ async def _run_loop_impl(
         try:
             await session.commit_exchange(run_context.run_id, response.message, messages)
         except Exception as exc:
+            from roboagent.agent.persistence import SessionPersistenceError
+
+            if isinstance(exc, SessionPersistenceError):
+                effects.extend(committed_effects(batch.effects))
+                raise _RunFailure(
+                    RunError("session_persistence_error", "Session persistence failed.", cause_type=type(exc).__name__),
+                    tuple(effects),
+                    output,
+                    usage,
+                    turn,
+                ) from exc
             effects.extend(batch.effects)
             raise _RunFailure(
                 RunError("transcript_commit_error", "Tool exchange commit failed.", cause_type=type(exc).__name__),
@@ -258,6 +287,20 @@ class _RunFailure(Exception):
         self.usage = usage
         self.turns = turns
         super().__init__(error.message)
+
+
+def _validate_prepared_summary(prepared: PreparedContext, current_compaction: ContextSummary | None) -> None:
+    summaries = tuple(
+        segment for segment in prepared.model_context.segments if isinstance(segment, SummarySegment)
+    )
+    update = prepared.compaction_update
+    expected = update.summary if update is not None else current_compaction
+    if expected is None:
+        if summaries:
+            raise TypeError("ModelContext cannot use an uncommitted SummarySegment.")
+        return
+    if len(summaries) > 1 or (summaries and summaries[0].text != getattr(expected, "text", None)):
+        raise TypeError("ModelContext SummarySegment does not match Session compaction state.")
 
 
 def _merge_usage(current: Usage | None, latest: Usage | None) -> Usage | None:

@@ -10,11 +10,13 @@ from roboagent.agent.types import RunConfig
 from roboagent.context import ContextManager, FullContextManager, PromptInput
 from roboagent.message import AgentMessage, MediaLimits
 from roboagent.model import Model
-from roboagent.tool import AllowAllToolPolicy, ToolExecutionPolicy, ToolRegistry
+from roboagent.tool import ApprovalProvider, ApprovalSettings, AllowAllToolPolicy, ToolExecutionPolicy, ToolRegistry
 
 if TYPE_CHECKING:
     from roboagent.agent.session import Session
     from roboagent.skill import SkillManager
+    from roboagent.tool import ToolResultMaterializer, Workspace
+    from roboagent.agent.persistence import SessionRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,8 @@ class Agent:
     default_run_config: RunConfig = field(default_factory=RunConfig)
     media_limits: MediaLimits = field(default_factory=MediaLimits)
     skill_manager: "SkillManager | None" = None
+    approval_provider: ApprovalProvider | None = None
+    approval_settings: ApprovalSettings = field(default_factory=ApprovalSettings)
 
     def __init__(
         self,
@@ -41,6 +45,8 @@ class Agent:
         default_run_config: RunConfig | None = None,
         media_limits: MediaLimits | None = None,
         skill_manager: "SkillManager | None" = None,
+        approval_provider: ApprovalProvider | None = None,
+        approval_settings: ApprovalSettings | None = None,
     ) -> None:
         if not callable(getattr(model, "stream", None)) or not hasattr(model, "capabilities"):
             raise TypeError("Agent requires a canonical Model.")
@@ -65,8 +71,31 @@ class Agent:
         object.__setattr__(self, "default_run_config", default_run_config or RunConfig())
         object.__setattr__(self, "media_limits", media_limits or MediaLimits())
         object.__setattr__(self, "skill_manager", skill_manager)
+        if approval_provider is not None and not callable(getattr(approval_provider, "request", None)):
+            raise TypeError("approval_provider must implement request().")
+        if approval_settings is not None and not isinstance(approval_settings, ApprovalSettings):
+            raise TypeError("approval_settings must be ApprovalSettings or None.")
+        object.__setattr__(self, "approval_provider", approval_provider)
+        object.__setattr__(self, "approval_settings", approval_settings or ApprovalSettings())
 
-    def new_session(self, messages: Sequence[AgentMessage] = (), *, session_id: str | None = None) -> "Session":
+    def new_session(
+        self,
+        messages: Sequence[AgentMessage] = (),
+        *,
+        session_id: str | None = None,
+        workspace: "Workspace | None" = None,
+        result_materializer: "ToolResultMaterializer | None" = None,
+        repository: "SessionRepository | None" = None,
+        allow_nondurable_artifacts: bool = False,
+    ) -> "Session":
         from roboagent.agent.session import Session
 
-        return Session(self, messages, session_id)
+        return Session(
+            self,
+            messages,
+            session_id,
+            workspace=workspace,
+            result_materializer=result_materializer,
+            repository=repository,
+            allow_nondurable_artifacts=allow_nondurable_artifacts,
+        )

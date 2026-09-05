@@ -98,6 +98,9 @@ class Run:
                 events=self._events,
                 config=self.config.tool_executor,
                 hook_timeout=self.config.hook_timeout,
+                result_materializer=self.session.result_materializer,
+                approval_provider=self.session.agent.approval_provider,
+                approval_settings=self.session.agent.approval_settings,
             )
             outcome = await run_loop(
                 agent=self.session.agent,
@@ -143,7 +146,7 @@ class Run:
                 status = RunStatus.CANCELLED
         except Exception as exc:
             status = RunStatus.FAILED
-            error = RunError("runtime_error", "Run execution failed.", cause_type=type(exc).__name__)
+            error = RunError(getattr(exc, "code", "runtime_error"), "Run execution failed.", cause_type=type(exc).__name__)
             turns = self._state.turn
         finally:
             if timeout_task is not None:

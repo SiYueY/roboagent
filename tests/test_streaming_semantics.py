@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from roboagent.context import ModelContext
+from roboagent.context import MessageSegment, ModelContext
 from roboagent.message import AssistantMessage, BytesSource, FrozenJsonObject, ImageContent, ToolCall, UserMessage
 from roboagent.model import (
     FinishReason,
@@ -110,7 +110,7 @@ def test_capability_validation_precedes_model_invocation() -> None:
         definition = ToolDefinition("lookup", "Lookup.", FrozenJsonObject({"type": "object"}))
         model = EventModel((), ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False))
         with pytest.raises(ModelCapabilityError) as caught:
-            await collect_model_stream(model, ModelContext(None, (UserMessage("x"),), (definition,)))
+            await collect_model_stream(model, ModelContext(None, (MessageSegment(UserMessage("x")),), (definition,)))
         assert caught.value.code == "model_does_not_support_tools"
         assert not model.called
         assert not model.closed
@@ -137,7 +137,7 @@ def test_parallel_tool_calls_require_declared_capability() -> None:
             ),
         )
         with pytest.raises(ModelCapabilityError) as caught:
-            await collect_model_stream(model, ModelContext(None, (UserMessage("x"),), ()))
+            await collect_model_stream(model, ModelContext(None, (MessageSegment(UserMessage("x")),), ()))
         assert caught.value.code == "parallel_tool_calls_unsupported"
         assert model.called and model.closed
 
@@ -154,7 +154,7 @@ def test_output_modality_requires_declared_capability() -> None:
             ),
         )
         with pytest.raises(ModelCapabilityError) as caught:
-            await collect_model_stream(model, ModelContext(None, (UserMessage("x"),), ()))
+            await collect_model_stream(model, ModelContext(None, (MessageSegment(UserMessage("x")),), ()))
         assert caught.value.code == "unsupported_output_modality"
         assert model.called and model.closed
 

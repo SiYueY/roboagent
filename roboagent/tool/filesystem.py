@@ -25,19 +25,19 @@ from .tool import (
 
 
 @dataclass(frozen=True, slots=True)
-class Workspace:
+class FilesystemWorkspace:
     root: Path
 
     def __post_init__(self) -> None:
         root = Path(self.root).expanduser().resolve()
         if not root.is_dir():
-            raise ValueError("Workspace root must be an existing directory.")
+            raise ValueError("FilesystemWorkspace root must be an existing directory.")
         object.__setattr__(self, "root", root)
 
 
 @dataclass(frozen=True, slots=True)
 class FilesystemConfig:
-    workspace: Workspace
+    workspace: FilesystemWorkspace
     max_file_bytes: int = 8 * 1024 * 1024
     max_read_bytes: int = 256 * 1024
     max_write_bytes: int = 8 * 1024 * 1024
@@ -61,8 +61,8 @@ class FilesystemConfig:
         )
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in numeric):
             raise ValueError("Filesystem limits must be positive.")
-        if not isinstance(self.workspace, Workspace) or not isinstance(self.include_hidden, bool):
-            raise TypeError("FilesystemConfig requires a Workspace and boolean hidden-file policy.")
+        if not isinstance(self.workspace, FilesystemWorkspace) or not isinstance(self.include_hidden, bool):
+            raise TypeError("FilesystemConfig requires a FilesystemWorkspace and boolean hidden-file policy.")
 
 
 def create_filesystem_tools(config: FilesystemConfig) -> tuple[Tool, ...]:
@@ -242,7 +242,7 @@ def _glob_matches(relative: str, pattern: str) -> bool:
     return any(path.match(candidate) or fnmatch.fnmatchcase(relative, candidate) for candidate in candidates)
 
 
-def _target(workspace: Workspace, value: object, *, allow_file_symlink: bool = False, for_write: bool = False) -> tuple[Path, str]:
+def _target(workspace: FilesystemWorkspace, value: object, *, allow_file_symlink: bool = False, for_write: bool = False) -> tuple[Path, str]:
     relative_path = validate_relative_path(value)
     relative = relative_path.as_posix() or "."
     lexical = workspace.root.joinpath(*relative_path.parts)
@@ -271,7 +271,7 @@ def _read_regular(path: Path, maximum: int) -> bytes:
         _fail("read_error", "Could not read file.", exc)
 
 
-def _atomic_write(workspace: Workspace, target: Path, content: bytes, *, create_parents: bool) -> None:
+def _atomic_write(workspace: FilesystemWorkspace, target: Path, content: bytes, *, create_parents: bool) -> None:
     parent = target.parent
     resolved_parent = parent.resolve(strict=False)
     if not resolved_parent.is_relative_to(workspace.root):

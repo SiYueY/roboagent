@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Protocol
 
 from roboagent.message import (
+    ArtifactReferenceContent,
     AudioContent,
     BytesSource,
     FileContent,
     ImageContent,
+    JsonContent,
     MediaSource,
     MessageContent,
     TextContent,
@@ -123,8 +125,10 @@ class Modality(Enum):
 
 
 def modality(value: MessageContent) -> Modality:
-    if isinstance(value, TextContent):
+    if isinstance(value, (TextContent, JsonContent)):
         return Modality.TEXT
+    if isinstance(value, ArtifactReferenceContent):
+        return Modality.FILE
     if isinstance(value, ImageContent):
         return Modality.IMAGE
     if isinstance(value, AudioContent):
@@ -145,6 +149,12 @@ class ContentSummary:
 def content_summary(content: MessageContent) -> ContentSummary:
     if isinstance(content, TextContent):
         return ContentSummary(Modality.TEXT, size=len(content.text))
+    if isinstance(content, JsonContent):
+        from roboagent.message import canonical_json_dumps
+
+        return ContentSummary(Modality.TEXT, size=len(canonical_json_dumps(content.value)))
+    if isinstance(content, ArtifactReferenceContent):
+        return ContentSummary(Modality.FILE, content.media_type, "workspace", content.size)
     source = content.source
     return ContentSummary(
         modality(content),

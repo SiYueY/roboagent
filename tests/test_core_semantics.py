@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from roboagent.context import ContextError, ContextSnapshot, FullContextManager, PromptInput, WindowContextManager
+from roboagent.context import (
+    ContextError,
+    ContextRequest,
+    ContextSnapshot,
+    FullContextManager,
+    MessageSegment,
+    PromptInput,
+    WindowContextManager,
+)
 from roboagent.message import (
     AssistantMessage,
     FrozenJsonArray,
@@ -20,6 +28,7 @@ from roboagent.message import (
     freeze_json,
 )
 from roboagent.runtime import RuntimeCancellation
+from roboagent.model import ModelCapabilities, ModelSettings
 from roboagent.skill import SkillMetadata, SkillSource
 from roboagent.tool import ToolDefinition, ToolErrorInfo
 
@@ -60,9 +69,11 @@ def test_context_prompt_order_and_atomic_window() -> None:
         definition = ToolDefinition("lookup", "Lookup data.", FrozenJsonObject({"type": "object"}))
 
         metadata = SkillMetadata("skill-a", "  useful\n guidance ", Path("/internal"), SkillSource.PROJECT)
-        snapshot = ContextSnapshot(transcript, PromptInput("Base {name}", FrozenJsonObject({"name": "prompt"})), (definition,), (metadata,))
-        context = await WindowContextManager(max_messages=2).prepare(snapshot, cancellation)
-        assert context.messages == (UserMessage("new", timestamp=transcript[-1].timestamp),)
+        snapshot = ContextSnapshot("session", transcript, PromptInput("Base {name}", FrozenJsonObject({"name": "prompt"})), (definition,), (metadata,))
+        request = ContextRequest(snapshot, ModelSettings(), ModelCapabilities(), None)
+        prepared = await WindowContextManager(max_messages=2).prepare(request, cancellation)
+        context = prepared.model_context
+        assert context.segments == (MessageSegment(UserMessage("new", timestamp=transcript[-1].timestamp)),)
         assert context.system_prompt is not None
         assert context.system_prompt.index("Base prompt") < context.system_prompt.index("RoboAgent runtime")
         assert context.system_prompt.index("RoboAgent runtime") < context.system_prompt.index("Available skills")
@@ -75,10 +86,13 @@ def test_context_rejects_partial_exchange_and_cancellation() -> None:
     async def check() -> None:
         call = ToolCall("c", "lookup", FrozenJsonObject())
         with pytest.raises(ContextError):
-            ContextSnapshot((AssistantMessage(tool_calls=(call,)),), None, ())
+            ContextSnapshot("session", (AssistantMessage(tool_calls=(call,)),), None, ())
         cancellation = RuntimeCancellation()
         cancellation.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await FullContextManager().prepare(ContextSnapshot((), None, ()), cancellation)
+            await FullContextManager().prepare(
+                ContextRequest(ContextSnapshot("session", (), None, ()), ModelSettings(), ModelCapabilities(), None),
+                cancellation,
+            )
 
     asyncio.run(check())

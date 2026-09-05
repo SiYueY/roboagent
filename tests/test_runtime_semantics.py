@@ -6,7 +6,7 @@ import pytest
 
 from roboagent import Agent, Session
 from roboagent.agent import HookDecision, RunConfig, SessionBusyError
-from roboagent.context import ModelContext, PromptInput
+from roboagent.context import MessageSegment, ModelContext, PromptInput
 from roboagent.message import (
     AssistantMessage,
     AudioContent,
@@ -422,7 +422,9 @@ def test_pending_inputs_wait_for_model_boundary_and_keep_sequence() -> None:
         release.set()
         assert (await run.result()).status is RunStatus.COMPLETED
         assert [message.role for message in session.messages] == ["user", "assistant", "user", "user", "assistant"]
-        assert [message.content[0].text for message in model.contexts[1].messages[-2:]] == ["steer", "follow"]
+        tail = model.contexts[1].segments[-2:]
+        assert all(isinstance(segment, MessageSegment) for segment in tail)
+        assert [segment.message.content[0].text for segment in tail if isinstance(segment, MessageSegment)] == ["steer", "follow"]
 
     asyncio.run(check())
 
@@ -553,7 +555,7 @@ def test_failed_termination_reason_matches_result_state_and_event() -> None:
         await assert_failed(max_turns, "max_turns")
 
         class BrokenContext:
-            async def prepare(self, snapshot, cancellation):
+            async def prepare(self, request, cancellation):
                 raise RuntimeError("context broke")
 
         context_error = Agent(
