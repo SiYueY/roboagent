@@ -186,9 +186,9 @@ class ToolExecutor:
                     if effect:
                         effects[index] = effect
                 fill()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             cancelled_effects = await self._cancel_tasks(running)
-            raise ToolBatchCancelled((*_present_effects(effects), *cancelled_effects))
+            raise ToolBatchCancelled((*_present_effects(effects), *cancelled_effects)) from exc
         return ToolBatchResult(
             calls,
             tuple(item for item in results if item is not None),
@@ -361,10 +361,10 @@ class ToolExecutor:
                 RunError("tool_contract_error", "Tool violated its output contract.", cause_type=type(exc).__name__),
                 (effect,),
             ) from exc
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             effect = await self._cancel_started(task, tool, call)
             await self._emit("tool.cancelled", call, status="cancelled", error_code="cancelled")
-            raise ToolBatchCancelled((effect,))
+            raise ToolBatchCancelled((effect,)) from exc
         except Exception:
             error = self._bounded_error(ToolErrorInfo("execution_error", "Tool execution failed."))
             result = ToolExecutionResult(call.id, call.name, error=error)
@@ -490,10 +490,12 @@ class ToolExecutor:
                 return result
             try:
                 response = task.result()
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 context.cancellation.raise_if_cancelled()
                 await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
-                raise ToolBatchAborted(RunError("approval_error", "Approval provider cancelled unexpectedly."))
+                raise ToolBatchAborted(
+                    RunError("approval_error", "Approval provider cancelled unexpectedly.")
+                ) from exc
             except Exception as exc:
                 await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
                 raise ToolBatchAborted(
@@ -690,4 +692,3 @@ def _present_effects(
     effects: list[ToolEffectRecord | None],
 ) -> tuple[ToolEffectRecord, ...]:
     return tuple(effect for effect in effects if effect is not None)
-    RawToolResult,

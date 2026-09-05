@@ -185,9 +185,9 @@ async def _run_loop_impl(
         update_state(RunPhase.MODEL, turn)
         await events.emit("model.started", turn=turn)
         try:
-            async def observe_model(event: object) -> None:
+            async def observe_model(event: object, observed_turn: int = turn) -> None:
                 if isinstance(event, TextDelta):
-                    await events.emit("model.delta", turn=turn, text=event.text)
+                    await events.emit("model.delta", turn=observed_turn, text=event.text)
 
             response = await _collect_cancellable(
                 agent.model,

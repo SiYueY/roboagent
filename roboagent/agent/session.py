@@ -432,7 +432,7 @@ class Session:
         if any(item.receipt.session_id != snapshot.session_id for item in snapshot.pending):
             raise SessionCorruptedError("Pending input belongs to another Session.")
         if sequences != sorted(sequences) or len(sequences) != len(set(sequences)) or any(
-            left >= right for left, right in zip(sequences, sequences[1:])
+            left >= right for left, right in zip(sequences, sequences[1:], strict=False)
         ):
             raise SessionCorruptedError("Pending input sequence is not strictly increasing.")
         if sequences and snapshot.last_pending_sequence < max(sequences):
@@ -477,11 +477,10 @@ class Session:
         await self._persist_required(self._runtime_revision)
 
     async def close(self) -> tuple[InputReceipt, ...]:
+        """Close this runtime handle without changing durable Session truth."""
         with self._ownership_lock:
             if self._active_run_id is not None:
                 raise SessionBusyError("Cannot close a Session with an active Run.")
             self._closed = True
         async with self._queue_lock:
-            rejected = tuple(item.receipt for item in self._pending)
-            self._pending.clear()
-        return rejected
+            return tuple(item.receipt for item in self._pending)

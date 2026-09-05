@@ -9,11 +9,13 @@ and approval without introducing a parallel runtime.
 
 ```python
 from roboagent import Agent
+from roboagent.config import load_app_config
 from roboagent.context import PromptInput
 from roboagent.message import UserMessage
 from roboagent.model import create_model
 from roboagent.tool import ToolRegistry
 
+config = load_app_config()
 model = create_model(registry=config.to_model_registry())
 agent = Agent(
     model,

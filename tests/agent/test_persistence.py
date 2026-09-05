@@ -210,6 +210,27 @@ def test_persistence_coalesces_waiters_onto_latest_runtime_revision() -> None:
     asyncio.run(check())
 
 
+def test_close_preserves_pending_runtime_and_durable_truth() -> None:
+    async def check() -> None:
+        repository = InMemorySessionRepository()
+        session = Agent(_UnusedModel()).new_session(session_id="session", repository=repository)
+        receipt = await session.follow_up(UserMessage("keep me"))
+        revision = session.runtime_revision
+
+        outstanding = await session.close()
+
+        assert outstanding == (receipt,)
+        pending = await session.pending_inputs()
+        assert len(pending) == 1
+        assert pending[0].receipt == receipt and pending[0].message.content == UserMessage("keep me").content
+        assert pending[0].kind == "follow_up"
+        assert session.runtime_revision == session.durable_revision == revision
+        snapshot = await repository.load("session")
+        assert snapshot is not None and snapshot.pending == pending
+
+    asyncio.run(check())
+
+
 def test_local_repository_serializes_competing_cas_and_delete(tmp_path) -> None:
     async def check() -> None:
         first = LocalSessionRepository(tmp_path)

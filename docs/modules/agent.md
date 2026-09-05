@@ -15,6 +15,11 @@ message at the initial legal boundary.
 
 Session and Run async operations are same-event-loop contracts. The ownership
 lock does not make a Session generally thread-safe or safe across event loops.
+The synchronous ownership lock is never held across an `await`. When multiple
+async state locks are needed, their order is pending queue, transcript, then
+compaction. Persistence is serialized separately; callers do not hold a state
+lock while waiting for persistence, and snapshot collection acquires state
+locks only in the canonical order. This ordering is a Runtime invariant.
 
 `Run` starts eagerly, exposes `subscribe()`, `cancel()`, and `result()`, and
 always releases Session ownership. Its terminal status is `COMPLETED`, `FAILED`,
@@ -30,3 +35,7 @@ across revision comparison, unique temporary write, fsync, atomic replacement,
 and parent-directory fsync. Persistence failure never rolls back accepted
 runtime truth. `SessionSnapshot` contains canonical messages, pending order,
 compaction, and metadata, but never live Runtime services or an active Run.
+
+`Session.close()` closes only the current runtime handle. It returns the
+outstanding pending receipts but does not clear or persist pending state, so
+closing a handle cannot make durable inputs disappear or reappear after restore.
