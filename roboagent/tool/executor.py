@@ -261,7 +261,12 @@ class ToolExecutor:
             return result, effect
         except ToolContractError as exc:
             error = self._bounded_error(ToolErrorInfo("invalid_tool_output", "Tool returned non-canonical output."))
-            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=error)
+            status = (
+                ToolEffectStatus.UNKNOWN
+                if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING
+                else ToolEffectStatus.FAILED
+            )
+            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, status, error=error)
             await self._emit_terminal("tool.failed", call, error.code)
             raise ToolBatchAborted(
                 RunError("tool_contract_error", "Tool violated its output contract.", cause_type=type(exc).__name__),
@@ -274,7 +279,25 @@ class ToolExecutor:
         except Exception:
             error = self._bounded_error(ToolErrorInfo("execution_error", "Tool execution failed."))
             result = ToolExecutionResult(call.id, call.name, error=error)
-            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=error)
+            if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
+                effect_error = self._bounded_error(
+                    ToolErrorInfo("effect_unknown", "Tool side effect could not be determined.")
+                )
+                effect = ToolEffectRecord(
+                    call.id,
+                    call.name,
+                    tool.effect_kind,
+                    ToolEffectStatus.UNKNOWN,
+                    error=effect_error,
+                )
+            else:
+                effect = ToolEffectRecord(
+                    call.id,
+                    call.name,
+                    tool.effect_kind,
+                    ToolEffectStatus.FAILED,
+                    error=error,
+                )
             await self._emit_terminal("tool.failed", call, "execution_error")
             await self._after_with_effect(context, result, effect)
             return result, effect

@@ -326,17 +326,50 @@ def test_commit_and_after_tool_failures_retain_uncommitted_effects() -> None:
             async def after_tool(self, context, result):
                 raise RuntimeError("injected hook failure")
 
+        async def acknowledgement_lost(arguments, context):
+            raise ConnectionError("acknowledgement lost")
+
+        uncertain_registry = ToolRegistry(
+            (
+                Tool(
+                    ToolDefinition("act", "Act.", FrozenJsonObject({"type": "object"})),
+                    acknowledgement_lost,
+                    effect_kind=ToolEffectKind.SIDE_EFFECTING,
+                ),
+            )
+        )
         hook_session = Agent(
             Replies((AssistantMessage(tool_calls=(call,)),)),
-            tool_registry=registry,
+            tool_registry=uncertain_registry,
             hooks=(Hook(),),
         ).new_session()
         hook_result = await hook_session.run(UserMessage("go"))
         assert hook_result.status is RunStatus.FAILED
         assert hook_result.error is not None and hook_result.error.code == "hook_error"
         assert len(hook_result.effects) == 1
+        assert hook_result.effects[0].status is ToolEffectStatus.UNKNOWN
         assert not hook_result.effects[0].transcript_committed and not hook_result.retry_safe
         assert [message.role for message in hook_session.messages] == ["user"]
+
+        invalid_registry = ToolRegistry(
+            (
+                Tool(
+                    ToolDefinition("act", "Act.", FrozenJsonObject({"type": "object"})),
+                    lambda arguments, context: {"legacy": True},
+                    effect_kind=ToolEffectKind.SIDE_EFFECTING,
+                ),
+            )
+        )
+        invalid_session = Agent(
+            Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=invalid_registry
+        ).new_session()
+        invalid_result = await invalid_session.run(UserMessage("go"))
+        assert invalid_result.status is RunStatus.FAILED
+        assert invalid_result.error is not None and invalid_result.error.code == "tool_contract_error"
+        assert len(invalid_result.effects) == 1
+        assert invalid_result.effects[0].status is ToolEffectStatus.UNKNOWN
+        assert not invalid_result.effects[0].transcript_committed and not invalid_result.retry_safe
+        assert [message.role for message in invalid_session.messages] == ["user"]
 
     asyncio.run(check())
 

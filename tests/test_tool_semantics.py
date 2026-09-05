@@ -143,6 +143,52 @@ def test_timeout_is_a_terminal_result_and_invalid_output_aborts() -> None:
         assert caught.value.reason.code == "tool_contract_error"
         assert caught.value.effects[0].error is not None
         assert caught.value.effects[0].error.code == "invalid_tool_output"
+        assert caught.value.effects[0].status is ToolEffectStatus.FAILED
+
+    asyncio.run(check())
+
+
+def test_side_effecting_generic_exception_is_unknown() -> None:
+    async def check() -> None:
+        async def raises(arguments, context):
+            raise ConnectionError("acknowledgement lost")
+
+        call = ToolCall("x", "work", FrozenJsonObject({"value": 1}))
+        read_only = Tool(_definition(), raises, effect_kind=ToolEffectKind.READ_ONLY)
+        read_batch = await ToolExecutor(registry=ToolRegistry((read_only,))).execute((call,), _context())
+        assert read_batch.results[0].error is not None
+        assert read_batch.results[0].error.code == "execution_error"
+        assert read_batch.effects[0].status is ToolEffectStatus.FAILED
+        assert retry_safe(read_batch.effects)
+
+        side_effecting = Tool(_definition(), raises, effect_kind=ToolEffectKind.SIDE_EFFECTING)
+        side_batch = await ToolExecutor(registry=ToolRegistry((side_effecting,))).execute((call,), _context())
+        assert side_batch.results[0].error is not None
+        assert side_batch.results[0].error.code == "execution_error"
+        effect = side_batch.effects[0]
+        assert effect.status is ToolEffectStatus.UNKNOWN
+        assert effect.error is not None and effect.error.code == "effect_unknown"
+        assert not retry_safe(side_batch.effects)
+
+    asyncio.run(check())
+
+
+def test_side_effecting_invalid_output_is_unknown() -> None:
+    async def check() -> None:
+        invalid = Tool(
+            _definition(),
+            lambda arguments, context: {"legacy": True},
+            effect_kind=ToolEffectKind.SIDE_EFFECTING,
+        )
+        with pytest.raises(ToolBatchAborted) as caught:
+            await ToolExecutor(registry=ToolRegistry((invalid,))).execute(
+                (ToolCall("x", "work", FrozenJsonObject({"value": 1})),), _context()
+            )
+        assert caught.value.reason.code == "tool_contract_error"
+        effect = caught.value.effects[0]
+        assert effect.status is ToolEffectStatus.UNKNOWN
+        assert effect.error is not None and effect.error.code == "invalid_tool_output"
+        assert not retry_safe(caught.value.effects)
 
     asyncio.run(check())
 

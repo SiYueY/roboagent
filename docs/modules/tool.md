@@ -15,5 +15,10 @@ or `CANCELLED`; an interrupted side-effecting Tool defaults to `UNKNOWN` unless 
 returns canonical content or explicitly raises `ToolExecutionFailure` or
 `ToolEffectUnknown`.
 
+The same conservative rule applies after normal execution starts: a generic
+exception or invalid output is `FAILED` for a read-only Tool and `UNKNOWN` for a
+side-effecting Tool. Only explicit `ToolExecutionFailure` lets the runtime assert
+that a side-effecting operation failed.
+
 Filesystem, shell, and `read_skill` are ordinary explicitly registered Tools.
 `Agent` registers none by default.

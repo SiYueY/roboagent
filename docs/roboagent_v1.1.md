@@ -2265,6 +2265,17 @@ normalize to ToolExecutionResult.error
 副作用是否发生，必须使用 `ToolEffectUnknown`。timeout/cancel 清理期间若没有得到
 上述明确信号，Runtime 对 `SIDE_EFFECTING` Tool 保守记录 `UNKNOWN`。
 
+同一原则也适用于正常 await 路径中的非声明异常和输出契约错误：
+
+| Tool kind | generic Python exception | invalid/non-canonical output |
+| --- | --- | --- |
+| `READ_ONLY` | `FAILED` | `FAILED` |
+| `SIDE_EFFECTING` | `UNKNOWN` | `UNKNOWN` |
+
+generic exception 对模型仍规范化为 `execution_error`；对于 `SIDE_EFFECTING`，其
+effect 使用 `effect_unknown`。invalid output 仍以 `tool_contract_error` 中止 batch，
+但 side-effecting effect 不得因此被错误标记为 `FAILED`。
+
 只在：
 
 ```text
