@@ -225,7 +225,7 @@ class SpeechSessionInputTests(unittest.IsolatedAsyncioTestCase):
         ])
         asr = _FakeASR()
         session = SpeechSession(
-            agent_session=object(), transport=transport, asr=asr, tts=_FakeTTS(),
+            session=object(), transport=transport, asr=asr, tts=_FakeTTS(),
             audio_processor=Processor(), vad=_ScriptedVAD([False, True, False]),
             turn_detector=TurnDetector(silence_ms=0, max_duration_ms=1000, idle_timeout_ms=1000),
         )
@@ -249,7 +249,7 @@ class SpeechSessionInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_releases_resources_after_transport_disconnect(self) -> None:
         transport = _DisconnectingTransport(())
         session = SpeechSession(
-            agent_session=object(), transport=transport, asr=_FakeASR(), tts=_FakeTTS(),
+            session=object(), transport=transport, asr=_FakeASR(), tts=_FakeTTS(),
             vad=_ScriptedVAD(()), turn_detector=TurnDetector(),
         )
         await session.close()

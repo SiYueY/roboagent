@@ -15,7 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from roboagent.agent import Agent
 from roboagent.config import load_app_config
-from roboagent.model import create_chat_model
+from roboagent.context import PromptInput
+from roboagent.model import create_model
 from roboagent.speech import SpeechConfig
 from speech_server import ConversationRegistry, install_speech_route
 from ui import chat_launch_options, create_demo
@@ -33,7 +34,10 @@ def main() -> None:
             "uv sync --extra gradio --extra speech"
         ) from exc
     config = load_app_config()
-    agent = Agent(create_chat_model(registry=config.to_model_registry()), tools=(), system_prompt=SYSTEM_PROMPT)
+    agent = Agent(
+        create_model(registry=config.to_model_registry()),
+        prompt=PromptInput(SYSTEM_PROMPT),
+    )
     registry = ConversationRegistry()
     demo = create_demo(agent, speech_registry=registry)
     from fastapi import FastAPI

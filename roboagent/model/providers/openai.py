@@ -6,12 +6,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from roboagent.model.client import OpenAICompatibleChatModel
+from roboagent.model.client import OpenAICompatibleModel
 from roboagent.model.providers.base import BaseModelConfig, merge_model_settings
 
 
 class OpenAIParams(BaseModel):
-    """Provider-specific runtime parameters for OpenAI chat models."""
+    """Provider-specific runtime parameters for OpenAI models."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -23,7 +23,6 @@ class OpenAIParams(BaseModel):
     max_tokens: int | None = Field(default=None, description="Maximum generated token count.")
     max_retries: int | None = Field(default=None, description="Maximum request retry attempts.")
     request_timeout: float | None = Field(default=None, description="Client request timeout in seconds.")
-    streaming: bool | None = Field(default=None, description="Whether to stream response chunks.")
     top_p: float | None = Field(default=None, description="Nucleus sampling probability mass.")
     reasoning_effort: str | None = Field(default=None, description="Reasoning effort level for capable models.")
     model_kwargs: dict[str, Any] = Field(default_factory=dict, description="Extra keyword arguments forwarded to the model.")
@@ -57,7 +56,7 @@ class OpenAIModelConfig(BaseModelConfig):
     params: OpenAIParams = Field(description="OpenAI runtime parameter set.")
 
 
-def create_openai_chat_model(config: OpenAIModelConfig, **overrides: Any) -> OpenAICompatibleChatModel:
+def create_openai_model(config: OpenAIModelConfig, **overrides: Any) -> OpenAICompatibleModel:
     """Create an OpenAI-compatible model from validated configuration.
 
     Args:
@@ -65,7 +64,7 @@ def create_openai_chat_model(config: OpenAIModelConfig, **overrides: Any) -> Ope
         **overrides: Runtime keyword overrides merged on top of static params.
 
     Returns:
-        A configured OpenAI chat model instance.
+        A configured OpenAI model instance.
 
     Raises:
         ValueError: If invalid runtime settings are supplied.
@@ -73,8 +72,7 @@ def create_openai_chat_model(config: OpenAIModelConfig, **overrides: Any) -> Ope
     base_settings = config.params.model_dump(exclude_none=True)
     settings = merge_model_settings(base_settings, overrides)
     settings["model_name"] = settings.pop("model")
-    settings.pop("streaming", None)
-    return OpenAICompatibleChatModel(**settings)
+    return OpenAICompatibleModel(**settings)
 
 
-__all__ = ["OpenAIModelConfig", "OpenAIParams", "create_openai_chat_model"]
+__all__ = ["OpenAIModelConfig", "OpenAIParams", "create_openai_model"]

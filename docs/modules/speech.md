@@ -25,7 +25,7 @@ VAD / Turn Handling
    ↓
 Streaming ASR
    ↓
-AgentSession
+Session
    ↓
 Streaming TTS
    ↓
@@ -80,7 +80,7 @@ TurnDetector
         ↓
 Streaming ASR
         ↓
-AgentSession
+Session
         ↓
 Streaming TTS
         ↓
@@ -228,7 +228,7 @@ TTS 首包多久？
 重构后的统一架构：
 
 ```text
-                         AgentSession
+                         Session
                               ▲
                               │
                         SpeechSession
@@ -249,7 +249,7 @@ TTS 首包多久？
         └──────────────► ASR
                           │
                           ▼
-                     AgentSession
+                     Session
                           │
                           ▼
                          TTS
@@ -1148,7 +1148,7 @@ VAD / Turn
 ASR
 → 语音转文字
 
-AgentSession
+Session
 → 理解、推理与工具执行
 
 TTS

@@ -1,17 +1,16 @@
-"""Eager V1 run with safe public event replay and cooperative cancellation."""
+"""One eager, cancellable RoboAgent execution instance."""
 
 from __future__ import annotations
+
 import asyncio
 import inspect
-import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AsyncIterator
 from uuid import uuid4
-from roboagent.agent.loop import MaxTurnsError, run_loop
+
+from roboagent.agent.hooks import RunEndHookContext, RunHookContext
+from roboagent.agent.loop import MaxTurnsError, RunCancelled, _RunFailure, run_loop
 from roboagent.agent.types import RunConfig, RunResult
-from roboagent.agent.types import PendingControl
-from roboagent.message import UserMessage
-from roboagent.runtime.event import AgentEvent
+from roboagent.runtime.event import EventSubscription, EventSubscriptionConfig, RunEventEmitter
 from roboagent.runtime.types import (
     CancellationReason,
     RunContext,
@@ -19,300 +18,235 @@ from roboagent.runtime.types import (
     RunPhase,
     RunState,
     RunStatus,
-    RunTerminationReason,
     RuntimeCancellation,
-    ContextPreparationError,
-    MediaResolutionError,
-    ModelCapabilityError,
-    ModelProtocolError,
 )
+from roboagent.tool import ToolEffectRecord, ToolExecutor, retry_safe
+
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from roboagent.agent.session import AgentSession
-
-
-class RunFinishedError(RuntimeError):
-    pass
-
-
-_END = object()
-_LOG = logging.getLogger(__name__)
+    from roboagent.agent.session import Session
 
 
 @dataclass(slots=True)
-class AgentRun:
-    session: AgentSession
+class Run:
+    session: "Session"
     config: RunConfig
-    metadata: dict[str, object]
     run_id: str = field(default_factory=lambda: uuid4().hex)
-    _token: RuntimeCancellation = field(default_factory=RuntimeCancellation, init=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False)
-    _result: asyncio.Future[RunResult] | None = field(default=None, init=False)
-    _history: list[AgentEvent] = field(default_factory=list, init=False)
-    _queues: set[asyncio.Queue[AgentEvent | object]] = field(
-        default_factory=set, init=False
-    )
-    _sequence: int = field(default=0, init=False)
-    _state: RunState = field(
-        default_factory=lambda: RunState(RunStatus.CREATED, RunPhase.IDLE, 0),
-        init=False,
-    )
-    _controls: list[PendingControl] = field(default_factory=list, init=False)
-    _control_sequence: int = field(default=0, init=False)
-    _control_signal: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _terminalizing: bool = field(default=False, init=False)
+    _cancellation: RuntimeCancellation = field(default_factory=RuntimeCancellation, init=False, repr=False)
+    _events: RunEventEmitter = field(init=False, repr=False)
+    _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _result: asyncio.Future[RunResult] | None = field(default=None, init=False, repr=False)
+    _state: RunState = field(default_factory=lambda: RunState(RunPhase.IDLE, 0), init=False, repr=False)
+    _skill_catalog: object | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._events = RunEventEmitter(self.run_id)
 
     @property
     def state(self) -> RunState:
         return self._state
 
-    def _set_phase(self, phase: RunPhase, turn: int, **kwargs: object) -> None:
-        """Publish a media-safe snapshot; canonical messages stay in Session."""
-        self._state = RunState(RunStatus.RUNNING, phase, turn, **kwargs)
-
     def start_eager(self) -> None:
-        if self._task is None:
-            loop = asyncio.get_running_loop()
-            self._result = loop.create_future()
-            self._task = loop.create_task(self._execute())
+        if self._task is not None:
+            raise RuntimeError("Run already started.")
+        loop = asyncio.get_running_loop()
+        self._result = loop.create_future()
+        self._task = loop.create_task(self._execute())
 
     def cancel(self) -> None:
-        if not self._terminalizing and not self._token.cancelled:
-            self._token.cancel(CancellationReason.USER)
-            asyncio.create_task(
-                self._emit(
-                    "cancellation_requested", status=CancellationReason.USER.value
-                )
-            )
-
-    def steer(self, message: str | UserMessage) -> None:
-        self._receive_control("steer", message)
-
-    def follow_up(self, message: str | UserMessage) -> None:
-        self._receive_control("follow_up", message)
-
-    def _receive_control(self, kind: str, message: str | UserMessage) -> None:
-        if self._terminalizing or self._result is not None and self._result.done():
-            raise RunFinishedError("Run is already terminal.")
-        user = (
-            message
-            if isinstance(message, UserMessage)
-            else UserMessage(message, limits=self.session._media_limits)
-        )
-        self._control_sequence += 1
-        self._controls.append(PendingControl(self._control_sequence, kind, user))
-        self._control_signal.set()
-        # Events are safe: only type and text are exposed, not raw media.
-        asyncio.create_task(self._emit(kind + "_received", text=None))
-
-    def consume_controls(self) -> tuple[PendingControl, ...]:
-        controls = tuple(self._controls)
-        self._controls.clear()
-        return controls
-
-    def observe_controls(self) -> tuple[PendingControl, ...]:
-        """Expose pending controls to scheduling without committing them."""
-        return tuple(self._controls)
-
-    async def wait_for_control(self, after_sequence: int) -> int:
-        """Wait for a control newer than ``after_sequence`` without consuming it."""
-        while self._control_sequence <= after_sequence:
-            await self._control_signal.wait()
-            self._control_signal.clear()
-        return self._control_sequence
+        self._cancellation.cancel(CancellationReason.USER)
 
     async def result(self) -> RunResult:
-        assert self._result is not None
+        if self._result is None:
+            raise RuntimeError("Run has not started.")
         return await asyncio.shield(self._result)
 
-    def events(self) -> AsyncIterator[AgentEvent]:
-        # Replay is part of the public contract: a terminal subscriber must
-        # receive the whole retained history, while a live slow subscriber is
-        # still disconnected after its own 128-event backlog.
-        queue: asyncio.Queue[AgentEvent | object] = asyncio.Queue(
-            len(self._history) + 129
-        )
-        # Snapshot and register run synchronously on the event loop: no replay/live gap.
-        for item in self._history:
-            queue.put_nowait(item)
-        if self._task is None or self._task.done():
-            queue.put_nowait(_END)
-        else:
-            self._queues.add(queue)
+    def subscribe(self, config: EventSubscriptionConfig | None = None) -> EventSubscription:
+        return self._events.subscribe(config)
 
-        async def iterate() -> AsyncIterator[AgentEvent]:
-            try:
-                while (item := await queue.get()) is not _END:
-                    yield item  # type: ignore[misc]
-            finally:
-                self._queues.discard(queue)
-
-        return iterate()
-
-    async def _emit(self, type: str, **kwargs: object) -> None:
-        self._sequence += 1
-        event = AgentEvent(self.run_id, self._sequence, type, **kwargs)
-        self._history.append(event)
-        for queue in tuple(self._queues):
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                # A disconnected slow subscriber must eventually terminate its
-                # iterator instead of waiting forever after its backlog drains.
-                self._queues.discard(queue)
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(_END)
-                except asyncio.QueueEmpty:
-                    pass
-
-    async def _hook(self, name: str, *args: object) -> None:
-        hooks = self.session.agent.hooks
-        callback = getattr(hooks, name, None) if hooks is not None else None
-        if callback is None:
-            return
-        try:
-            value = callback(*args)
-            if inspect.isawaitable(value):
-                await value
-        except Exception as exc:
-            # Do not log hook arguments: they may include transcript media.
-            _LOG.warning(
-                "RoboAgent lifecycle hook %s failed (%s)", name, type(exc).__name__
-            )
+    def _set_state(self, phase: RunPhase, turn: int, **values: object) -> None:
+        self._state = RunState(phase, turn, **values)
 
     async def _execute(self) -> None:
-        self._state = RunState(RunStatus.RUNNING, RunPhase.IDLE, 0)
-        await self._emit("run_started")
-        reason = RunTerminationReason.RUNTIME_ERROR
-        error = None
-        final = None
+        context = RunContext(self.run_id, self.session.session_id, self._cancellation)
+        status = RunStatus.FAILED
+        output = None
+        usage = None
+        error: RunError | None = None
+        cleanup_errors: list[RunError] = []
+        effects: tuple[ToolEffectRecord, ...] = ()
         turns = 0
-        timeout = asyncio.create_task(self._timeout()) if self.config.timeout else None
+        timeout_task = asyncio.create_task(self._timeout()) if self.config.timeout else None
+        manager = self.session.agent.skill_manager
         try:
-            context = RunContext(
-                self.session.session_id,
-                self.run_id,
-                self._token,
-                metadata=self.metadata,
+            await self._events.emit("run.started")
+            await self._invoke_hooks("on_run_start", RunHookContext(context))
+            tool_executor = ToolExecutor(
+                registry=self.session.agent.tool_registry,
+                policy=self.session.agent.tool_policy,
+                hooks=self.session.agent.hooks,
+                events=self._events,
+                config=self.config.tool_executor,
+                hook_timeout=self.config.hook_timeout,
             )
-            await self._hook("on_run_start", context)
-            final, turns = await run_loop(
+            outcome = await run_loop(
                 agent=self.session.agent,
                 session=self.session,
                 run_context=context,
                 config=self.config,
-                emit=self._emit,
-                consume_controls=self.consume_controls,
-                observe_controls=self.observe_controls,
-                wait_for_control=self.wait_for_control,
-                update_state=self._set_phase,
-                hook=self._hook,
+                events=self._events,
+                invoke_hooks=self._invoke_hooks,
+                update_state=self._set_state,
+                guidance_metadata=tuple(getattr(self._skill_catalog, "metadata", ())),
+                tool_executor=tool_executor,
             )
-            reason = RunTerminationReason.COMPLETED
+            status = RunStatus.COMPLETED
+            output, usage, effects, turns = outcome.output, outcome.usage, outcome.effects, outcome.turns
         except MaxTurnsError as exc:
-            turns = exc.turns
-            reason = RunTerminationReason.MAX_TURNS
-            error = RunError(reason.value, "Run reached its configured limit.")
-        except TimeoutError:
-            turns = self._state.turn
-            reason = RunTerminationReason.TIMED_OUT
-            error = RunError(reason.value, "Run reached its configured limit.")
+            status = RunStatus.FAILED
+            error = RunError("max_turns", "Run reached its maximum model turns.")
+            output, usage, effects, turns = (
+                exc.outcome.output,
+                exc.outcome.usage,
+                exc.outcome.effects,
+                exc.outcome.turns,
+            )
+        except _RunFailure as exc:
+            status = RunStatus.FAILED
+            error = exc.error
+            effects = exc.effects
+            output, usage, turns = exc.output, exc.usage, exc.turns or self._state.turn
+        except RunCancelled as exc:
+            effects = exc.effects
+            output, usage, turns = exc.output, exc.usage, exc.turns or self._state.turn
+            if self._cancellation.reason is CancellationReason.TIMEOUT:
+                status = RunStatus.FAILED
+                error = RunError("timeout", "Run timed out.")
+            else:
+                status = RunStatus.CANCELLED
         except asyncio.CancelledError:
             turns = self._state.turn
-            self._token.cancel(CancellationReason.RUN_TERMINATED)
-            reason = (
-                RunTerminationReason.TIMED_OUT
-                if self._token.reason is CancellationReason.TIMEOUT
-                else RunTerminationReason.CANCELLED
-            )
-        except Exception as exc:
-            turns = self._state.turn
-            if self._token.reason is CancellationReason.TIMEOUT:
-                reason = RunTerminationReason.TIMED_OUT
-            elif self._token.cancelled:
-                reason = RunTerminationReason.CANCELLED
-            elif str(exc) == "tool_policy_fail_run":
-                reason = RunTerminationReason.TOOL_ERROR
-            elif isinstance(exc, ContextPreparationError):
-                reason = RunTerminationReason.CONTEXT_ERROR
-            elif isinstance(exc, MediaResolutionError):
-                reason = RunTerminationReason.MODEL_ERROR
+            if self._cancellation.reason is CancellationReason.TIMEOUT:
+                status = RunStatus.FAILED
+                error = RunError("timeout", "Run timed out.")
             else:
-                reason = RunTerminationReason.MODEL_ERROR
-            code = (
-                exc.code.value
-                if isinstance(exc, MediaResolutionError)
-                else exc.code
-                if isinstance(exc, (ModelCapabilityError, ModelProtocolError))
-                else reason.value
-            )
-            error = RunError(
-                code, "Run execution failed.", cause_type=type(exc).__name__
-            )
-        finally:
-            if timeout:
-                timeout.cancel()
-        # Once the loop has stopped, no Model/Tool work is in flight.  This is
-        # the final safe boundary mandated for every normal terminal outcome.
-        self._terminalizing = True
-        uncommitted: tuple[PendingControl, ...] = ()
-        terminal_controls = self.consume_controls()
-        try:
-            for index, control in enumerate(terminal_controls):
-                self.session._append(control.message)
-        except Exception as exc:
-            uncommitted = terminal_controls[index:]
-            reason = RunTerminationReason.INVALID_STATE
-            error = RunError(
-                reason.value,
-                "Could not commit pending controls.",
-                cause_type=type(exc).__name__,
-            )
-        status = {
-            RunTerminationReason.COMPLETED: RunStatus.COMPLETED,
-            RunTerminationReason.CANCELLED: RunStatus.CANCELLED,
-            RunTerminationReason.TIMED_OUT: RunStatus.TIMED_OUT,
-            RunTerminationReason.MAX_TURNS: RunStatus.MAX_TURNS,
-        }.get(reason, RunStatus.FAILED)
-        try:
-            self.session._finish(self)
+                status = RunStatus.CANCELLED
         except Exception as exc:
             status = RunStatus.FAILED
-            reason = RunTerminationReason.INVALID_STATE
-            error = RunError(
-                reason.value,
-                "Canonical transcript validation failed.",
-                cause_type=type(exc).__name__,
-            )
-        self._state = RunState(status, RunPhase.TERMINAL, turns, error=error)
-        await self._emit(
-            "run_" + status.value,
-            turn=turns,
-            status=status.value,
-            error_code=error.code if error else None,
-            error=error.message if error else None,
-        )
-        assert self._result is not None
-        result = RunResult(status, final, turns, reason, error, uncommitted)
-        await self._hook("on_run_end", result)
-        self._result.set_result(result)
-        for queue in tuple(self._queues):
+            error = RunError("runtime_error", "Run execution failed.", cause_type=type(exc).__name__)
+            turns = self._state.turn
+        finally:
+            if timeout_task is not None:
+                timeout_task.cancel()
+                await asyncio.gather(timeout_task, return_exceptions=True)
+
+        provisional = status
+        end_context = RunEndHookContext(context, provisional, error, effects)
+        for hook in self.session.agent.hooks:
+            callback = getattr(hook, "on_run_end", None)
+            if callback is None:
+                continue
             try:
-                queue.put_nowait(_END)
-            except asyncio.QueueFull:
-                try:
-                    queue.get_nowait()
-                    queue.put_nowait(_END)
-                except asyncio.QueueEmpty:
-                    pass
-        self._queues.clear()
+                value = callback(end_context)
+                if not inspect.isawaitable(value):
+                    raise TypeError("on_run_end hook must be async.")
+                if self.config.cleanup_hook_timeout is None:
+                    hook_result = await value
+                else:
+                    hook_result = await asyncio.wait_for(value, self.config.cleanup_hook_timeout)
+                if hook_result is not None:
+                    raise TypeError("on_run_end hook must return None.")
+            except BaseException as exc:
+                cleanup = RunError("cleanup_hook_error", "on_run_end hook failed.", cause_type=type(exc).__name__)
+                if provisional is RunStatus.COMPLETED and error is None:
+                    status = RunStatus.FAILED
+                    error = cleanup
+                else:
+                    cleanup_errors.append(cleanup)
+        if manager is not None:
+            try:
+                manager.release_run(self.run_id)
+            except Exception as exc:
+                release_error = RunError("cleanup_error", "Skill catalog cleanup failed.", cause_type=type(exc).__name__)
+                if status is RunStatus.COMPLETED and error is None:
+                    status = RunStatus.FAILED
+                    error = release_error
+                else:
+                    cleanup_errors.append(release_error)
+        try:
+            await self.session.release_run(self.run_id)
+        except Exception as exc:
+            release_error = RunError("cleanup_error", "Session ownership cleanup failed.", cause_type=type(exc).__name__)
+            if status is RunStatus.COMPLETED and error is None:
+                status = RunStatus.FAILED
+                error = release_error
+            else:
+                cleanup_errors.append(release_error)
+        self._state = RunState(RunPhase.TERMINAL, turns, status=status, error=error)
+        result = RunResult(
+            self.run_id,
+            status,
+            output,
+            usage,
+            error,
+            tuple(cleanup_errors),
+            effects,
+            retry_safe(effects),
+        )
+        terminal = {
+            RunStatus.COMPLETED: "run.completed",
+            RunStatus.FAILED: "run.failed",
+            RunStatus.CANCELLED: "run.cancelled",
+        }[status]
+        await self._events.emit(terminal, status=status.value, error_code=error.code if error else None)
+        assert self._result is not None
+        self._result.set_result(result)
+
+    async def _invoke_hooks(self, name: str, *args: object) -> tuple[object, ...]:
+        results: list[object] = []
+        for hook in self.session.agent.hooks:
+            callback = getattr(hook, name, None)
+            if callback is None:
+                continue
+            try:
+                value = callback(*args)
+                if not inspect.isawaitable(value):
+                    raise TypeError(f"{name} hook must be async.")
+                value = await self._await_hook(value)
+                if name in {"on_run_start", "after_model"} and value is not None:
+                    raise TypeError(f"{name} hook must return None.")
+                results.append(value)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise _RunFailure(RunError("hook_error", f"{name} hook failed.", cause_type=type(exc).__name__)) from exc
+        return tuple(results)
+
+    async def _await_hook(self, value: object) -> object:
+        task = asyncio.ensure_future(value)  # type: ignore[arg-type]
+        cancelled = asyncio.create_task(self._cancellation.wait_cancelled())
+        try:
+            done, _ = await asyncio.wait(
+                {task, cancelled},
+                timeout=self.config.hook_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancelled in done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise asyncio.CancelledError()
+            if task not in done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self._cancellation.raise_if_cancelled()
+                raise TimeoutError("Hook timed out.")
+            return task.result()
+        finally:
+            cancelled.cancel()
+            await asyncio.gather(cancelled, return_exceptions=True)
 
     async def _timeout(self) -> None:
         assert self.config.timeout is not None
         await asyncio.sleep(self.config.timeout)
-        if not self._token.cancelled:
-            self._token.cancel(CancellationReason.TIMEOUT)
-            await self._emit(
-                "cancellation_requested", status=CancellationReason.TIMEOUT.value
-            )
+        self._cancellation.cancel(CancellationReason.TIMEOUT)

@@ -36,8 +36,8 @@ _STOP = object()
 
 
 class SpeechSession:
-    """Bridge streaming audio services to one existing text ``AgentSession``."""
-    def __init__(self, *, agent_session, transport: SpeechTransport, asr: ASR, tts: TTS,
+    """Bridge streaming audio services to one existing text ``Session``."""
+    def __init__(self, *, session, transport: SpeechTransport, asr: ASR, tts: TTS,
                  vad: VAD, turn_detector: TurnDetector, segmenter: TextSegmenter | None = None,
                  audio_processor: AudioProcessor | None = None, interruption_detector: InterruptionDetector | None = None,
                  capture_format: AudioFormat = DEFAULT_INPUT_FORMAT, render_format: AudioFormat = DEFAULT_OUTPUT_FORMAT,
@@ -47,7 +47,7 @@ class SpeechSession:
                  # provider/network stall.
                  queue_size: int = 100,
                  diagnostics: bool = False) -> None:
-        self.agent_session = agent_session
+        self.session = session
         self.transport, self.asr, self.tts = transport, asr, tts
         self.vad, self.turn_detector = vad, turn_detector
         self.audio_processor = audio_processor or PassthroughAudioProcessor()
@@ -341,12 +341,14 @@ class SpeechSession:
     async def _consume_agent(self, text: str, generation: int) -> None:
         run = None
         try:
-            # Text chat and voice intentionally share one AgentSession.  Wait
+            # Text chat and voice intentionally share one Session.  Wait
             # for a text-originated run to finish; newer voice transcripts
             # supersede this pending one instead of creating concurrent runs.
             while generation == self._response_generation:
                 try:
-                    run = self.agent_session.start(text)
+                    from roboagent.message import UserMessage
+
+                    run = self.session.start(UserMessage(text))
                     break
                 except SessionBusyError:
                     await asyncio.sleep(0.05)
@@ -354,14 +356,15 @@ class SpeechSession:
                 return
             self._agent_run = run
             await self._emit(ResponseStartedEvent())
-            async for event in run.events():
+            async for event in run.subscribe():
                 if generation != self._response_generation:
                     run.cancel()
                     return
-                if isinstance(event, AgentEvent) and event.type == "model_delta" and event.text:
+                if isinstance(event, AgentEvent) and event.type == "model.delta" and event.payload.get("text"):
                     self._metrics_by_response.get(generation, self._metrics).mark("agent_first_token_at")
-                    await self._emit(ResponseTextEvent(delta=event.text))
-                    for segment in self.segmenter.push(event.text):
+                    delta = str(event.payload["text"])
+                    await self._emit(ResponseTextEvent(delta=delta))
+                    for segment in self.segmenter.push(delta):
                         await self._tts_queue.put((segment, generation))
             tail = self.segmenter.flush()
             if tail:

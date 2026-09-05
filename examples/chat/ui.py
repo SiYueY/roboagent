@@ -22,8 +22,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import gradio as gr
 
-from roboagent.agent import Agent, AgentSession
-from roboagent.runtime import AgentEvent, BytesSource, ImageContent, RunStatus, TextContent, UserMessage, modality
+from roboagent.agent import Agent, Session
+from roboagent.message import BytesSource, ImageContent, TextContent, UserMessage
+from roboagent.runtime import AgentEvent, RunStatus, modality
 from roboagent.vision import VisionContext, VisionFrame
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class BrowserConversation:
     """One browser-local conversation and its independent Agent transcript."""
 
     id: str
-    session: AgentSession
+    session: Session
     history: ChatHistory = field(default_factory=list)
     title: str = DEFAULT_TITLE
     updated_at: float = field(default_factory=time)
@@ -84,7 +85,7 @@ class ChatPageState:
 
 
 def new_conversation(agent: Agent, speech_registry=None) -> BrowserConversation:
-    """Create an empty conversation with its own AgentSession."""
+    """Create an empty conversation with its own Session."""
     conversation = BrowserConversation(id=uuid4().hex, session=agent.new_session())
     if speech_registry is not None:
         conversation.voice_token = speech_registry.register(conversation)
@@ -181,7 +182,7 @@ def select_conversation(
     conversation_id: str | None,
     state: ChatPageState,
 ) -> ChatViewUpdate:
-    """Switch the displayed history without recreating the selected AgentSession."""
+    """Switch the displayed history without recreating the selected Session."""
     if conversation_id and any(item.id == conversation_id for item in state.conversations):
         state.active_id = conversation_id
     conversation = active_conversation(state)
@@ -227,9 +228,9 @@ async def chat(
     try:
         yield view_update(conversation, state)
         assistant_text = ""
-        async for event in run.events():
-            if isinstance(event, AgentEvent) and event.type == "model_delta" and event.text:
-                assistant_text += event.text
+        async for event in run.subscribe():
+            if isinstance(event, AgentEvent) and event.type == "model.delta" and event.payload.get("text"):
+                assistant_text += str(event.payload["text"])
                 conversation.history = [
                     *conversation.history[:-1],
                     {"role": "assistant", "content": assistant_text},

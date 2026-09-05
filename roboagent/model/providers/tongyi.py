@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from roboagent.model.client import OpenAICompatibleChatModel
+from roboagent.model.client import OpenAICompatibleModel
 from roboagent.model.providers.base import BaseModelConfig, merge_model_settings
 
 
@@ -25,7 +25,6 @@ class TongyiParams(BaseModel):
     temperature: float | None = Field(default=None, description="Sampling temperature override.")
     top_p: float | None = Field(default=None, description="Nucleus sampling probability mass.")
     max_retries: int | None = Field(default=None, description="Maximum request retry attempts.")
-    streaming: bool | None = Field(default=None, description="Whether to stream response chunks.")
     request_timeout: float | None = Field(default=None, description="Client request timeout in seconds.")
     base_url: str | None = Field(default=None, description="OpenAI-compatible endpoint override.")
     model_kwargs: dict[str, Any] = Field(default_factory=dict, description="Extra keyword arguments forwarded to the model.")
@@ -56,7 +55,7 @@ class TongyiModelConfig(BaseModelConfig):
     params: TongyiParams = Field(description="Tongyi runtime parameter set.")
 
 
-def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> OpenAICompatibleChatModel:
+def create_tongyi_model(config: TongyiModelConfig, **overrides: Any) -> OpenAICompatibleModel:
     """Create a Tongyi OpenAI-compatible model from validated configuration.
 
     Args:
@@ -64,7 +63,7 @@ def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> Ope
         **overrides: Runtime keyword overrides merged on top of static params.
 
     Returns:
-        A configured Tongyi chat model instance.
+        A configured Tongyi model instance.
 
     Raises:
         ValueError: If invalid runtime settings are supplied.
@@ -74,8 +73,7 @@ def create_tongyi_chat_model(config: TongyiModelConfig, **overrides: Any) -> Ope
     settings["model_name"] = settings.pop("model")
     settings["api_key"] = settings.get("api_key") or os.getenv("DASHSCOPE_API_KEY")
     settings["base_url"] = settings.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    settings.pop("streaming", None)
-    return OpenAICompatibleChatModel(**settings)
+    return OpenAICompatibleModel(**settings)
 
 
-__all__ = ["TongyiModelConfig", "TongyiParams", "create_tongyi_chat_model"]
+__all__ = ["TongyiModelConfig", "TongyiParams", "create_tongyi_model"]

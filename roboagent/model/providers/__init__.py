@@ -9,17 +9,17 @@ from pydantic import Field
 from roboagent.model.providers.deepseek import (
     DeepSeekModelConfig,
     DeepSeekParams,
-    create_deepseek_chat_model,
+    create_deepseek_model,
 )
 from roboagent.model.providers.openai import (
     OpenAIModelConfig,
     OpenAIParams,
-    create_openai_chat_model,
+    create_openai_model,
 )
 from roboagent.model.providers.tongyi import (
     TongyiModelConfig,
     TongyiParams,
-    create_tongyi_chat_model,
+    create_tongyi_model,
 )
 
 ProviderModelConfig = Annotated[
@@ -37,7 +37,7 @@ __all__ = [
     "ProviderModelConfig",
     "TongyiModelConfig",
     "TongyiParams",
-    "create_deepseek_chat_model",
-    "create_openai_chat_model",
-    "create_tongyi_chat_model",
+    "create_deepseek_model",
+    "create_openai_model",
+    "create_tongyi_model",
 ]

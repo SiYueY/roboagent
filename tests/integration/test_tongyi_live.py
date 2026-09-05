@@ -7,9 +7,9 @@ import unittest
 import zlib
 
 from roboagent.agent import Agent, RunConfig
-from roboagent.message import (AssistantMessage, BytesSource, ImageContent,
-    TextContent, ToolCall, ToolCallStatus, ToolResultMessage, UserMessage)
-from roboagent.model.client import OpenAICompatibleChatModel
+from roboagent.message import (AssistantMessage, BytesSource, FrozenJsonObject, ImageContent,
+    TextContent, ToolCall, ToolResultMessage, ToolResultStatus, UserMessage)
+from roboagent.model.client import OpenAICompatibleModel
 
 
 _LIVE = os.getenv("ROBOAGENT_LIVE_PROVIDER_TEST") == "1" and bool(os.getenv("DASHSCOPE_API_KEY"))
@@ -25,9 +25,9 @@ def _png() -> bytes:
 _PNG = _png()
 
 
-def _model() -> OpenAICompatibleChatModel:
-    return OpenAICompatibleChatModel(
-        "qwen3.7-flash",
+def _model() -> OpenAICompatibleModel:
+    return OpenAICompatibleModel(
+        model_name="qwen3.7-flash",
         api_key=os.environ["DASHSCOPE_API_KEY"],
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         temperature=0,
@@ -40,15 +40,15 @@ def _model() -> OpenAICompatibleChatModel:
 class TongyiLiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_text_stream_completes(self):
         result = await Agent(_model()).new_session().run(
-            "Reply with exactly: OK",
+            UserMessage("Reply with exactly: OK"),
             config=RunConfig(timeout=45),
         )
         self.assertEqual(
             result.status.value,
             "completed",
-            f"reason={result.termination_reason.value}, error={result.error!r}",
+            f"error={result.error!r}",
         )
-        self.assertIsNotNone(result.final_message)
+        self.assertIsNotNone(result.output)
 
     async def test_text_and_image_stream_completes(self):
         session = Agent(_model()).new_session()
@@ -60,21 +60,21 @@ class TongyiLiveTests(unittest.IsolatedAsyncioTestCase):
             config=RunConfig(timeout=45),
         )
         self.assertEqual(result.status.value, "completed", repr(result.error))
-        self.assertIsNotNone(result.final_message)
+        self.assertIsNotNone(result.output)
 
     async def test_image_tool_result_stream_completes(self):
-        call = ToolCall("image_call", "return_image", "{}", {})
+        call = ToolCall("image_call", "return_image", FrozenJsonObject())
         session = Agent(_model()).new_session((
             UserMessage("Inspect the tool result and reply with exactly: OK."),
             AssistantMessage(tool_calls=(call,)),
             ToolResultMessage(
-                "image_call", "return_image", ToolCallStatus.COMPLETED,
+                "image_call", "return_image", ToolResultStatus.SUCCESS,
                 (ImageContent(BytesSource(_PNG), "image/png"),),
             ),
         ))
-        result = await session.continue_run(config=RunConfig(timeout=45)).result()
+        result = await session.run(config=RunConfig(timeout=45))
         self.assertEqual(result.status.value, "completed", repr(result.error))
-        self.assertIsNotNone(result.final_message)
+        self.assertIsNotNone(result.output)
 
 
 if __name__ == "__main__":

@@ -10,11 +10,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from roboagent.config.model_config import load_yaml_mapping, resolve_model_config_path
-from roboagent.config.skill_config import SkillConfig
-from roboagent.config.subagent_config import SubagentConfig
 from roboagent.model.providers import ProviderModelConfig
 from roboagent.model.registry import ModelRegistry
-from roboagent.skill import SkillManager
+from roboagent.skill import SkillConfig, SkillManager
 from roboagent.speech.config import SpeechConfig
 
 
@@ -24,9 +22,8 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     default_model: str | None = Field(default=None, description="Default configured model name.")
-    models: list[ProviderModelConfig] = Field(default_factory=list, description="Provider-backed chat models.")
+    models: list[ProviderModelConfig] = Field(default_factory=list, description="Provider-backed models.")
     skills: SkillConfig = Field(default_factory=SkillConfig, description="Skill subsystem configuration.")
-    subagents: list[SubagentConfig] = Field(default_factory=list, description="Configured sub-agent profiles.")
     speech: SpeechConfig | None = Field(default=None, description="Optional real-time speech configuration.")
 
     @model_validator(mode="after")
@@ -38,11 +35,6 @@ class AppConfig(BaseModel):
 
         if self.default_model is not None and self.default_model not in set(model_names):
             raise ValueError(f"default_model '{self.default_model}' is not present in models[].name")
-
-        subagent_ids = [subagent.id for subagent in self.subagents]
-        duplicate_subagents = sorted(name for name, count in Counter(subagent_ids).items() if count > 1)
-        if duplicate_subagents:
-            raise ValueError(f"Duplicate subagent ids: {', '.join(duplicate_subagents)}")
 
         return self
 
@@ -62,7 +54,7 @@ class AppConfig(BaseModel):
 
     def create_skill_manager(self) -> SkillManager:
         """Create a skill manager using configured skill sources."""
-        return SkillManager(sources=self.skills.sources)
+        return SkillManager(config=self.skills)
 
 
 def load_app_config(path: str | Path | None = None) -> AppConfig:

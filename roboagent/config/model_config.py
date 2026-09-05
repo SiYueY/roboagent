@@ -1,4 +1,4 @@
-"""Configuration models for provider-backed chat model settings."""
+"""Configuration models for provider-backed model settings."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class ModelsAppConfig(BaseModel):
-    """Application-level container for chat model configurations.
+    """Application-level container for model configurations.
 
     Attributes:
         default_model: Optional default model name used when callers do not

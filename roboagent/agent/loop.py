@@ -1,324 +1,296 @@
-"""Canonical V1 model/tool turn orchestration."""
+"""Capability-neutral Runtime orchestration loop."""
 
 from __future__ import annotations
+
 import asyncio
-import json
-from typing import TYPE_CHECKING, Callable
-from roboagent.agent.executor import (
-    DefaultToolExecutionPolicy,
-    ToolExecutor,
-    tool_result,
-)
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+from roboagent.agent.hooks import HookDecision, ModelHookContext
 from roboagent.agent.types import RunConfig
-from roboagent.model.client import ChatModel
-from roboagent.message import (
-    AssistantMessage,
-    ProtocolError,
-    TextContent,
-    ToolCall,
-)
-from roboagent.runtime.types import (
-    ContentCompleted,
-    ContentSummary,
-    ModelCapabilities,
-    ModelCompleted,
-    ModelContext,
-    ContextPreparationError,
-    MediaResolutionError,
-    ModelCapabilityError,
-    ModelFailed,
-    ModelProtocolError,
-    ModelRequest,
-    Modality,
-    RunContext,
-    RunPhase,
-    TextDelta,
-    ToolCallDelta,
-    ToolCallSummary,
-    content_summary,
-    modality,
+from roboagent.context import ContextSnapshot, ModelContext
+from roboagent.message import AssistantMessage
+from roboagent.model import Model, ModelError, ModelResponse, ModelSettings, TextDelta, Usage, collect_model_stream
+from roboagent.runtime.event import RunEventEmitter
+from roboagent.runtime.types import RunContext, RunError, RunPhase, ToolCallSummary
+from roboagent.tool import (
+    ToolBatchAborted,
+    ToolBatchCancelled,
+    ToolContext,
+    ToolEffectRecord,
+    ToolExecutor,
+    committed_effects,
+    result_message,
 )
 
 if TYPE_CHECKING:
     from roboagent.agent.agent import Agent
-    from roboagent.agent.session import AgentSession
+    from roboagent.agent.session import Session
 
 
 class MaxTurnsError(Exception):
-    def __init__(self, turns: int) -> None:
-        self.turns = turns
+    def __init__(self, outcome: "LoopOutcome") -> None:
+        self.outcome = outcome
         super().__init__("max_turns")
 
 
-def _validate_input(capabilities: ModelCapabilities, context: ModelContext) -> None:
-    for message in context.messages:
-        allowed = (
-            capabilities.tool_result_modalities
-            if message.role == "tool"
-            else capabilities.input_modalities
-        )
-        if any(modality(item) not in allowed for item in message.content):
-            raise ModelCapabilityError("unsupported_input_modality")
-    if context.tools and not capabilities.supports_tools:
-        raise ModelCapabilityError("model_does_not_support_tools")
+class RunCancelled(asyncio.CancelledError):
+    def __init__(
+        self,
+        effects: tuple[ToolEffectRecord, ...] = (),
+        output: AssistantMessage | None = None,
+        usage: Usage | None = None,
+        turns: int = 0,
+    ) -> None:
+        self.effects = effects
+        self.output = output
+        self.usage = usage
+        self.turns = turns
+        super().__init__("Run cancelled.")
 
 
-async def collect_model(
-    model: ChatModel,
-    request: ModelRequest,
-    emit: Callable[..., object],
-    update_state: Callable[..., object] | None = None,
-) -> AssistantMessage:
-    text = ""
-    content: list[object] = []
-    calls: dict[int, dict[str, str]] = {}
-    async for item in model.stream(request, request.run_context.cancellation):
-        if isinstance(item, TextDelta):
-            text += item.text
-            if update_state:
-                update_state(
-                    RunPhase.MODEL,
-                    request.run_context.turn,
-                    streaming_content=tuple(content_summary(value) for value in content)
-                    + (ContentSummary(Modality.TEXT, size=len(text)),),
-                )
-            await emit("model_delta", text=item.text, content=())
-        elif isinstance(item, ContentCompleted):
-            if isinstance(item.content, TextContent):
-                raise ValueError("ContentCompleted cannot contain TextContent")
-            if text:
-                content.append(TextContent(text))
-                text = ""
-            content.append(item.content)
-            if update_state:
-                update_state(
-                    RunPhase.MODEL,
-                    request.run_context.turn,
-                    streaming_content=tuple(
-                        content_summary(value) for value in content
-                    ),
-                )
-            await emit("model_delta", content=(content_summary(item.content),))
-        elif isinstance(item, ToolCallDelta):
-            part = calls.setdefault(item.index, {"id": "", "name": "", "arguments": ""})
-            if item.call_id and part["id"] and part["id"] != item.call_id:
-                raise ModelProtocolError("conflicting_tool_call_id")
-            if item.name and part["name"] and part["name"] != item.name:
-                raise ModelProtocolError("conflicting_tool_call_name")
-            part["id"] = item.call_id or part["id"]
-            part["name"] = item.name or part["name"]
-            part["arguments"] += item.arguments_delta
-        elif isinstance(item, ModelCompleted):
-            message = item.message
-            if not isinstance(message, AssistantMessage):
-                raise ModelProtocolError("invalid_completed_message")
-            if text:
-                content.append(TextContent(text))
-            if content:
-                message = AssistantMessage(
-                    tuple(content),
-                    message.tool_calls,
-                    message.finish_reason,
-                    message.model,
-                    message.timestamp,
-                    usage=message.usage,
-                )
-            if calls:
-                formed = []
-                for index in sorted(calls):
-                    part = calls[index]
-                    if not part["id"] or not part["name"]:
-                        raise ModelProtocolError("incomplete_tool_call")
-                    try:
-                        args = json.loads(part["arguments"])
-                    except json.JSONDecodeError as exc:
-                        raise ModelProtocolError("invalid_tool_arguments") from exc
-                    if not isinstance(args, dict):
-                        raise ModelProtocolError("invalid_tool_arguments")
-                    try:
-                        formed.append(
-                            ToolCall(part["id"], part["name"], part["arguments"], args)
-                        )
-                    except ProtocolError as exc:
-                        raise ModelProtocolError("invalid_tool_call") from exc
-                try:
-                    message = AssistantMessage(
-                        message.content,
-                        tuple(formed),
-                        message.finish_reason,
-                        message.model,
-                        message.timestamp,
-                        usage=message.usage,
-                    )
-                except ProtocolError as exc:
-                    raise ModelProtocolError("duplicate_tool_call_id") from exc
-            return message
-        elif isinstance(item, ModelFailed):
-            raise ModelProtocolError(item.error or "model_stream_failed")
-        else:
-            raise ModelProtocolError("unknown_model_stream_item")
-    raise ModelProtocolError("model_stream_ended_without_completion")
+@dataclass(frozen=True, slots=True)
+class LoopOutcome:
+    output: AssistantMessage | None
+    usage: Usage | None
+    effects: tuple[ToolEffectRecord, ...]
+    turns: int
+
+
+HookInvoker = Callable[..., Awaitable[tuple[object, ...]]]
+StateUpdater = Callable[..., None]
 
 
 async def run_loop(
     *,
-    agent: Agent,
-    session: AgentSession,
+    agent: "Agent",
+    session: "Session",
     run_context: RunContext,
     config: RunConfig,
-    emit: Callable[..., object],
-    consume_controls: Callable[[], tuple[object, ...]],
-    observe_controls: Callable[[], tuple[object, ...]],
-    wait_for_control: Callable[[int], object],
-    update_state: Callable[..., object],
-    hook: Callable[..., object],
-) -> tuple[AssistantMessage | None, int]:
-    final: AssistantMessage | None = None
-    caps: ModelCapabilities = agent.model.capabilities
-    for turn in range(1, config.max_turns + 1):
-        if run_context.cancellation.cancelled:
-            raise asyncio.CancelledError()
-        # This is the only control-consumption boundary: no model stream or tool
-        # batch is in flight, so appending preserves transcript grammar.
-        for control in consume_controls():
-            session._append(control.message)
-        run_context = RunContext(
-            run_context.session_id,
-            run_context.run_id,
-            run_context.cancellation,
-            turn,
-            run_context.metadata,
+    events: RunEventEmitter,
+    invoke_hooks: HookInvoker,
+    update_state: StateUpdater,
+    guidance_metadata: tuple[object, ...],
+    tool_executor: ToolExecutor,
+) -> LoopOutcome:
+    progress = _LoopProgress()
+    try:
+        return await _run_loop_impl(
+            agent=agent,
+            session=session,
+            run_context=run_context,
+            config=config,
+            events=events,
+            invoke_hooks=invoke_hooks,
+            update_state=update_state,
+            guidance_metadata=guidance_metadata,
+            tool_executor=tool_executor,
+            progress=progress,
         )
-        await emit("turn_started", turn=turn)
-        await hook("on_turn_start", run_context)
+    except RunCancelled:
+        raise
+    except asyncio.CancelledError as exc:
+        raise RunCancelled(tuple(progress.effects), progress.output, progress.usage, progress.turns) from exc
+
+
+@dataclass(slots=True)
+class _LoopProgress:
+    output: AssistantMessage | None = None
+    usage: Usage | None = None
+    effects: list[ToolEffectRecord] = field(default_factory=list)
+    turns: int = 0
+
+
+async def _run_loop_impl(
+    *,
+    agent: "Agent",
+    session: "Session",
+    run_context: RunContext,
+    config: RunConfig,
+    events: RunEventEmitter,
+    invoke_hooks: HookInvoker,
+    update_state: StateUpdater,
+    guidance_metadata: tuple[object, ...],
+    tool_executor: ToolExecutor,
+    progress: _LoopProgress,
+) -> LoopOutcome:
+    output: AssistantMessage | None = None
+    usage: Usage | None = None
+    effects = progress.effects
+    for turn in range(1, config.max_turns + 1):
+        progress.turns = turn
+        run_context.cancellation.raise_if_cancelled()
+        await session.consume_pending(run_context.run_id, run_context.cancellation)
         update_state(RunPhase.PREPARING_CONTEXT, turn)
+        snapshot = ContextSnapshot(
+            session.messages,
+            agent.prompt,
+            agent.tool_registry.definitions(),
+            guidance_metadata,
+        )
         try:
-            frozen = await agent.tool_resolver.resolve(run_context, agent.tools)
-            tools = frozen.by_name()
-            context = await agent.context_manager.prepare(
-                system_prompt=agent.system_prompt,
-                messages=session.messages,
-                tools=frozen.definitions,
-                cancellation=run_context.cancellation,
-            )
-            if not isinstance(context, ModelContext):
+            model_context = await agent.context_manager.prepare(snapshot, run_context.cancellation)
+            if not isinstance(model_context, ModelContext):
                 raise TypeError("ContextManager must return ModelContext.")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise ContextPreparationError() from exc
+            raise _RunFailure(
+                RunError("context_error", "Context preparation failed.", cause_type=type(exc).__name__),
+                tuple(effects), output, usage, turn,
+            ) from exc
+        hook_context = ModelHookContext(run_context, model_context)
         try:
-            _validate_input(caps, context)
-        except ModelCapabilityError as exc:
-            await emit(
-                "model_failed",
-                turn=turn,
-                error_code=exc.code,
-                error="Model cannot accept this canonical context.",
-            )
-            raise
+            decisions = await invoke_hooks("before_model", hook_context)
+        except _RunFailure as exc:
+            await events.emit("model.failed", turn=turn, error_code="hook_error")
+            raise _RunFailure(exc.error, tuple(effects), output, usage, turn) from exc
+        if any(not isinstance(decision, HookDecision) for decision in decisions):
+            await events.emit("model.failed", turn=turn, error_code="hook_error")
+            raise _RunFailure(RunError("hook_error", "before_model hook returned an invalid decision."), tuple(effects), output, usage, turn)
+        if any(decision is HookDecision.FAIL_RUN for decision in decisions):
+            await events.emit("model.failed", turn=turn, error_code="hook_error")
+            raise _RunFailure(RunError("hook_error", "before_model hook failed the Run."), tuple(effects), output, usage, turn)
+        run_context.cancellation.raise_if_cancelled()
         update_state(RunPhase.MODEL, turn)
-        await emit("model_started", turn=turn)
-        await hook("on_model_start", context)
+        await events.emit("model.started", turn=turn)
         try:
-            message = await collect_model(
+            async def observe_model(event: object) -> None:
+                if isinstance(event, TextDelta):
+                    await events.emit("model.delta", turn=turn, text=event.text)
+
+            response = await _collect_cancellable(
                 agent.model,
-                ModelRequest(
-                    agent.model.model_name, context, run_context, agent.media_resolver
-                ),
-                emit,
-                update_state,
+                model_context,
+                config.model_settings,
+                observe_model,
+                run_context,
             )
         except asyncio.CancelledError:
+            await events.emit("model.cancelled", turn=turn)
             raise
-        except ModelProtocolError as exc:
-            await emit(
-                "model_failed",
-                turn=turn,
-                error_code=exc.code,
-                error="Model stream could not be normalized.",
-            )
-            raise
-        except MediaResolutionError as exc:
-            await emit(
-                "model_failed",
-                turn=turn,
-                error_code=exc.code.value,
-                error="Model media preparation failed.",
-            )
-            raise
-        except Exception:
-            await emit(
-                "model_failed",
-                turn=turn,
-                error_code="model_error",
-                error="Model invocation failed.",
-            )
-            raise
-        if run_context.cancellation.cancelled:
-            raise asyncio.CancelledError()
-        if any(
-            modality(part) not in caps.output_modalities for part in message.content
-        ):
-            error = ModelCapabilityError("unsupported_output_modality")
-            await emit(
-                "model_failed",
-                turn=turn,
-                error_code=error.code,
-                error="Model emitted unsupported canonical content.",
-            )
-            raise error
-        session._append(message)
-        final = message
-        await emit(
-            "model_completed",
-            turn=turn,
-            content=tuple(content_summary(part) for part in message.content),
-        )
-        await hook("on_model_end", message)
-        if not message.tool_calls:
+        except ModelError as exc:
+            await events.emit("model.failed", turn=turn, error_code=getattr(exc, "code", "model_error"))
+            raise _RunFailure(
+                RunError(getattr(exc, "code", "model_error"), "Model invocation failed.", cause_type=type(exc).__name__),
+                tuple(effects), output, usage, turn,
+            ) from exc
+        except Exception as exc:
+            await events.emit("model.failed", turn=turn, error_code="model_error")
+            raise _RunFailure(
+                RunError("model_error", "Model invocation failed.", cause_type=type(exc).__name__),
+                tuple(effects), output, usage, turn,
+            ) from exc
+        usage = _merge_usage(usage, response.usage)
+        progress.usage = usage
+        await events.emit("model.completed", turn=turn)
+        run_context.cancellation.raise_if_cancelled()
+        try:
+            await invoke_hooks("after_model", hook_context, response)
+        except _RunFailure as exc:
+            raise _RunFailure(exc.error, tuple(effects), output, usage, turn) from exc
+        run_context.cancellation.raise_if_cancelled()
+        output = response.message
+        progress.output = output
+        if not response.message.tool_calls:
+            await session.commit_message(run_context.run_id, response.message)
             update_state(RunPhase.BETWEEN_TURNS, turn)
-            await emit("turn_completed", turn=turn)
-            await hook("on_turn_end", run_context)
-            controls = consume_controls()
-            if controls:
-                # A completed assistant response is a safe boundary.  Controls
-                # received while streaming become the next model input in strict
-                # receive order rather than being lost to natural completion.
-                for control in controls:
-                    session._append(control.message)
+            if await session.pending_inputs():
                 continue
-            return final, turn
-        policy = (
-            config.tool_policy_factory(run_context)
-            if config.tool_policy_factory
-            else DefaultToolExecutionPolicy()
-        )
-        executor = ToolExecutor(
-            tools,
-            session._media_limits,
-            config.tool_execution,
-            policy,
-            emit=emit,
-            hook=hook,
-            observe_controls=observe_controls,
-            wait_for_control=wait_for_control,
-        )
+            return LoopOutcome(output, usage, tuple(effects), turn)
         update_state(
             RunPhase.TOOL,
             turn,
-            pending_tool_calls=tuple(
-                ToolCallSummary(call.id, call.name) for call in message.tool_calls
-            ),
+            pending_tool_calls=tuple(ToolCallSummary(call.id, call.name) for call in response.message.tool_calls),
         )
-        await emit("tool_batch_started", turn=turn)
-        batch = await executor.execute(message.tool_calls, run_context, context)
-        for outcome in batch.outcomes:
-            result = tool_result(outcome, limits=session._media_limits)
-            session._append(result)
+        try:
+            batch = await tool_executor.execute(
+                response.message.tool_calls,
+                ToolContext(run_context.run_id, run_context.session_id, run_context.cancellation),
+            )
+        except ToolBatchCancelled as exc:
+            effects.extend(exc.effects)
+            raise RunCancelled(tuple(effects), output, usage, turn) from exc
+        except ToolBatchAborted as exc:
+            effects.extend(exc.effects)
+            raise _RunFailure(exc.reason, tuple(effects), output, usage, turn) from exc
+        try:
+            run_context.cancellation.raise_if_cancelled()
+        except asyncio.CancelledError:
+            effects.extend(batch.effects)
+            raise
+        messages = tuple(result_message(result) for result in batch.results)
+        try:
+            await session.commit_exchange(run_context.run_id, response.message, messages)
+        except Exception as exc:
+            effects.extend(batch.effects)
+            raise _RunFailure(
+                RunError("transcript_commit_error", "Tool exchange commit failed.", cause_type=type(exc).__name__),
+                tuple(effects),
+                output,
+                usage,
+                turn,
+            ) from exc
+        final_effects = committed_effects(batch.effects)
+        effects.extend(final_effects)
+        await events.emit(
+            "tool_batch.committed",
+            turn=turn,
+            tool_call_ids=[call.id for call in response.message.tool_calls],
+        )
         update_state(RunPhase.BETWEEN_TURNS, turn)
-        await emit("turn_completed", turn=turn)
-        await hook("on_turn_end", run_context)
-        if batch.fail_run:
-            raise RuntimeError("tool_policy_fail_run")
-    raise MaxTurnsError(config.max_turns)
+    raise MaxTurnsError(LoopOutcome(output, usage, tuple(effects), config.max_turns))
+
+
+class _RunFailure(Exception):
+    def __init__(
+        self,
+        error: RunError,
+        effects: tuple[ToolEffectRecord, ...] = (),
+        output: AssistantMessage | None = None,
+        usage: Usage | None = None,
+        turns: int = 0,
+    ) -> None:
+        self.error = error
+        self.effects = effects
+        self.output = output
+        self.usage = usage
+        self.turns = turns
+        super().__init__(error.message)
+
+
+def _merge_usage(current: Usage | None, latest: Usage | None) -> Usage | None:
+    if latest is None:
+        return current
+    if current is None:
+        return latest
+
+    def add(left: int | None, right: int | None) -> int | None:
+        return None if left is None and right is None else (left or 0) + (right or 0)
+
+    return Usage(
+        add(current.input_tokens, latest.input_tokens),
+        add(current.output_tokens, latest.output_tokens),
+        add(current.total_tokens, latest.total_tokens),
+    )
+
+
+async def _collect_cancellable(
+    model: Model,
+    model_context: ModelContext,
+    settings: ModelSettings | None,
+    observer: Callable[[object], Awaitable[None]],
+    run_context: RunContext,
+) -> ModelResponse:
+    task = asyncio.create_task(collect_model_stream(model, model_context, settings, observer))
+    cancelled = asyncio.create_task(run_context.cancellation.wait_cancelled())
+    try:
+        done, _ = await asyncio.wait({task, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+        if cancelled in done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise asyncio.CancelledError()
+        return task.result()
+    finally:
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)

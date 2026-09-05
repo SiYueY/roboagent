@@ -1,21 +1,51 @@
-"""Model package; provider configuration is imported only when requested."""
+"""Canonical Model and ModelProvider public API."""
 
-from __future__ import annotations
-
-from typing import Any
-
+from .client import (
+    FinishReason,
+    Model,
+    ModelCapabilities,
+    ModelEvent,
+    ModelProvider,
+    ModelResponse,
+    ModelSettings,
+    OpenAICompatibleModel,
+    ResponseCompleted,
+    ResponseStarted,
+    TextDelta,
+    ToolCallArgumentsDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
+    Usage,
+    UsageUpdated,
+    collect_model_stream,
+)
+from .errors import ModelCapabilityError, ModelError, ModelProtocolError, ModelProviderError
+from .factory import ConfiguredModelProvider, create_model
 from .registry import ModelRegistry
 
-
-def create_chat_model(
-    name: str | None = None,
-    *,
-    registry: ModelRegistry,
-    **kwargs: Any,
-) -> object:
-    from .factory import create_chat_model as factory
-
-    return factory(name=name, registry=registry, **kwargs)
-
-
-__all__ = ["create_chat_model"]
+__all__ = [
+    "ConfiguredModelProvider",
+    "FinishReason",
+    "Model",
+    "ModelCapabilities",
+    "ModelCapabilityError",
+    "ModelError",
+    "ModelEvent",
+    "ModelProtocolError",
+    "ModelProvider",
+    "ModelProviderError",
+    "ModelRegistry",
+    "ModelResponse",
+    "ModelSettings",
+    "OpenAICompatibleModel",
+    "ResponseCompleted",
+    "ResponseStarted",
+    "TextDelta",
+    "ToolCallArgumentsDelta",
+    "ToolCallCompleted",
+    "ToolCallStarted",
+    "Usage",
+    "UsageUpdated",
+    "collect_model_stream",
+    "create_model",
+]

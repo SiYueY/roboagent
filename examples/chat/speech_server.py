@@ -122,7 +122,7 @@ def install_speech_route(
         transport = WebSocketSpeechTransport(websocket)
         try:
             session = create_speech_session(
-                agent_session=conversation.session, transport=transport, config=config
+                session=conversation.session, transport=transport, config=config
             )
         except SpeechConfigurationError as exc:
             await transport.send_event({"type": "error", "error": str(exc)})

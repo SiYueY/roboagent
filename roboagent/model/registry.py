@@ -1,4 +1,4 @@
-"""In-memory storage for configured provider-backed chat models."""
+"""In-memory storage for configured provider-backed models."""
 
 from __future__ import annotations
 

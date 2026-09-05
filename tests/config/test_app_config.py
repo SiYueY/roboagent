@@ -6,35 +6,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pydantic import ValidationError
-
-from roboagent.config import AppConfig, SkillConfig, SubagentConfig, load_app_config
+from roboagent.config import AppConfig, load_app_config
 from roboagent.model.errors import ModelConfigError
+from roboagent.skill import SkillConfig
 
 
 class SkillConfigTests(unittest.TestCase):
-    def test_skill_config_normalizes_sources_and_permissions(self) -> None:
-        config = SkillConfig(
-            sources=["./skills", "~/custom-skills"],
-            disabled_skills="old-skill",
-            allowed_permissions="tool:file.read tool:map.read tool:file.read",
-        )
-
-        self.assertEqual(config.sources[0], Path("skills"))
-        self.assertEqual(config.disabled_skills, ("old-skill",))
-        self.assertEqual(config.allowed_permissions, ("tool:file.read", "tool:map.read"))
-
-    def test_skill_config_rejects_conflicting_toggles(self) -> None:
-        with self.assertRaises(ValidationError):
-            SkillConfig(enabled_skills=["nav-plan"], disabled_skills=["nav-plan"])
-
-
-class SubagentConfigTests(unittest.TestCase):
-    def test_subagent_config_normalizes_allowed_lists(self) -> None:
-        config = SubagentConfig(id="planner", role="planning", allowed_tools="map.read pose.read")
-
-        self.assertEqual(config.allowed_tools, ("map.read", "pose.read"))
-        self.assertTrue(config.enabled)
+    def test_skill_config_only_contains_guidance_bounds(self) -> None:
+        self.assertEqual(SkillConfig(max_description_chars=12, max_body_bytes=34).max_body_bytes, 34)
+        with self.assertRaises(ValueError):
+            SkillConfig(max_body_bytes=0)
 
 
 class AppConfigTests(unittest.TestCase):
@@ -49,8 +30,7 @@ class AppConfigTests(unittest.TestCase):
                         "params": {"model": "gpt-4o-mini"},
                     }
                 ],
-                "skills": {"sources": ["./skills"], "allowed_permissions": "tool:file.read"},
-                "subagents": [{"id": "planner", "allowed_skills": "nav-plan"}],
+                "skills": {"max_body_bytes": 1234},
             }
         )
 
@@ -58,12 +38,7 @@ class AppConfigTests(unittest.TestCase):
         skill_manager = config.create_skill_manager()
 
         self.assertEqual(registry.default_model, "openai-main")
-        self.assertEqual(skill_manager.registry.loader.sources, (Path("skills"),))
-        self.assertEqual(config.subagents[0].allowed_skills, ("nav-plan",))
-
-    def test_app_config_rejects_duplicate_subagents(self) -> None:
-        with self.assertRaises(ValidationError):
-            AppConfig.from_dict({"subagents": [{"id": "planner"}, {"id": "planner"}]})
+        self.assertEqual(skill_manager.loader.config.max_body_bytes, 1234)
 
     def test_load_app_config_uses_env_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -78,8 +53,7 @@ class AppConfigTests(unittest.TestCase):
                         "    params:",
                         "      model: gpt-4o-mini",
                         "skills:",
-                        "  sources:",
-                        "    - ./skills",
+                        "  max_body_bytes: 1234",
                         "",
                     ]
                 ),
@@ -90,7 +64,7 @@ class AppConfigTests(unittest.TestCase):
                 config = load_app_config()
 
         self.assertEqual(config.default_model, "openai-main")
-        self.assertEqual(config.skills.sources, (Path("skills"),))
+        self.assertEqual(config.skills.max_body_bytes, 1234)
 
     def test_loads_sibling_dotenv_and_expands_nested_model_value(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -109,16 +83,16 @@ class AppConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
             config_path = directory / "config.yaml"
-            config_path.write_text("models: []\nskills:\n  sources: ['${ROBOAGENT_TEST_PATH}']\n", encoding="utf-8")
+            config_path.write_text("models: []\n", encoding="utf-8")
             (directory / ".env").write_text("ROBOAGENT_TEST_PATH=from-dotenv\n", encoding="utf-8")
             with patch.dict(os.environ, {"ROBOAGENT_TEST_PATH": "from-shell"}, clear=True):
                 config = AppConfig.from_yaml(config_path)
-            self.assertEqual(config.skills.sources, (Path("from-shell"),))
+            self.assertEqual(config.skills, SkillConfig())
 
     def test_missing_environment_reference_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.yaml"
-            config_path.write_text("models: []\nskills:\n  sources: ['${ROBOAGENT_MISSING_VALUE}']\n", encoding="utf-8")
+            config_path.write_text("models: []\ndefault_model: '${ROBOAGENT_MISSING_VALUE}'\n", encoding="utf-8")
             with patch.dict(os.environ, {}, clear=True):
                 with self.assertRaisesRegex(ModelConfigError, "ROBOAGENT_MISSING_VALUE"):
                     AppConfig.from_yaml(config_path)

@@ -1,12 +1,11 @@
 # Runtime Module
 
-`runtime.types` contains the immutable contracts shared by model, tool and
-agent layers: messages, tool calls/definitions/results, model contexts and
-model stream events. It does not contain Agent lifecycle state.
+`runtime.types` contains cancellation, `RunContext`, `RunState`, status/error,
+modality, and media-resolution contracts. Canonical messages and Frozen JSON
+live in `message`; canonical model events live in `model`.
 
-`runtime.event` is the only lifecycle event model. Every event has a run-local,
-strictly increasing sequence and timestamp; exactly one `AgentCompletedEvent`
-ends a run. `runtime.store` supplies `EventStore`, `MemoryEventStore`,
-`JsonlEventStore`, and the best-effort `EventRecorder` observer. JSONL stores
-can be reopened and queried by run ID. Store failures disable the recorder
-without interrupting the Agent.
+Each `RunEventEmitter` has a run-local contiguous sequence, bounded replay, and
+independent bounded subscriber queues. `run.started` is first and exactly one
+terminal event is last. Late subscribers still receive the retained terminal
+event. Event stores persist frozen payloads without merging them into transcript
+or Run state.

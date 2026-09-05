@@ -1,5 +1,5 @@
-"""Stable top-level entry points for the RoboAgent runtime."""
+"""RoboAgent canonical public entry points."""
 
-from .agent import Agent, AgentSession
+from .agent import Agent, Session
 
-__all__ = ["Agent", "AgentSession"]
+__all__ = ["Agent", "Session"]

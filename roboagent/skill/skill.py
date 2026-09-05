@@ -1,122 +1,96 @@
-"""Runtime skill value object."""
+"""Immutable Skill metadata, diagnostics, and catalog revisions."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from uuid import uuid4
 
-from pydantic import BaseModel
 
-SkillSchemaRef = str | type[BaseModel]
+class SkillSource(Enum):
+    PROJECT = "project"
+    USER = "user"
 
 
 @dataclass(frozen=True, slots=True)
-class Skill:
-    """Immutable runtime representation of a loaded skill.
+class SkillConfig:
+    max_description_chars: int = 512
+    max_body_bytes: int = 64 * 1024
 
-    This object is built by `SkillLoader` after schema validation and is the
-    primary value stored by the registry and manager layers.
-    """
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in (self.max_description_chars, self.max_body_bytes)):
+            raise ValueError("Skill limits must be positive.")
 
-    # Stable skill identifier shared across schema, registry, and selection.
+
+@dataclass(frozen=True, slots=True)
+class SkillMetadata:
     name: str
-    # Human-readable summary used for display and lexical matching.
     description: str
-    # Logical source name, typically derived from the source root directory.
-    source: str
-    # Directory containing the loaded `SKILL.md` file.
-    source_dir: Path
-    # Optional license identifier copied from the declarative spec.
-    license: str | None = None
-    # Semantic version of the skill definition.
-    version: str = "0.1.0"
-    # Markdown body used as the prompt template.
-    body: str = ""
-    # Keywords used to improve lexical selection.
-    trigger_keywords: tuple[str, ...] = ()
-    # Free-form tags used for organization and matching.
-    tags: tuple[str, ...] = ()
-    # Tool identifiers the skill may invoke.
-    allowed_tools: tuple[str, ...] = ()
-    # Permission identifiers required before the skill can run.
-    required_permissions: tuple[str, ...] = ()
-    # Optional Python callable reference in `module.submodule:function` form.
-    entrypoint: str | None = None
-    # Governance status used by routing and lifecycle management.
-    status: str = "active"
-    # Optional replacement skill name when this skill is deprecated.
-    replacement: str | None = None
-    # Optional Pydantic input schema reference in import-path or class form.
-    input_schema: SkillSchemaRef | None = None
-    # Optional Pydantic output schema reference in import-path or class form.
-    output_schema: SkillSchemaRef | None = None
-    # Project-specific metadata preserved after schema normalization.
-    metadata: dict[str, str] = field(default_factory=dict)
-    # Absolute path to the originating `SKILL.md` file when available.
-    skill_file: Path | None = None
-    # Runtime toggle used by the registry and manager.
-    enabled: bool = True
+    path: Path
+    source: SkillSource
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name or not isinstance(self.description, str) or not self.description:
+            raise ValueError("Skill metadata requires name and description.")
+        if not isinstance(self.path, Path) or not isinstance(self.source, SkillSource):
+            raise TypeError("Skill metadata requires canonical path and source.")
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDiagnostic:
+    code: str
+    name: str | None = None
+    source: SkillSource | None = None
+    paths: tuple[Path, ...] = ()
+    selected_path: Path | None = None
+    ignored_path: Path | None = None
+    message: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paths", tuple(self.paths))
+
+
+@dataclass(frozen=True, slots=True)
+class SkillEntry:
+    metadata: SkillMetadata
+    body: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.metadata, SkillMetadata) or not isinstance(self.body, str):
+            raise TypeError("SkillEntry requires canonical metadata and UTF-8 text.")
+
+
+class SkillReadError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class SkillCatalog:
+    entries: tuple[SkillEntry, ...] = ()
+    revision: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entries", tuple(self.entries))
+        if not all(isinstance(entry, SkillEntry) for entry in self.entries):
+            raise TypeError("SkillCatalog entries must be SkillEntry values.")
+        if not self.revision:
+            object.__setattr__(self, "revision", uuid4().hex)
+        names = [entry.metadata.name for entry in self.entries]
+        if len(names) != len(set(names)):
+            raise ValueError("SkillCatalog names must be unique.")
 
     @property
-    def prompt_template(self) -> str:
-        """Return the markdown body used as the skill prompt template."""
-        return self.body
+    def metadata(self) -> tuple[SkillMetadata, ...]:
+        return tuple(entry.metadata for entry in self.entries)
 
-    @property
-    def identity(self) -> str:
-        """Return the stable `<name>@<version>` identifier for the skill."""
-        return f"{self.name}@{self.version}"
+    def get(self, name: str) -> SkillEntry | None:
+        return next((entry for entry in self.entries if entry.metadata.name == name), None)
 
-    @property
-    def is_executable(self) -> bool:
-        """Return whether the skill declares a Python entrypoint."""
-        return self.entrypoint is not None
-
-    @property
-    def is_active(self) -> bool:
-        """Return whether the skill is enabled and eligible for routing."""
-        return self.enabled and self.status == "active"
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the runtime skill into a Python dictionary.
-
-        Returns:
-            A dictionary containing both declarative fields and runtime
-            bookkeeping fields such as `source`, `skill_file`, and `enabled`.
-        """
-        return {
-            "name": self.name,
-            "description": self.description,
-            "license": self.license,
-            "version": self.version,
-            "body": self.body,
-            "trigger_keywords": self.trigger_keywords,
-            "tags": self.tags,
-            "allowed_tools": self.allowed_tools,
-            "required_permissions": self.required_permissions,
-            "entrypoint": self.entrypoint,
-            "status": self.status,
-            "replacement": self.replacement,
-            "input_schema": _serialize_schema_ref(self.input_schema),
-            "output_schema": _serialize_schema_ref(self.output_schema),
-            "metadata": dict(self.metadata),
-            "source": self.source,
-            "source_dir": str(self.source_dir),
-            "skill_file": str(self.skill_file) if self.skill_file is not None else None,
-            "enabled": self.enabled,
-        }
-
-    def __str__(self) -> str:
-        return self.identity
-
-
-def _serialize_schema_ref(schema_ref: SkillSchemaRef | None) -> str | None:
-    if schema_ref is None:
-        return None
-    if isinstance(schema_ref, str):
-        return schema_ref
-    return f"{schema_ref.__module__}:{schema_ref.__qualname__}"
-
-
-__all__ = ["Skill", "SkillSchemaRef"]
+    def load(self, name: str) -> str:
+        entry = self.get(name)
+        if entry is None:
+            raise SkillReadError("unknown_skill", f"Unknown skill: {name}")
+        return entry.body

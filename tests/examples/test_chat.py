@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 
 from roboagent.agent import Agent
-from roboagent.runtime import AssistantMessage, ModelCapabilities, ModelCompleted, Modality, TextDelta
+from roboagent.message import AssistantMessage
+from roboagent.model import FinishReason, ModelCapabilities, ModelResponse, ResponseCompleted, ResponseStarted, TextDelta
+from roboagent.runtime import Modality
 
 try:
     import gradio as _gradio
@@ -21,43 +23,43 @@ except ImportError:
 
 class ScriptedModel:
     model_name = "test-model"
-    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False)
+    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False)
 
-    async def stream(self, _request, _cancellation):
-        yield TextDelta("测试回复")
-        yield ModelCompleted(AssistantMessage("测试回复"))
+    async def stream(self, context, settings=None):
+        yield ResponseStarted("response", 0)
+        yield TextDelta(1, "测试回复")
+        yield ResponseCompleted(2, ModelResponse(AssistantMessage("测试回复"), FinishReason.STOP))
 
 
 class CancellableModel:
     model_name = "test-model"
-    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False)
+    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False)
 
-    async def stream(self, _request, cancellation):
-        while not cancellation.cancelled:
-            await asyncio.sleep(0)
-        if False:
-            yield TextDelta("")
+    async def stream(self, context, settings=None):
+        yield ResponseStarted("response", 0)
+        await asyncio.Event().wait()
 
 
 class RecordingModel:
     model_name = "test-model"
     capabilities = ModelCapabilities(
         frozenset({Modality.TEXT, Modality.IMAGE}), frozenset({Modality.TEXT}),
-        frozenset({Modality.TEXT, Modality.IMAGE}), False,
+        False, False,
     )
 
     def __init__(self) -> None:
         self.request = None
 
-    async def stream(self, request, _cancellation):
-        self.request = request
-        yield ModelCompleted(AssistantMessage("seen"))
+    async def stream(self, context, settings=None):
+        self.request = context
+        yield ResponseStarted("response", 0)
+        yield ResponseCompleted(1, ModelResponse(AssistantMessage("seen"), FinishReason.STOP))
 
 
 class TextOnlyRecordingModel(RecordingModel):
     capabilities = ModelCapabilities(
         frozenset({Modality.TEXT}), frozenset({Modality.TEXT}),
-        frozenset({Modality.TEXT}), False,
+        False, False,
     )
 
 
@@ -263,7 +265,7 @@ class ChatExampleTests(unittest.TestCase):
                 pass
         asyncio.run(check())
         assert model.request is not None
-        contents = model.request.context.messages[-1].content
+        contents = model.request.messages[-1].content
         self.assertEqual(contents[0].text, "what is this?")
         self.assertEqual(contents[1].source.data, jpeg)
         frame = self.app.active_conversation(state).vision_context.latest()
@@ -329,6 +331,6 @@ class ChatExampleTests(unittest.TestCase):
             pending.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await pending
-            self.assertFalse(self.app.active_conversation(state).session._active)
+            self.assertIsNone(self.app.active_conversation(state).session.active_run_id)
 
         asyncio.run(check())

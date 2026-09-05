@@ -40,7 +40,7 @@ def create_vad(config: SpeechConfig):
                      model_path=options.model_path, required=options.required)
 
 
-def create_speech_session(*, agent_session, transport, config: SpeechConfig,
+def create_speech_session(*, session, transport, config: SpeechConfig,
                           capture_format: AudioFormat = DEFAULT_INPUT_FORMAT,
                           render_format: AudioFormat = DEFAULT_OUTPUT_FORMAT) -> SpeechSession:
     if config.mode == "realtime":
@@ -50,7 +50,7 @@ def create_speech_session(*, agent_session, transport, config: SpeechConfig,
         # instead of creating a half-connected session.
         logger.warning("speech.mode=realtime is unavailable in this runtime; falling back to pipeline")
     session = SpeechSession(
-        agent_session=agent_session, transport=transport, asr=DashScopeASR(config.asr), tts=DashScopeTTS(config.tts),
+        session=session, transport=transport, asr=DashScopeASR(config.asr), tts=DashScopeTTS(config.tts),
         audio_processor=create_audio_processor(config), vad=create_vad(config),
         turn_detector=TurnDetector(config.turn.silence_ms, config.turn.max_duration_ms,
                                    config.turn.idle_timeout_ms, config.turn.min_speech_ms),

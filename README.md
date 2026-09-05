@@ -1,62 +1,44 @@
-# RoboAgent
+# RoboAgent 1.1
 
-RoboAgent is a native Python runtime for tool-calling robot agents. It has no
-LangChain, LangGraph, LangSmith, or DashScope SDK dependency.
+RoboAgent is a provider-neutral Python runtime for multimodal, tool-calling
+agents. Version 1.1 exposes one canonical runtime only; earlier names and
+adapters are intentionally not retained.
 
-## Compose explicitly
-
-Configuration, model selection, tools, skills, and observability belong to the
-application layer. The Agent API has no configuration factory:
+## Explicit composition
 
 ```python
-from roboagent.agent import Agent
-from roboagent.model import create_chat_model
+from roboagent import Agent
+from roboagent.context import PromptInput
+from roboagent.message import UserMessage
+from roboagent.model import create_model
+from roboagent.tool import ToolRegistry
 
-model = create_chat_model(registry=config.to_model_registry())
-agent = Agent(model, tools=robot_tools, system_prompt="Operate safely.")
+model = create_model(registry=config.to_model_registry())
+agent = Agent(
+    model,
+    tool_registry=ToolRegistry(robot_tools),
+    prompt=PromptInput("Operate safely."),
+)
 session = agent.new_session()
 
-run = session.start("Report the current pose.")
-async for event in run.events():
-    handle(event)
+run = session.start(UserMessage("Report the current pose."))
+async for event in run.subscribe():
+    handle(event.type, event.payload)
 result = await run.result()
 ```
 
-Messages use immutable multimodal content parts. Text remains convenient at the
-session boundary, while media is explicit:
+`Agent` is immutable and registers no builtin tools. `Session` owns the durable
+transcript, a pending `UserMessage` queue, and at most one active `Run`. A `Run`
+owns cancellation, bounded event subscriptions, effects, usage, and its final
+`RunResult`.
 
-```python
-from roboagent.runtime import BytesSource, ImageContent, TextContent, UserMessage
+Tools, filesystem/shell builtins, and `read_skill` are explicit registrations.
+Tool calls execute concurrently only when every tool in the batch declares
+`CONCURRENT`; results are committed in original call order as one complete
+tool-exchange block.
 
-run = session.start(UserMessage((
-    TextContent("What is in this image?"),
-    ImageContent(BytesSource(image_bytes), media_type="image/jpeg"),
-)))
-```
+Messages support text, image, audio, and file content. Model adapters declare
+their capabilities and reject unsupported inputs before issuing a request.
 
-Each model declares its supported modalities. The included
-OpenAI-compatible adapter currently implements text and image inputs and text
-outputs; audio, video, and files are runtime contracts awaiting a provider
-implementation.
-
-`Agent` is immutable. `AgentSession` owns a conversation transcript and accepts
-one run at a time. `AgentRun` owns cancellation, streamed events, and the final
-`AgentRunResult`. `run.result()` completes whether or not an event stream is
-consumed. Independent sessions may run concurrently.
-
-Use `session.subscribe(...)` for optional best-effort UI observers, or attach an
-`EventRecorder` backed by `MemoryEventStore` or `JsonlEventStore`. Subscriber
-queues are bounded: a slow subscriber is disconnected instead of stalling a
-robot action. Use `AgentHooks` for context transformation and tool policy.
-Tools execute in the order requested by the model; the first failed tool call
-short-circuits the remaining calls in that batch.
-
-`run.cancel(reason="user")` requests cooperative cancellation. A cancellation
-request does not itself stop external robot hardware: a tool handler must
-cancel and await its own external operation. Set `Agent(..., run_timeout=...)`
-to use the same cooperative path with `reason="timeout"`.
-
-## Examples
-
-Runnable examples live in [examples](examples/README.md). Optional integrations
-such as Gradio are deliberately not part of RoboAgent's core dependencies.
+Runnable integrations live in [examples](examples/README.md). The normative
+runtime contract is [docs/roboagent_v1.1.md](docs/roboagent_v1.1.md).

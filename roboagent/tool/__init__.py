@@ -1,7 +1,80 @@
-from .tool import InvalidToolOutputError, Tool, ToolCallContext, ToolInvocation, ToolOutput
+"""Canonical tool runtime and explicit builtin capability factories."""
 
-# v1 keeps the former public name as a thin compatibility alias.  Both names
-# normalize into the single canonical ToolOutput representation.
-ToolExecutionResult = ToolOutput
+from .executor import (
+    ToolBatchCancelled,
+    ToolExecutor,
+    ToolExecutorConfig,
+    committed_effects,
+    result_message,
+    retry_safe,
+)
+from .filesystem import (
+    FilesystemConfig,
+    Workspace,
+    create_filesystem_tools,
+    validate_relative_glob,
+    validate_relative_path,
+)
+from .shell import ShellConfig, create_shell_tool
+from .tool import (
+    AllowAllToolPolicy,
+    Tool,
+    ToolBatchAborted,
+    ToolBatchResult,
+    ToolContent,
+    ToolContractError,
+    ToolContext,
+    ToolDecision,
+    ToolDefinition,
+    ToolEffectKind,
+    ToolEffectRecord,
+    ToolEffectStatus,
+    ToolEffectUnknown,
+    ToolErrorInfo,
+    ToolExecutionMode,
+    ToolExecutionFailure,
+    ToolExecutionPolicy,
+    ToolExecutionResult,
+    ToolJsonContent,
+    ToolRegistrationError,
+    ToolRegistry,
+    ToolTextContent,
+)
 
-__all__ = ["Tool", "ToolCallContext", "ToolInvocation", "ToolOutput", "ToolExecutionResult", "InvalidToolOutputError"]
+__all__ = [
+    "AllowAllToolPolicy",
+    "FilesystemConfig",
+    "ShellConfig",
+    "Tool",
+    "ToolBatchAborted",
+    "ToolBatchCancelled",
+    "ToolBatchResult",
+    "ToolContent",
+    "ToolContractError",
+    "ToolContext",
+    "ToolDecision",
+    "ToolDefinition",
+    "ToolEffectKind",
+    "ToolEffectRecord",
+    "ToolEffectStatus",
+    "ToolEffectUnknown",
+    "ToolErrorInfo",
+    "ToolExecutionMode",
+    "ToolExecutionFailure",
+    "ToolExecutionPolicy",
+    "ToolExecutionResult",
+    "ToolExecutor",
+    "ToolExecutorConfig",
+    "ToolJsonContent",
+    "ToolRegistrationError",
+    "ToolRegistry",
+    "ToolTextContent",
+    "Workspace",
+    "committed_effects",
+    "create_filesystem_tools",
+    "create_shell_tool",
+    "result_message",
+    "retry_safe",
+    "validate_relative_glob",
+    "validate_relative_path",
+]

@@ -7,7 +7,7 @@ models:
     params:
       model: qwen3.7-flash
       dashscope_api_key: ${DASHSCOPE_API_KEY}
-skills: {sources: []}
+skills: {}
 speech:
   # pipeline is the stable ASR -> Agent -> TTS path. realtime currently
   # falls back to this path when the account/runtime cannot provide it.

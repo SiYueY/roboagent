@@ -1,7 +1,7 @@
 # Chat 示例
 
-这是一个最小的流式、多轮浏览器聊天示例。它展示 `ChatModel`、`Agent`、
-`AgentSession`、`AgentRun` 与 `MessageDeltaEvent` 如何组合；页面使用 Gradio
+这是一个最小的流式、多轮浏览器聊天示例。它展示 `Model`、`Agent`、
+`Session`、`Run` 与 canonical Run event 如何组合；页面使用 Gradio
 实现，但 Gradio 不是该示例的核心能力。示例以 Gradio 6 为基线，不兼容 Gradio 5。
 
 示例不包含 Tool、Skill、MCP、模型切换、文件上传或认证。
@@ -9,7 +9,7 @@
 ## 页面交互
 
 页面采用左侧会话栏、主消息区和底部输入区的布局。可在当前浏览器页面中新建和切换
-会话；每个会话持有独立的 `AgentSession`，不会通过页面 history 重建 transcript。
+会话；每个会话持有独立的 `Session`，不会通过页面 history 重建 transcript。
 首条消息会自动成为会话标题。会话仅保存在页面内存中，刷新浏览器后会清空。
 
 页面代码与应用入口分离：`ui.py` 保存 Gradio 组件、浏览器会话状态和页面回调；
@@ -24,7 +24,7 @@ Media API 行为；它通过 Gradio 的页面 `<head>` 在组件挂载后初始�
 降噪音频供 VAD 和 ASR 使用。挂断会释放麦克风与音频资源并恢复文本输入区。
 
 该模式使用同源 WebSocket 发送 16 kHz PCM16 麦克风音频，经通义实时 ASR、当前对话的
-`AgentSession` 与通义实时 TTS 后回放 24 kHz PCM16 音频。语音转写和回答会写入当前文字会话；
+`Session` 与通义实时 TTS 后回放 24 kHz PCM16 音频。语音转写和回答会写入当前文字会话；
 用户在播放期间再次说话会取消未完成的回答与播放。摄像头画面仍只在浏览器本地预览，不上传或录制。
 
 ## 配置

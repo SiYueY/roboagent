@@ -1,209 +1,94 @@
-"""Public facade for the RoboAgent skill subsystem."""
+"""Skill catalog revision lifecycle and explicit read_skill Tool."""
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
-from roboagent.skill.executor import SkillExecutionResult, SkillExecutor
-from roboagent.skill.loader import SkillLoader
-from roboagent.skill.registry import SkillRegistry
-from roboagent.skill.skill import Skill
+from roboagent.message import FrozenJsonObject
+from roboagent.tool import (
+    Tool,
+    ToolContext,
+    ToolDefinition,
+    ToolEffectKind,
+    ToolErrorInfo,
+    ToolExecutionFailure,
+    ToolExecutionMode,
+    ToolTextContent,
+)
 
-logger = logging.getLogger(__name__)
+from .loader import SkillLoader
+from .skill import SkillCatalog, SkillConfig, SkillDiagnostic, SkillReadError
 
 
 class SkillManager:
-    """Unified public interface for the skill subsystem.
-
-    `SkillManager` is intentionally kept as the main entry point for external
-    callers. It coordinates loader and registry behavior while exposing a
-    compact management-oriented API.
-    """
-
     def __init__(
         self,
         *,
-        sources: Sequence[str | Path] = (),
+        project_root: str | Path | None = None,
+        user_root: str | Path | None = None,
+        config: SkillConfig | None = None,
         loader: SkillLoader | None = None,
-        registry: SkillRegistry | None = None,
-        executor: SkillExecutor | None = None,
     ) -> None:
-        self._loader = loader or SkillLoader(sources=sources)
-        self._registry = registry or SkillRegistry(loader=self._loader)
-        self._executor = executor or SkillExecutor()
-        self._sources = tuple(Path(source) for source in sources) or tuple(self._registry.loader.sources)
+        project = Path.cwd() if project_root is None else Path(project_root)
+        user = Path.home() if user_root is None else Path(user_root)
+        self.project_skills_root = project.resolve() / ".roboagent" / "skills"
+        self.user_skills_root = user.resolve() / ".roboagent" / "skills"
+        self.loader = loader or SkillLoader(config)
+        self._catalog = SkillCatalog()
+        self._diagnostics: tuple[SkillDiagnostic, ...] = ()
+        self._runs: dict[str, SkillCatalog] = {}
+        self.reload()
 
     @property
-    def registry(self) -> SkillRegistry:
-        """Expose the underlying registry for advanced integrations."""
-        return self._registry
+    def catalog(self) -> SkillCatalog:
+        return self._catalog
 
     @property
-    def executor(self) -> SkillExecutor:
-        """Expose the executor used for skill invocation."""
-        return self._executor
+    def diagnostics(self) -> tuple[SkillDiagnostic, ...]:
+        return self._diagnostics
 
-    def load(
-        self,
-        sources: Sequence[str | Path] | None = None,
-        *,
-        clear: bool = False,
-    ) -> list[Skill]:
-        """Load skills from configured or provided sources into the registry.
+    def reload(self) -> SkillCatalog:
+        self._catalog, self._diagnostics = self.loader.discover(self.project_skills_root, self.user_skills_root)
+        return self._catalog
 
-        Args:
-            sources: Optional source directories. Uses the manager's configured
-                sources when omitted.
-            clear: Whether to clear the registry before loading.
+    def bind_run(self, run_id: str) -> SkillCatalog:
+        catalog = self._catalog
+        self._runs[run_id] = catalog
+        return catalog
 
-        Returns:
-            The loaded runtime skills.
-        """
-        resolved_sources = tuple(Path(source) for source in (sources or self._sources))
-        loaded = self._registry.load_all(resolved_sources, clear=clear)
-        logger.debug("Loaded %d skills from %d sources", len(loaded), len(resolved_sources))
-        return loaded
+    def release_run(self, run_id: str) -> None:
+        self._runs.pop(run_id, None)
 
-    def reload(self) -> list[Skill]:
-        """Reload all configured sources from scratch.
-
-        Returns:
-            The reloaded runtime skills.
-        """
-        return self.load(clear=True)
-
-    def register(self, skill: Skill) -> Skill:
-        """Register a single runtime skill.
-
-        Args:
-            skill: Runtime skill to register.
-
-        Returns:
-            The registered skill.
-        """
-        return self._registry.register(skill)
-
-    def unregister(self, name: str, *, missing_ok: bool = True) -> bool:
-        """Remove a skill from the registry.
-
-        Args:
-            name: Registered skill name.
-            missing_ok: Whether missing skills should be ignored.
-
-        Returns:
-            `True` when a skill was removed, otherwise `False`.
-        """
-        return self._registry.unregister(name, missing_ok=missing_ok)
-
-    def list_skills(self, *, enabled_only: bool = False, source: str | None = None) -> list[Skill]:
-        """List known skills.
-
-        Args:
-            enabled_only: Whether to exclude disabled skills.
-            source: Optional source filter.
-
-        Returns:
-            Matching runtime skills.
-        """
-        return self._registry.list_all(enabled_only=enabled_only, source=source)
-
-    def get_skill(self, name: str) -> Skill | None:
-        """Get a skill by name.
-
-        Args:
-            name: Registered skill name.
-
-        Returns:
-            The matching runtime skill, or `None` when absent.
-        """
-        return self._registry.get(name)
-
-    def has_skill(self, name: str) -> bool:
-        """Return whether a skill exists in the registry.
-
-        Args:
-            name: Registered skill name.
-
-        Returns:
-            `True` if the skill exists, otherwise `False`.
-        """
-        return self._registry.has(name)
-
-    def is_enabled(self, name: str) -> bool:
-        """Return whether a registered skill exists and is enabled.
-
-        Args:
-            name: Registered skill name.
-
-        Returns:
-            `True` when the skill exists and is enabled.
-        """
-        skill = self._registry.get(name)
-        return bool(skill and skill.enabled)
-
-    def enable(self, name: str) -> Skill:
-        """Enable a skill in the registry.
-
-        Args:
-            name: Registered skill name.
-
-        Returns:
-            The updated runtime skill.
-        """
-        return self._set_enabled(name, enabled=True)
-
-    def disable(self, name: str) -> Skill:
-        """Disable a skill in the registry.
-
-        Args:
-            name: Registered skill name.
-
-        Returns:
-            The updated runtime skill.
-        """
-        return self._set_enabled(name, enabled=False)
-
-    def _set_enabled(self, name: str, *, enabled: bool) -> Skill:
-        """Update the enabled flag of a registered skill."""
-        skill = self._registry.require(name)
-        updated = replace(skill, enabled=enabled)
-        self._registry.unregister(name, missing_ok=False)
-        self._registry.register(updated)
-        return updated
-
-    def select(self, query: str, *, top_k: int = 3, enabled_only: bool = True) -> list[Skill]:
-        """Select the most relevant skills for a request.
-
-        Args:
-            query: Natural language request text.
-            top_k: Maximum number of skills to return.
-            enabled_only: Whether disabled skills should be excluded.
-
-        Returns:
-            Ranked matching skills.
-        """
-        return self._registry.match(query, top_k=top_k, enabled_only=enabled_only)
-
-    async def execute(
-        self,
-        name: str,
-        payload: dict[str, Any],
-        *,
-        context: dict[str, Any] | None = None,
-        allowed_permissions: Sequence[str] | None = None,
-    ) -> SkillExecutionResult:
-        """Execute one registered skill by name."""
-        skill = self._registry.require(name)
-        return await self._executor.execute(
-            skill,
-            payload,
-            context=context,
-            allowed_permissions=allowed_permissions,
-        )
+    def load(self, name: str, *, run_id: str | None = None) -> str:
+        catalog = self._runs.get(run_id, self._catalog) if run_id is not None else self._catalog
+        return catalog.load(name)
 
 
-__all__ = ["SkillManager"]
+def create_read_skill_tool(manager: SkillManager) -> Tool:
+    async def read(arguments: FrozenJsonObject, context: ToolContext) -> ToolTextContent:
+        name = arguments["name"]
+        assert isinstance(name, str)
+        try:
+            return ToolTextContent(manager.load(name, run_id=context.run_id))
+        except SkillReadError as exc:
+            raise ToolExecutionFailure(ToolErrorInfo(exc.code, str(exc))) from exc
+        except OSError as exc:
+            raise ToolExecutionFailure(ToolErrorInfo("skill_read_error", "Could not read skill.")) from exc
+
+    return Tool(
+        ToolDefinition(
+            "read_skill",
+            "Read the instructions for one available RoboAgent skill.",
+            FrozenJsonObject(
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": False,
+                }
+            ),
+        ),
+        read,
+        ToolExecutionMode.CONCURRENT,
+        ToolEffectKind.READ_ONLY,
+    )
