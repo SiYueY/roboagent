@@ -19,6 +19,7 @@ from .tool import (
     ToolContractError,
     ToolContext,
     ToolDecision,
+    ToolEffectKind,
     ToolEffectRecord,
     ToolEffectStatus,
     ToolEffectUnknown,
@@ -221,12 +222,16 @@ class ToolExecutor:
             waiters: set[asyncio.Task[object]] = {task, cancelled}  # type: ignore[arg-type]
             done, _ = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
             if cancelled in done:
-                effect = await self._cancel_started(task, tool, call, unknown=False)
+                effect = await self._cancel_started(task, tool, call)
                 await self._emit("tool.cancelled", call, status="cancelled", error_code="cancelled")
                 raise ToolBatchCancelled((effect,))
             if task not in done:
-                effect = await self._cancel_started(task, tool, call, unknown=False, timed_out=True)
-                result = ToolExecutionResult(call.id, call.name, error=effect.error)
+                effect = await self._cancel_started(task, tool, call, timed_out=True)
+                result = ToolExecutionResult(
+                    call.id,
+                    call.name,
+                    error=ToolErrorInfo("timeout", "Tool execution timed out."),
+                )
                 await self._emit_terminal("tool.failed", call, "timeout")
                 await self._after_with_effect(context, result, effect)
                 return result, effect
@@ -263,7 +268,7 @@ class ToolExecutor:
                 (effect,),
             ) from exc
         except asyncio.CancelledError:
-            effect = await self._cancel_started(task, tool, call, unknown=False)
+            effect = await self._cancel_started(task, tool, call)
             await self._emit("tool.cancelled", call, status="cancelled", error_code="cancelled")
             raise ToolBatchCancelled((effect,))
         except Exception:
@@ -277,24 +282,20 @@ class ToolExecutor:
             cancelled.cancel()
             await asyncio.gather(cancelled, return_exceptions=True)
 
-    async def _cancel_started(self, task: asyncio.Task[ToolContent], tool: Tool, call: ToolCall, *, unknown: bool, timed_out: bool = False) -> ToolEffectRecord:
+    async def _cancel_started(
+        self,
+        task: asyncio.Task[ToolContent],
+        tool: Tool,
+        call: ToolCall,
+        *,
+        timed_out: bool = False,
+    ) -> ToolEffectRecord:
         task.cancel()
-        if timed_out:
-            try:
-                await asyncio.wait_for(asyncio.shield(task), self.config.cancellation_grace_period)
-            except (asyncio.CancelledError, Exception):
-                pass
-            return ToolEffectRecord(
-                call.id,
-                call.name,
-                tool.effect_kind,
-                ToolEffectStatus.TIMED_OUT,
-                error=ToolErrorInfo("timeout", "Tool execution timed out."),
-            )
         try:
             content = await asyncio.wait_for(asyncio.shield(task), self.config.cancellation_grace_period)
         except TimeoutError:
-            unknown = not timed_out
+            task.cancel()
+            task.add_done_callback(_consume_task_result)
         except ToolEffectUnknown as exc:
             return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=self._bounded_error(exc.error))
         except ToolExecutionFailure as exc:
@@ -302,17 +303,25 @@ class ToolExecutor:
         except asyncio.CancelledError:
             content = None
         except Exception:
+            if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
+                error = ToolErrorInfo("effect_unknown", "Tool side effect could not be determined.")
+                return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=error)
             error = ToolErrorInfo("execution_error", "Tool execution failed during cancellation.")
             return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=error)
         else:
             bounded = self._bounded_content(content)
             return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.SUCCEEDED, content=bounded)
+        if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
+            error = ToolErrorInfo(
+                "timeout" if timed_out else "effect_unknown",
+                "Tool execution timed out; its side effect could not be determined."
+                if timed_out
+                else "Tool side effect could not be determined.",
+            )
+            return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=error)
         if timed_out:
             error = ToolErrorInfo("timeout", "Tool execution timed out.")
             status = ToolEffectStatus.TIMED_OUT
-        elif unknown:
-            error = ToolErrorInfo("effect_unknown", "Tool side effect could not be determined.")
-            status = ToolEffectStatus.UNKNOWN
         else:
             error = ToolErrorInfo("cancelled", "Tool execution was cancelled.")
             status = ToolEffectStatus.CANCELLED
@@ -450,8 +459,6 @@ def committed_effects(effects: tuple[ToolEffectRecord, ...]) -> tuple[ToolEffect
 
 
 def retry_safe(effects: tuple[ToolEffectRecord, ...]) -> bool:
-    from .tool import ToolEffectKind
-
     return not any(
         effect.effect_kind is ToolEffectKind.SIDE_EFFECTING
         and not effect.transcript_committed
@@ -467,3 +474,10 @@ def _truncate_utf8(text: str, limit: int) -> str:
         return marker_bytes[:limit].decode("utf-8", errors="ignore")
     payload = text.encode("utf-8")[: limit - len(marker_bytes)]
     return payload.decode("utf-8", errors="ignore") + marker
+
+
+def _consume_task_result(task: asyncio.Task[object]) -> None:
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass

@@ -29,7 +29,7 @@ class ToolRegistrationError(ValueError):
 
 
 class ToolExecutionFailure(Exception):
-    """An ordinary model-visible failure reported by a Tool implementation."""
+    """A Tool-reported failure whose unsuccessful outcome is known."""
 
     def __init__(self, error: "ToolErrorInfo") -> None:
         self.error = error

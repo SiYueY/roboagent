@@ -8,6 +8,9 @@ active `Run` atomically and owns the ordered pending-input queue. `steer()` and
 `follow_up()` accept only `UserMessage`; queued input is consumed once at a
 legal turn boundary.
 
+Session and Run async operations are same-event-loop contracts. The ownership
+lock does not make a Session generally thread-safe or safe across event loops.
+
 `Run` starts eagerly, exposes `subscribe()`, `cancel()`, and `result()`, and
 always releases Session ownership. Its terminal status is `COMPLETED`, `FAILED`,
 or `CANCELLED`; timeout and max-turn termination are coded failures.

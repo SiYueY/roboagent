@@ -13,13 +13,18 @@ from roboagent.tool import (
     ShellConfig,
     Tool,
     ToolBatchAborted,
+    ToolBatchCancelled,
     ToolContext,
     ToolDecision,
     ToolDefinition,
     ToolExecutionMode,
+    ToolEffectKind,
+    ToolEffectUnknown,
     ToolEffectStatus,
+    ToolErrorInfo,
     ToolExecutor,
     ToolExecutorConfig,
+    ToolExecutionFailure,
     ToolJsonContent,
     ToolRegistrationError,
     ToolRegistry,
@@ -128,7 +133,7 @@ def test_timeout_is_a_terminal_result_and_invalid_output_aborts() -> None:
             config=ToolExecutorConfig(cancellation_grace_period=0.01),
         ).execute((ToolCall("t", "work", FrozenJsonObject({"value": 1})),), _context())
         assert batch.results[0].error is not None and batch.results[0].error.code == "timeout"
-        assert batch.effects[0].status is ToolEffectStatus.TIMED_OUT
+        assert batch.effects[0].status is ToolEffectStatus.SUCCEEDED
 
         invalid = Tool(_definition("invalid"), lambda arguments, context: "legacy output")
         with pytest.raises(ToolBatchAborted) as caught:
@@ -140,6 +145,93 @@ def test_timeout_is_a_terminal_result_and_invalid_output_aborts() -> None:
         assert caught.value.effects[0].error.code == "invalid_tool_output"
 
     asyncio.run(check())
+
+
+def test_timeout_effect_status_uses_cleanup_evidence() -> None:
+    async def check() -> None:
+        async def interrupted(arguments, context):
+            await asyncio.Event().wait()
+
+        async def completed(arguments, context):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return ToolTextContent("applied")
+
+        async def stubborn(arguments, context):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+        async def failed(arguments, context):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                raise ToolExecutionFailure(ToolErrorInfo("not_applied", "Action was not applied.")) from exc
+
+        async def uncertain(arguments, context):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                raise ToolEffectUnknown(ToolErrorInfo("ack_lost", "Action acknowledgement was lost.")) from exc
+
+        cases = (
+            (ToolEffectKind.READ_ONLY, interrupted, ToolEffectStatus.TIMED_OUT, "timeout"),
+            (ToolEffectKind.SIDE_EFFECTING, interrupted, ToolEffectStatus.UNKNOWN, "timeout"),
+            (ToolEffectKind.READ_ONLY, stubborn, ToolEffectStatus.TIMED_OUT, "timeout"),
+            (ToolEffectKind.SIDE_EFFECTING, stubborn, ToolEffectStatus.UNKNOWN, "timeout"),
+            (ToolEffectKind.SIDE_EFFECTING, completed, ToolEffectStatus.SUCCEEDED, None),
+            (ToolEffectKind.SIDE_EFFECTING, failed, ToolEffectStatus.FAILED, "not_applied"),
+            (ToolEffectKind.SIDE_EFFECTING, uncertain, ToolEffectStatus.UNKNOWN, "ack_lost"),
+        )
+        for effect_kind, handler, expected_status, expected_error in cases:
+            tool = Tool(_definition(), handler, effect_kind=effect_kind, timeout=0.001)
+            batch = await ToolExecutor(
+                registry=ToolRegistry((tool,)),
+                config=ToolExecutorConfig(cancellation_grace_period=0.01),
+            ).execute((ToolCall("t", "work", FrozenJsonObject({"value": 1})),), _context())
+            assert batch.results[0].error is not None and batch.results[0].error.code == "timeout"
+            effect = batch.effects[0]
+            assert effect.status is expected_status
+            assert (effect.error.code if effect.error else None) == expected_error
+            expected_retry_safe = not (
+                effect_kind is ToolEffectKind.SIDE_EFFECTING
+                and expected_status in {ToolEffectStatus.SUCCEEDED, ToolEffectStatus.UNKNOWN}
+            )
+            assert retry_safe(batch.effects) is expected_retry_safe
+
+    asyncio.run(check())
+
+
+def test_cancel_effect_status_is_conservative_for_side_effects() -> None:
+    async def check(effect_kind: ToolEffectKind) -> tuple[ToolEffectStatus, str]:
+        started = asyncio.Event()
+
+        async def handler(arguments, context):
+            started.set()
+            await asyncio.Event().wait()
+
+        cancellation = RuntimeCancellation()
+        context = ToolContext("run", "session", cancellation)
+        tool = Tool(_definition(), handler, effect_kind=effect_kind)
+        execution = asyncio.create_task(
+            ToolExecutor(registry=ToolRegistry((tool,))).execute(
+                (ToolCall("c", "work", FrozenJsonObject({"value": 1})),), context
+            )
+        )
+        await started.wait()
+        cancellation.cancel()
+        with pytest.raises(ToolBatchCancelled) as caught:
+            await execution
+        effect = caught.value.effects[0]
+        assert not effect.transcript_committed
+        assert effect.error is not None
+        assert retry_safe(caught.value.effects) is (effect_kind is ToolEffectKind.READ_ONLY)
+        return effect.status, effect.error.code
+
+    assert asyncio.run(check(ToolEffectKind.READ_ONLY)) == (ToolEffectStatus.CANCELLED, "cancelled")
+    assert asyncio.run(check(ToolEffectKind.SIDE_EFFECTING)) == (ToolEffectStatus.UNKNOWN, "effect_unknown")
 
 
 def test_filesystem_tools_are_scoped_atomic_and_deterministic(tmp_path: Path) -> None:

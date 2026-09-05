@@ -449,6 +449,10 @@ multi-Run commit ordering
 
 等复杂机制。
 
+`Session`、`Run` 及其内部 `asyncio` 同步原语只承诺在创建它们的同一 event loop
+内使用。ownership 的同步实现不得被解释为整个 Session 支持跨线程或跨 event-loop
+访问。
+
 ---
 
 ### 1.10 Session ownership 原子性
@@ -761,6 +765,9 @@ input_modalities
 ```text
 ModelCapabilityError
 ```
+
+该检查是严格 fail-fast：Runtime 不得静默删除、摘要、占位替换或转码不受支持的
+输入内容。需要降级的应用必须在构造 canonical `ModelContext` 前显式完成。
 
 Provider 返回内容也必须：
 
@@ -2238,6 +2245,10 @@ cancel tool task
 
 普通 timeout 不自动 fail whole Run。
 
+模型可见的调用结果仍是稳定的 `timeout` error；`ToolEffectRecord` 则独立记录 grace
+period 内获得的外部操作证据。因此 timeout result 可以同时对应 `SUCCEEDED`、
+`FAILED`、`UNKNOWN` 或（仅在没有更明确证据时）`TIMED_OUT` effect。
+
 ---
 
 ### 3.23 Ordinary Tool Failure
@@ -2249,6 +2260,10 @@ normalize to ToolExecutionResult.error
 ```
 
 其余 calls 继续。
+
+`ToolExecutionFailure` 表示 Tool 明确确认操作未成功；若 Tool 已启动但无法确认
+副作用是否发生，必须使用 `ToolEffectUnknown`。timeout/cancel 清理期间若没有得到
+上述明确信号，Runtime 对 `SIDE_EFFECTING` Tool 保守记录 `UNKNOWN`。
 
 只在：
 
@@ -2299,11 +2314,11 @@ class ToolEffectRecord:
 `tool_name` 必须与原始 `ToolCall` 完全一致，`effect_kind` 必须等于已注册 Tool 的
 声明；`content/error` 始终满足与 `ToolExecutionResult` 相同的 XOR 约束。
 
-| ToolEffectStatus | 对应模型可见 ToolResultStatus（若 batch 正常完成） | 含义 |
+| ToolEffectStatus | 通常对应的模型可见 ToolResultStatus | 含义 |
 | --- | --- | --- |
-| `SUCCEEDED` | `SUCCESS` | Tool 成功完成，`content` 存在且 `error` 为空。 |
-| `FAILED` | `ERROR` | Tool 明确失败，`error` 存在。 |
-| `TIMED_OUT` | `ERROR` | 超时，`error.code == "timeout"`。 |
+| `SUCCEEDED` | `SUCCESS`；deadline 已触发时仍可见 `ERROR` | Tool 成功完成，`content` 存在且 `error` 为空。 |
+| `FAILED` | `ERROR` | Tool 明确确认未成功，`error` 存在。 |
+| `TIMED_OUT` | `ERROR` | READ_ONLY Tool 超时且没有更明确结果，`error.code == "timeout"`。 |
 | `CANCELLED` | 不适用：Run cancellation 中止 batch | 已启动操作确认未成功完成。 |
 | `UNKNOWN` | 不适用：不可恢复中止 batch；正常 error result 时为 `ERROR` | 已启动操作的真实副作用无法确认。 |
 
@@ -2322,6 +2337,8 @@ error != None
 ```
 
 #### TIMED_OUT
+
+仅用于没有更明确结果的 `READ_ONLY` timeout：
 
 ```text
 content == None
@@ -2352,6 +2369,7 @@ error != None
 remote request sent but connection lost
 hardware command acknowledgement unavailable
 detached process cleanup uncertain
+SIDE_EFFECTING tool timeout or cancellation without explicit cleanup evidence
 ```
 
 ---
@@ -3649,6 +3667,9 @@ max_turns
 ```text
 FAILED + RunError(code="max_turns")
 ```
+
+`RunStatus` 只表示生命周期分类，不是 termination reason。run timeout 同样表示为
+`FAILED + RunError(code="timeout")`；具体失败原因始终由 `RunError.code` 承载。
 
 ---
 

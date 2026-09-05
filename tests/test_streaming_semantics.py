@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from roboagent.context import ModelContext
-from roboagent.message import AssistantMessage, FrozenJsonObject, ToolCall, UserMessage
+from roboagent.message import AssistantMessage, BytesSource, FrozenJsonObject, ImageContent, ToolCall, UserMessage
 from roboagent.model import (
     FinishReason,
     ModelCapabilities,
@@ -36,8 +36,10 @@ class EventModel:
         frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), True, True
     )
     closed: bool = False
+    called: bool = False
 
     async def stream(self, context, settings=None):
+        self.called = True
         try:
             for event in self.events:
                 yield event
@@ -110,7 +112,51 @@ def test_capability_validation_precedes_model_invocation() -> None:
         with pytest.raises(ModelCapabilityError) as caught:
             await collect_model_stream(model, ModelContext(None, (UserMessage("x"),), (definition,)))
         assert caught.value.code == "model_does_not_support_tools"
+        assert not model.called
         assert not model.closed
+
+    asyncio.run(check())
+
+
+def test_parallel_tool_calls_require_declared_capability() -> None:
+    async def check() -> None:
+        first = ToolCall("first", "lookup", FrozenJsonObject())
+        second = ToolCall("second", "lookup", FrozenJsonObject())
+        response = ModelResponse(AssistantMessage(tool_calls=(first, second)), FinishReason.TOOL_CALL)
+        model = EventModel(
+            (
+                ResponseStarted("r", 0),
+                ToolCallStarted(1, 0, first.id, first.name),
+                ToolCallCompleted(2, 0, first),
+                ToolCallStarted(3, 1, second.id, second.name),
+                ToolCallCompleted(4, 1, second),
+                ResponseCompleted(5, response),
+            ),
+            ModelCapabilities(
+                frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), True, False
+            ),
+        )
+        with pytest.raises(ModelCapabilityError) as caught:
+            await collect_model_stream(model, ModelContext(None, (UserMessage("x"),), ()))
+        assert caught.value.code == "parallel_tool_calls_unsupported"
+        assert model.called and model.closed
+
+    asyncio.run(check())
+
+
+def test_output_modality_requires_declared_capability() -> None:
+    async def check() -> None:
+        message = AssistantMessage((ImageContent(BytesSource(b"image"), "image/png"),))
+        model = EventModel(
+            (ResponseStarted("r", 0), ResponseCompleted(1, ModelResponse(message, FinishReason.STOP))),
+            ModelCapabilities(
+                frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False
+            ),
+        )
+        with pytest.raises(ModelCapabilityError) as caught:
+            await collect_model_stream(model, ModelContext(None, (UserMessage("x"),), ()))
+        assert caught.value.code == "unsupported_output_modality"
+        assert model.called and model.closed
 
     asyncio.run(check())
 
