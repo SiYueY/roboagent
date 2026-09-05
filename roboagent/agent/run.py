@@ -19,10 +19,11 @@ from roboagent.runtime.types import (
     RunState,
     RunStatus,
     RuntimeCancellation,
+    ToolCallSummary,
 )
 from roboagent.tool import ToolEffectRecord, ToolExecutor, retry_safe
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, cast
 
 if TYPE_CHECKING:
     from roboagent.message import UserMessage
@@ -68,8 +69,14 @@ class Run:
     def subscribe(self, config: EventSubscriptionConfig | None = None) -> EventSubscription:
         return self._events.subscribe(config)
 
-    def _set_state(self, phase: RunPhase, turn: int, **values: object) -> None:
-        self._state = RunState(phase, turn, **values)
+    def _set_state(
+        self,
+        phase: RunPhase,
+        turn: int,
+        *,
+        pending_tool_calls: tuple[ToolCallSummary, ...] = (),
+    ) -> None:
+        self._state = RunState(phase, turn, pending_tool_calls=pending_tool_calls)
 
     async def _execute(self) -> None:
         context = RunContext(self.run_id, self.session.session_id, self._cancellation)
@@ -236,7 +243,7 @@ class Run:
         return tuple(results)
 
     async def _await_hook(self, value: object) -> object:
-        task = asyncio.ensure_future(value)  # type: ignore[arg-type]
+        task = asyncio.ensure_future(cast(Awaitable[object], value))
         cancelled = asyncio.create_task(self._cancellation.wait_cancelled())
         try:
             done, _ = await asyncio.wait(

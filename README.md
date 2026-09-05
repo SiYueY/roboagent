@@ -1,8 +1,9 @@
-# RoboAgent 1.1
+# RoboAgent 1.2
 
 RoboAgent is a provider-neutral Python runtime for multimodal, tool-calling
-agents. Version 1.1 exposes one canonical runtime only; earlier names and
-adapters are intentionally not retained.
+agents. Version 1.2 extends the canonical V1.1 Runtime Kernel with bounded
+context compaction, durable Sessions, artifact materialization, MCP adaptation,
+and approval without introducing a parallel runtime.
 
 ## Explicit composition
 
@@ -27,8 +28,9 @@ async for event in run.subscribe():
 result = await run.result()
 ```
 
-`Agent` is immutable and registers no builtin tools. `Session` owns the durable
-transcript, a pending `UserMessage` queue, and at most one active `Run`. A `Run`
+`Agent` is immutable and registers no builtin tools. `Session` owns the canonical
+transcript, compaction state, Workspace, persistence repository, a pending
+`UserMessage` queue, and at most one active `Run`. A `Run`
 owns cancellation, bounded event subscriptions, effects, usage, and its final
 `RunResult`.
 
@@ -41,4 +43,4 @@ Messages support text, image, audio, and file content. Model adapters declare
 their capabilities and reject unsupported inputs before issuing a request.
 
 Runnable integrations live in [examples](examples/README.md). The normative
-runtime contract is [docs/roboagent_v1.1.md](docs/roboagent_v1.1.md).
+runtime contract is [docs/roboagent_v1.2.md](docs/roboagent_v1.2.md).

@@ -1,7 +1,8 @@
 # Agent Module
 
 `Agent` is immutable capability composition: `Model`, `ToolRegistry`, prompt,
-`ContextManager`, hooks, policy, limits, and an optional `SkillManager`.
+`ContextManager`, hooks, policy, approval provider/settings, limits, and an
+optional `SkillManager`.
 
 `Session` is the single writer for a conversation transcript. It reserves one
 active `Run` atomically and owns the ordered pending-input queue. `steer()` and
@@ -22,3 +23,10 @@ or `CANCELLED`; timeout and max-turn termination are coded failures.
 `AgentLoop` only orchestrates context, canonical model streams, tools, atomic
 transcript commits, and lifecycle hooks. Provider fragments and builtin-specific
 behavior stay outside the loop.
+
+A persistent Session tracks runtime and durable revisions separately. Repository
+writes use compare-and-swap; the local backend holds a per-session process lock
+across revision comparison, unique temporary write, fsync, atomic replacement,
+and parent-directory fsync. Persistence failure never rolls back accepted
+runtime truth. `SessionSnapshot` contains canonical messages, pending order,
+compaction, and metadata, but never live Runtime services or an active Run.

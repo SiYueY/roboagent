@@ -147,6 +147,15 @@ async def _run_loop_impl(
                 if prepared.compaction_update is None:
                     break
                 if await session.commit_compaction(run_context.run_id, prepared.compaction_update):
+                    summary = prepared.compaction_update.summary
+                    payload: dict[str, object] = {"outcome": "cleared" if summary is None else "updated"}
+                    if summary is not None:
+                        payload.update(
+                            source_end_exclusive=summary.source_end_exclusive,
+                            source_digest=summary.source_digest,
+                            summary_format_version=summary.summary_format_version,
+                        )
+                    await events.emit("context.compaction_completed", **payload)
                     break
             model_context = prepared.model_context
             if not isinstance(model_context, ModelContext):
@@ -154,6 +163,8 @@ async def _run_loop_impl(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if getattr(exc, "code", None) == "context_compaction_error":
+                await events.emit("context.compaction_failed", error_code="context_compaction_error")
             raise _RunFailure(
                 RunError(getattr(exc, "code", "context_error"), "Context preparation failed.", cause_type=type(exc).__name__),
                 tuple(effects), output, usage, turn,

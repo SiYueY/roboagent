@@ -20,6 +20,7 @@ from roboagent.message import (
     canonical_message_digest,
 )
 from roboagent.runtime.types import CancellationToken
+from roboagent.runtime.event import RunEventEmitter
 
 if TYPE_CHECKING:
     from roboagent.agent.agent import Agent
@@ -87,6 +88,7 @@ class Session:
     _runtime_revision: int = field(default=0, init=False, repr=False)
     _durable_revision: int | None = field(default=None, init=False, repr=False)
     _persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _event_emitter: RunEventEmitter | None = field(default=None, init=False, repr=False)
 
     def __init__(
         self,
@@ -132,6 +134,7 @@ class Session:
         self._runtime_revision = 0
         self._durable_revision = None
         self._persist_lock = asyncio.Lock()
+        self._event_emitter = None
         TranscriptValidator(self._media_limits).validate(self._messages)
 
     @property
@@ -186,16 +189,17 @@ class Session:
         with self._ownership_lock:
             return self._closed
 
-    async def acquire_run(self, run_id: str) -> None:
-        self._acquire_run_nowait(run_id)
+    async def acquire_run(self, run_id: str, events: RunEventEmitter | None = None) -> None:
+        self._acquire_run_nowait(run_id, events)
 
-    def _acquire_run_nowait(self, run_id: str) -> None:
+    def _acquire_run_nowait(self, run_id: str, events: RunEventEmitter | None = None) -> None:
         with self._ownership_lock:
             if self._closed:
                 raise SessionClosedError("Session is closed.")
             if self._active_run_id is not None:
                 raise SessionBusyError("Session already has an active Run.")
             self._active_run_id = run_id
+            self._event_emitter = events
 
     async def release_run(self, run_id: str) -> None:
         self._release_run_nowait(run_id)
@@ -205,6 +209,7 @@ class Session:
             if self._active_run_id != run_id:
                 raise SessionOwnershipError("Only the owning Run may release the Session.")
             self._active_run_id = None
+            self._event_emitter = None
 
     async def steer(self, message: UserMessage) -> InputReceipt:
         return await self._enqueue("steer", message)
@@ -291,7 +296,7 @@ class Session:
         if message is not None and not isinstance(message, UserMessage):
             raise TypeError("Session.start accepts UserMessage or None.")
         run = Run(self, config or self.agent.default_run_config)
-        self._acquire_run_nowait(run.run_id)
+        self._acquire_run_nowait(run.run_id, run._events)
         run._initial_message = message
         run._initial_pending_sequence = self._sequence
         skill_bound = False
@@ -332,7 +337,7 @@ class Session:
     async def commit_exchange(self, run_id: str, assistant: AssistantMessage, results: tuple[ToolResultMessage, ...]) -> None:
         if self.active_run_id != run_id:
             raise SessionOwnershipError("Only the active Run may commit transcript facts.")
-        block = (assistant, *results)
+        block: tuple[AgentMessage, ...] = (assistant, *results)
         async with self._transcript_lock:
             TranscriptValidator(self._media_limits).validate((*self._messages, *block))
             self._messages.extend(block)
@@ -372,18 +377,31 @@ class Session:
         async with self._persist_lock:
             if self._durable_revision is not None and self._durable_revision >= required_revision:
                 return self._durable_revision
-            snapshot = await self.snapshot()
-            expected = self._durable_revision
             try:
+                snapshot = await self.snapshot()
+                expected = self._durable_revision
                 persisted = await self.repository.save(snapshot, expected_revision=expected)
-            except SessionPersistenceError:
+                if persisted != snapshot.revision:
+                    raise SessionPersistenceError("Repository returned an unexpected revision.")
+            except SessionPersistenceError as exc:
+                await self._emit_persistence_event(
+                    "session.persistence_failed", required_revision=required_revision, error_code=exc.code
+                )
                 raise
             except Exception as exc:
-                raise SessionPersistenceError("Session repository save failed.") from exc
-            if persisted != snapshot.revision:
-                raise SessionPersistenceError("Repository returned an unexpected revision.")
+                error = SessionPersistenceError("Session repository save failed.")
+                await self._emit_persistence_event(
+                    "session.persistence_failed", required_revision=required_revision, error_code=error.code
+                )
+                raise error from exc
             self._durable_revision = persisted
+            await self._emit_persistence_event("session.persisted", revision=persisted)
             return persisted
+
+    async def _emit_persistence_event(self, event_type: str, **payload: object) -> None:
+        emitter = self._event_emitter
+        if emitter is not None:
+            await emitter.emit(event_type, **payload)
 
     @classmethod
     def restore(
@@ -447,6 +465,7 @@ class Session:
         session._runtime_revision = snapshot.revision
         session._durable_revision = snapshot.revision
         session._active_run_id = None
+        session._event_emitter = None
         return session
 
     async def set_metadata(self, metadata: FrozenJsonObject) -> None:

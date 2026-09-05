@@ -25,7 +25,10 @@ from roboagent.tool import (
     ToolRegistry,
     ToolTextContent,
     WorkspacePermissionError,
+    WorkspaceError,
+    WorkspaceArtifactMissingError,
     WorkspaceToolResultMaterializer,
+    read_artifact,
     result_message,
     retry_safe,
 )
@@ -45,12 +48,47 @@ def _definition() -> ToolDefinition:
 
 def test_raw_multi_content_order_survives_inline_materialization() -> None:
     async def check() -> None:
-        raw = RawToolResult((ToolTextContent("one"), ToolJsonContent({"two": 2}), ResourceToolContent("https://x/3")))
+        raw = RawToolResult((ToolTextContent("one"), ToolJsonContent({"two": 2}), ToolTextContent("three")))
         tool = Tool(_definition(), lambda arguments, context: raw)
         batch = await ToolExecutor(registry=ToolRegistry((tool,))).execute((_call(),), _context())
-        assert batch.results[0].content == (ToolTextContent("one"), ToolJsonContent({"two": 2}), ToolTextContent("https://x/3"))
+        assert batch.results[0].content == (ToolTextContent("one"), ToolJsonContent({"two": 2}), ToolTextContent("three"))
         message = result_message(batch.results[0])
-        assert message.content == (TextContent("one"), JsonContent({"two": 2}), TextContent("https://x/3"))
+        assert message.content == (TextContent("one"), JsonContent({"two": 2}), TextContent("three"))
+
+    asyncio.run(check())
+
+
+def test_transport_scoped_resource_without_bytes_fails_explicitly() -> None:
+    async def check() -> None:
+        raw = RawToolResult((ResourceToolContent("mcp://temporary/resource"),))
+        tool = Tool(_definition(), lambda arguments, context: raw)
+        with pytest.raises(ToolBatchAborted) as caught:
+            await ToolExecutor(registry=ToolRegistry((tool,))).execute((_call(),), _context())
+        assert caught.value.reason.code == "workspace_artifact_missing"
+        assert caught.value.effects[0].status is ToolEffectStatus.SUCCEEDED
+
+    asyncio.run(check())
+
+
+def test_workspace_metadata_mismatch_fails_after_preserving_physical_success() -> None:
+    async def check() -> None:
+        class InconsistentWorkspace(InMemoryWorkspace):
+            async def write(self, path, data, *, media_type=None):
+                entry = await super().write(path, data, media_type=media_type)
+                return type(entry)(entry.path, entry.size + 1, entry.media_type, entry.digest)
+
+        workspace = InconsistentWorkspace()
+        materializer = WorkspaceToolResultMaterializer(
+            workspace=workspace,
+            limits=ToolOutputLimits(max_raw_bytes=100, max_inline_bytes=1),
+        )
+        tool = Tool(_definition(), lambda arguments, context: ToolTextContent("large"))
+        with pytest.raises(ToolBatchAborted) as caught:
+            await ToolExecutor(
+                registry=ToolRegistry((tool,)), result_materializer=materializer
+            ).execute((_call(),), _context())
+        assert caught.value.reason.code == "tool_materialization_error"
+        assert caught.value.effects[0].status is ToolEffectStatus.SUCCEEDED
 
     asyncio.run(check())
 
@@ -149,5 +187,48 @@ def test_local_workspace_rejects_escape_absolute_and_symlink(tmp_path) -> None:
         (workspace.root / "link").symlink_to(outside, target_is_directory=True)
         with pytest.raises(WorkspacePermissionError):
             await workspace.write("link/escape", b"bad")
+
+    asyncio.run(check())
+
+
+def test_local_artifact_is_durable_immutable_and_integrity_checked(tmp_path) -> None:
+    async def check() -> None:
+        root = tmp_path / "workspace"
+        workspace = LocalWorkspace(root)
+        materializer = WorkspaceToolResultMaterializer(
+            workspace=workspace,
+            limits=ToolOutputLimits(max_raw_bytes=100, max_inline_bytes=1),
+        )
+        raw = RawToolResult((ToolTextContent("persistent"),))
+        first = await materializer.materialize(
+            raw, call=_call(), context=_context(), cancellation=_context().cancellation
+        )
+        second = await materializer.materialize(
+            raw, call=_call(), context=_context(), cancellation=_context().cancellation
+        )
+        assert first == second
+        artifact = first[0]
+        assert isinstance(artifact, ArtifactReferenceContent)
+
+        reopened = LocalWorkspace(root)
+        assert await read_artifact(reopened, artifact) == b"persistent"
+        with pytest.raises(WorkspacePermissionError):
+            await reopened.delete(artifact.uri.removeprefix("workspace://"))
+
+        wrong_digest = ArtifactReferenceContent(
+            artifact.uri, artifact.media_type, artifact.size, "sha256:" + "0" * 64
+        )
+        with pytest.raises(WorkspaceError, match="integrity"):
+            await read_artifact(reopened, wrong_digest)
+
+        missing = ArtifactReferenceContent(
+            "workspace://blobs/sha256/" + "f" * 64,
+            "text/plain",
+            1,
+            "sha256:" + "f" * 64,
+        )
+        with pytest.raises(WorkspaceArtifactMissingError) as caught:
+            await read_artifact(reopened, missing)
+        assert caught.value.code == "workspace_artifact_missing"
 
     asyncio.run(check())

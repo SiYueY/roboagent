@@ -25,3 +25,20 @@ that a side-effecting operation failed.
 
 Filesystem, shell, and `read_skill` are ordinary explicitly registered Tools.
 `Agent` registers none by default.
+
+Tool handlers normalize into an ordered `RawToolResult`. A
+`ToolResultMaterializer` converts it exactly once before ToolExchange commit;
+large or binary blocks become the single canonical
+`ArtifactReferenceContent` form through the Session Workspace. Invocation
+evidence is fixed before materialization, so materialization failure cannot
+change known physical success to `UNKNOWN`.
+
+`read_artifact()` performs normalized URI-to-path resolution and verifies the
+stored byte length and SHA-256 digest. Digest-addressed blobs are immutable and
+cannot be removed through generic Workspace deletion.
+
+Policy returns `ToolPolicyDecision`. `REQUIRE_APPROVAL` binds an immutable
+request to the exact canonical argument digest. Approval rejection, timeout,
+provider failure, mismatch, or Run cancellation occurs before execution and
+therefore creates no `ToolEffectRecord`. Approval observation events omit
+arguments and policy reasons.

@@ -113,7 +113,7 @@ class ConservativeTokenEstimator:
                     for call in message.tool_calls:
                         characters += len(call.id) + len(call.name) + len(canonical_json_dumps(call.arguments))
                 elif isinstance(message, ToolResultMessage) and message.error is not None:
-                    characters += len(message.error.code) + len(message.error.message)
+                    characters += len(getattr(message.error, "code")) + len(getattr(message.error, "message"))
             else:
                 characters += len(segment.uri) + len(segment.preview or "") + len(segment.media_type or "")
         return TokenEstimate(framing + math.ceil(characters / 4), exact=False)

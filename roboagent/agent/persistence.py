@@ -12,7 +12,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from roboagent.context import ContextSummary
 from roboagent.message import (
@@ -27,6 +27,9 @@ from roboagent.message import (
     FrozenJsonObject,
     ImageContent,
     JsonContent,
+    JsonValue,
+    MediaSource,
+    MessageContent,
     TextContent,
     ToolCall,
     ToolResultMessage,
@@ -115,7 +118,9 @@ class CanonicalMessageCodec:
                     "tool_call_id": message.tool_call_id,
                     "tool_name": message.tool_name,
                     "status": message.status.value,
-                    "error": None if message.error is None else _error_data(message.error),
+                    "error": None
+                    if message.error is None
+                    else _error_data(cast(ToolErrorInfo, message.error)),
                 }
             )
         return data
@@ -126,16 +131,15 @@ class CanonicalMessageCodec:
         timestamp = data.get("timestamp")
         if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
             raise SessionCorruptedError("Invalid message timestamp.")
-        content = tuple(self._decode_content(item) for item in data["content"])
+        content: tuple[MessageContent, ...] = tuple(
+            self._decode_content(item) for item in data["content"]
+        )
         kind = data.get("type")
         try:
             if kind == "user_message":
                 return UserMessage(content, timestamp=float(timestamp))
             if kind == "assistant_message":
-                calls = tuple(
-                    ToolCall(item["id"], item["name"], _decode_json(item["arguments"]))
-                    for item in _list(data.get("tool_calls", []))
-                )
+                calls = tuple(self._decode_tool_call(item) for item in _list(data.get("tool_calls", [])))
                 return AssistantMessage(content, calls, timestamp=float(timestamp))
             if kind == "tool_message":
                 status = ToolResultStatus(data["status"])
@@ -147,6 +151,13 @@ class CanonicalMessageCodec:
         except (KeyError, TypeError, ValueError) as exc:
             raise SessionCorruptedError("Invalid message fields.") from exc
         raise SessionCorruptedError("Unknown message type.")
+
+    def _decode_tool_call(self, data: object) -> ToolCall:
+        value = _dict(data)
+        arguments = _decode_json(value["arguments"])
+        if not isinstance(arguments, FrozenJsonObject):
+            raise SessionCorruptedError("ToolCall arguments must be a JSON object.")
+        return ToolCall(value["id"], value["name"], arguments)
 
     def _content(self, item: object) -> dict[str, object]:
         if isinstance(item, TextContent):
@@ -168,12 +179,12 @@ class CanonicalMessageCodec:
                 source_data = {"type": "file", "path": source.path}
             else:
                 source_data = {"type": "url", "url": source.url}
-            data = {"type": "image" if isinstance(item, ImageContent) else "audio" if isinstance(item, AudioContent) else "file", "source": source_data, "media_type": item.media_type}
+            data: dict[str, object] = {"type": "image" if isinstance(item, ImageContent) else "audio" if isinstance(item, AudioContent) else "file", "source": source_data, "media_type": item.media_type}
             data["detail" if isinstance(item, ImageContent) else "transcript" if isinstance(item, AudioContent) else "filename"] = getattr(item, "detail", getattr(item, "transcript", getattr(item, "filename", None)))
             return data
         raise SessionPersistenceError("Unknown message content type.")
 
-    def _decode_content(self, data: object) -> object:
+    def _decode_content(self, data: object) -> MessageContent:
         value = _dict(data)
         kind = value.get("type")
         try:
@@ -186,6 +197,7 @@ class CanonicalMessageCodec:
             if kind in {"image", "audio", "file"}:
                 source_data = _dict(value["source"])
                 source_kind = source_data.get("type")
+                source: MediaSource
                 if source_kind == "bytes":
                     if source_data.get("encoding") != "base64":
                         raise SessionCorruptedError("Unknown bytes encoding.")
@@ -250,26 +262,27 @@ class JsonSessionSnapshotCodec:
             raise SessionVersionUnsupportedError("Unsupported Session snapshot version.")
         try:
             messages = tuple(self.messages.decode(item) for item in _list(value["messages"]))
-            pending = tuple(
-                PendingInput(
-                    InputReceipt(**_dict(item["receipt"])),
-                    self.messages.decode(item["message"]),
-                    item["kind"],
-                )
-                for item in map(_dict, _list(value["pending"]))
-            )
-            if not all(isinstance(item.message, UserMessage) for item in pending):
-                raise SessionCorruptedError("Pending messages must be UserMessage values.")
+            pending = tuple(self._decode_pending(item) for item in _list(value["pending"]))
             compaction_data = value.get("compaction")
             compaction = None if compaction_data is None else ContextSummary(**_dict(compaction_data))
+            metadata = _decode_json(value["metadata"])
+            if not isinstance(metadata, FrozenJsonObject):
+                raise SessionCorruptedError("Session metadata must be a JSON object.")
             return SessionSnapshot(
                 value["schema_version"], value["session_id"], value["revision"], value["last_pending_sequence"],
-                messages, pending, compaction, _decode_json(value["metadata"]),
+                messages, pending, compaction, metadata,
             )
         except SessionPersistenceError:
             raise
         except Exception as exc:
             raise SessionCorruptedError("Invalid Session snapshot.") from exc
+
+    def _decode_pending(self, data: object) -> PendingInput:
+        value = _dict(data)
+        message = self.messages.decode(value["message"])
+        if not isinstance(message, UserMessage):
+            raise SessionCorruptedError("Pending messages must be UserMessage values.")
+        return PendingInput(InputReceipt(**_dict(value["receipt"])), message, value["kind"])
 
 
 class SessionRepository(Protocol):
@@ -412,7 +425,7 @@ def _encode_json(value: object) -> object:
     return {"type": "scalar", "value": frozen}
 
 
-def _decode_json(value: object) -> object:
+def _decode_json(value: object) -> JsonValue:
     data = _dict(value)
     kind = data.get("type")
     if kind == "scalar":

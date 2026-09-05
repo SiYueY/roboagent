@@ -85,7 +85,7 @@ class ContextSummary:
 
     def __post_init__(self) -> None:
         if self.source_start != 0:
-            raise ValueError("V1.2 summaries must start at the transcript prefix.")
+            raise ValueError("Context summaries must start at the transcript prefix.")
         if not isinstance(self.source_end_exclusive, int) or isinstance(self.source_end_exclusive, bool) or self.source_end_exclusive < 0:
             raise ValueError("source_end_exclusive must be a non-negative integer.")
         if not isinstance(self.source_digest, str) or not self.source_digest:

@@ -64,10 +64,13 @@ from .workspace import (
     InMemoryWorkspace,
     LocalWorkspace,
     Workspace,
+    WorkspaceArtifactMissingError,
     WorkspaceEntry,
     WorkspaceError,
     WorkspaceMissingError,
     WorkspacePermissionError,
+    read_artifact,
+    workspace_path,
 )
 
 __all__ = [
@@ -113,10 +116,13 @@ __all__ = [
     "ToolRegistry",
     "ToolTextContent",
     "Workspace",
+    "WorkspaceArtifactMissingError",
     "WorkspaceEntry",
     "WorkspaceError",
     "WorkspaceMissingError",
     "WorkspacePermissionError",
+    "read_artifact",
+    "workspace_path",
     "WorkspaceToolResultMaterializer",
     "InMemoryWorkspace",
     "InlineToolResultMaterializer",

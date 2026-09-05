@@ -10,5 +10,12 @@ terminal event is last. Late subscribers still receive the retained terminal
 event. Event stores persist frozen payloads without merging them into transcript
 or Run state.
 
+Long-horizon observation types are `context.compaction_completed`,
+`context.compaction_failed`, `session.persisted`,
+`session.persistence_failed`, `approval.requested`, `approval.resolved`,
+`mcp.connected`, and `mcp.disconnected`. Payloads are JSON-safe and deliberately
+exclude approval arguments/reasons, MCP client state and credentials, canonical
+message content, and artifact previews.
+
 `RunStatus` is a lifecycle class (`COMPLETED`, `FAILED`, or `CANCELLED`), while
 `RunError.code` carries termination causes such as `timeout` and `max_turns`.

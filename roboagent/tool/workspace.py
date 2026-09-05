@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol, Sequence
 
+from roboagent.message import ArtifactReferenceContent
+
 
 class WorkspaceError(RuntimeError):
     code = "workspace_error"
@@ -20,6 +22,10 @@ class WorkspacePermissionError(WorkspaceError):
 
 
 class WorkspaceMissingError(WorkspaceError):
+    code = "workspace_not_found"
+
+
+class WorkspaceArtifactMissingError(WorkspaceError):
     code = "workspace_artifact_missing"
 
 
@@ -63,6 +69,38 @@ def normalize_workspace_path(path: str, *, allow_root: bool = False) -> str:
 def workspace_uri(path: str) -> str:
     normalized = normalize_workspace_path(path)
     return f"workspace://{normalized}"
+
+
+def workspace_path(uri: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(uri) if isinstance(uri, str) else None
+    if (
+        parsed is None
+        or parsed.scheme != "workspace"
+        or parsed.netloc not in {"blobs", "files"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.params
+        or "%" in uri
+        or "//" in parsed.path
+        or any(part in {"", ".", ".."} for part in parsed.path.split("/")[1:])
+    ):
+        raise WorkspacePermissionError("Invalid workspace artifact URI.")
+    return normalize_workspace_path(f"{parsed.netloc}{parsed.path}")
+
+
+async def read_artifact(workspace: Workspace, artifact: ArtifactReferenceContent) -> bytes:
+    if not isinstance(artifact, ArtifactReferenceContent):
+        raise TypeError("artifact must be ArtifactReferenceContent.")
+    try:
+        data = await workspace.read(workspace_path(artifact.uri))
+    except WorkspaceMissingError as exc:
+        raise WorkspaceArtifactMissingError("Workspace artifact is missing.") from exc
+    digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    if len(data) != artifact.size or digest != artifact.digest:
+        raise WorkspaceError("Workspace artifact integrity check failed.")
+    return data
 
 
 class InMemoryWorkspace:

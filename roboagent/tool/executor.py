@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass, replace
-from typing import Protocol, Sequence
+from typing import Awaitable, Protocol, Sequence, cast
 from uuid import uuid4
 
 from roboagent.message import ArtifactReferenceContent, JsonContent, TextContent, ToolCall, ToolResultMessage, ToolResultStatus, canonical_json_digest
@@ -17,7 +17,6 @@ from .tool import (
     Tool,
     ToolBatchAborted,
     ToolBatchResult,
-    ToolContent,
     ToolContractError,
     ToolContext,
     ToolDecision,
@@ -31,7 +30,9 @@ from .tool import (
     ToolExecutionPolicy,
     ToolExecutionResult,
     ToolPolicyDecision,
+    ToolJsonContent,
     ToolRegistry,
+    ToolReturn,
     ToolTextContent,
     validate_tool_arguments,
 )
@@ -194,7 +195,10 @@ class ToolExecutor:
             _present_effects(effects),
         )
 
-    async def _cancel_tasks(self, running: dict[asyncio.Task[object], int]) -> tuple[ToolEffectRecord, ...]:
+    async def _cancel_tasks(
+        self,
+        running: dict[asyncio.Task[tuple[ToolExecutionResult, ToolEffectRecord | None]], int],
+    ) -> tuple[ToolEffectRecord, ...]:
         for task in running:
             task.cancel()
         settled = await asyncio.gather(*running, return_exceptions=True)
@@ -392,7 +396,7 @@ class ToolExecutor:
 
     async def _cancel_started(
         self,
-        task: asyncio.Task[ToolContent | RawToolResult],
+        task: asyncio.Task[ToolReturn],
         tool: Tool,
         call: ToolCall,
         *,
@@ -400,7 +404,7 @@ class ToolExecutor:
     ) -> ToolEffectRecord:
         task.cancel()
         try:
-            content = await asyncio.wait_for(asyncio.shield(task), self.config.cancellation_grace_period)
+            returned = await asyncio.wait_for(asyncio.shield(task), self.config.cancellation_grace_period)
         except TimeoutError:
             task.cancel()
             task.add_done_callback(_consume_task_result)
@@ -409,7 +413,7 @@ class ToolExecutor:
         except ToolExecutionFailure as exc:
             return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=self._bounded_error(exc.error))
         except asyncio.CancelledError:
-            content = None
+            pass
         except Exception:
             if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
                 error = ToolErrorInfo("effect_unknown", "Tool side effect could not be determined.")
@@ -417,7 +421,7 @@ class ToolExecutor:
             error = ToolErrorInfo("execution_error", "Tool execution failed during cancellation.")
             return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=error)
         else:
-            raw = content if isinstance(content, RawToolResult) else RawToolResult((content,))
+            raw = returned if isinstance(returned, RawToolResult) else RawToolResult((returned,))
             evidence = raw_result_evidence(raw)
             return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.SUCCEEDED, content=evidence)
         if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
@@ -442,8 +446,6 @@ class ToolExecutor:
         context: ToolContext,
         reason: str | None,
     ) -> ToolExecutionResult | None:
-        if self.approval_provider is None:
-            raise ToolBatchAborted(RunError("approval_error", "Tool approval is required but no provider is configured."))
         request = ApprovalRequest(
             uuid4().hex,
             context.run_id,
@@ -454,6 +456,15 @@ class ToolExecutor:
             canonical_json_digest(call.arguments),
             reason,
         )
+        await self._emit(
+            "approval.requested",
+            call,
+            approval_id=request.approval_id,
+            arguments_digest=request.arguments_digest,
+        )
+        if self.approval_provider is None:
+            await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
+            raise ToolBatchAborted(RunError("approval_error", "Tool approval is required but no provider is configured."))
         task = asyncio.create_task(self.approval_provider.request(request, context.cancellation))
         cancelled = asyncio.create_task(context.cancellation.wait_cancelled())
         try:
@@ -465,31 +476,43 @@ class ToolExecutor:
             if cancelled in done:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+                await self._emit_approval_resolved(request, call, outcome="cancelled", error_code="cancelled")
                 raise asyncio.CancelledError()
             if task not in done:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 context.cancellation.raise_if_cancelled()
                 result = self._error(call, "approval_timeout", "Tool approval timed out.")
+                await self._emit_approval_resolved(
+                    request, call, outcome="timed_out", error_code="approval_timeout"
+                )
                 await self._emit_terminal("tool.failed", call, "approval_timeout")
                 return result
             try:
                 response = task.result()
             except asyncio.CancelledError:
                 context.cancellation.raise_if_cancelled()
+                await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
                 raise ToolBatchAborted(RunError("approval_error", "Approval provider cancelled unexpectedly."))
             except Exception as exc:
+                await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
                 raise ToolBatchAborted(
                     RunError("approval_error", "Approval provider failed.", cause_type=type(exc).__name__)
                 ) from exc
             if not isinstance(response, ApprovalResponse):
+                await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
                 raise ToolBatchAborted(RunError("approval_error", "Approval provider returned an invalid response."))
             if response.approval_id != request.approval_id or response.arguments_digest != request.arguments_digest:
+                await self._emit_approval_resolved(request, call, outcome="mismatch", error_code="approval_mismatch")
                 raise ToolBatchAborted(RunError("approval_mismatch", "Approval response did not match the ToolCall."))
             if response.decision is ApprovalDecision.REJECT:
                 result = self._error(call, "approval_rejected", "Tool call was not approved.")
+                await self._emit_approval_resolved(
+                    request, call, outcome="rejected", error_code="approval_rejected"
+                )
                 await self._emit_terminal("tool.failed", call, "approval_rejected")
                 return result
+            await self._emit_approval_resolved(request, call, outcome="approved", error_code=None)
             return None
         finally:
             cancelled.cancel()
@@ -554,7 +577,7 @@ class ToolExecutor:
             raise ToolBatchAborted(exc.reason, (effect,)) from exc
 
     async def _await_hook(self, awaitable: object, context: ToolContext) -> object:
-        task = asyncio.ensure_future(awaitable)  # type: ignore[arg-type]
+        task = asyncio.ensure_future(cast(Awaitable[object], awaitable))
         cancelled = asyncio.create_task(context.cancellation.wait_cancelled())
         try:
             done, _ = await asyncio.wait(
@@ -593,6 +616,23 @@ class ToolExecutor:
     async def _emit_terminal(self, event_type: str, call: ToolCall, error_code: str | None) -> None:
         await self._emit(event_type, call, error_code=error_code)
 
+    async def _emit_approval_resolved(
+        self,
+        request: ApprovalRequest,
+        call: ToolCall,
+        *,
+        outcome: str,
+        error_code: str | None,
+    ) -> None:
+        await self._emit(
+            "approval.resolved",
+            call,
+            approval_id=request.approval_id,
+            arguments_digest=request.arguments_digest,
+            outcome=outcome,
+            error_code=error_code,
+        )
+
 
 def result_message(result: ToolExecutionResult) -> ToolResultMessage:
     if result.content is not None:
@@ -600,7 +640,7 @@ def result_message(result: ToolExecutionResult) -> ToolResultMessage:
             TextContent(item.text)
             if isinstance(item, ToolTextContent)
             else JsonContent(item.value)
-            if hasattr(item, "value")
+            if isinstance(item, ToolJsonContent)
             else item
             for item in result.content
         )

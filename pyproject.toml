@@ -1,6 +1,6 @@
 [project]
 name = "RoboAgent"
-version = "1.1.0"
+version = "1.2.0"
 description = "The Brain of an Autonomous Robot System"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,9 +35,14 @@ speech-alsa = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.1",
     "pytest>=8.0",
     "ruff>=0.11",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [tool.ruff]
 target-version = "py312"
@@ -52,6 +57,24 @@ ignore = ["E701", "E702"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 
-[[tool.uv.index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
+[tool.mypy]
+python_version = "3.12"
+follow_imports = "silent"
+ignore_missing_imports = true
+check_untyped_defs = true
+files = [
+    "roboagent/message.py",
+    "roboagent/context/manager.py",
+    "roboagent/context/budget.py",
+    "roboagent/tool/tool.py",
+    "roboagent/tool/workspace.py",
+    "roboagent/tool/materializer.py",
+    "roboagent/tool/approval.py",
+    "roboagent/tool/executor.py",
+    "roboagent/agent/persistence.py",
+    "roboagent/agent/session.py",
+    "roboagent/agent/loop.py",
+    "roboagent/agent/run.py",
+    "roboagent/mcp.py",
+    "roboagent/runtime",
+]

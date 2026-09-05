@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 
 import pytest
 
@@ -15,6 +16,7 @@ from roboagent.agent import (
     SessionCorruptedError,
     SessionPersistenceError,
     SessionSnapshot,
+    SessionVersionUnsupportedError,
 )
 from roboagent.context import ContextSummary
 from roboagent.message import (
@@ -49,6 +51,20 @@ def _snapshot(revision: int, *, session_id: str = "session") -> SessionSnapshot:
     return SessionSnapshot(1, session_id, revision, 0, (), ())
 
 
+def _competing_cas_writer(root: str, revision: int, barrier, results) -> None:
+    async def save() -> None:
+        repository = LocalSessionRepository(root)
+        barrier.wait()
+        try:
+            await repository.save(_snapshot(revision), expected_revision=1)
+        except SessionConflictError:
+            results.put("conflict")
+        else:
+            results.put("saved")
+
+    asyncio.run(save())
+
+
 def test_snapshot_codec_round_trips_all_current_content_and_ordered_json() -> None:
     call = ToolCall("call", "work", FrozenJsonObject((("z", 1), ("a", [2]))))
     artifact = ArtifactReferenceContent(
@@ -69,6 +85,23 @@ def test_snapshot_codec_round_trips_all_current_content_and_ordered_json() -> No
     assert restored == snapshot
     assert list(restored.metadata) == ["z", "a"]
     assert canonical_message_digest(restored.messages[:1]) == summary.source_digest
+
+
+def test_snapshot_codec_rejects_unsupported_schema_unknown_type_and_large_bytes() -> None:
+    codec = JsonSessionSnapshotCodec(max_inline_bytes=1)
+    with pytest.raises(SessionPersistenceError, match="Inline media"):
+        codec.encode(
+            SessionSnapshot(1, "session", 1, 0, (UserMessage((ImageContent(BytesSource(b"xx")),)),), ())
+        )
+    with pytest.raises(SessionVersionUnsupportedError):
+        codec.decode(b'{"schema_version":999}')
+    with pytest.raises(SessionCorruptedError, match="Unknown content type"):
+        codec.decode(
+            b'{"schema_version":1,"session_id":"session","revision":1,'
+            b'"last_pending_sequence":0,"messages":[{"type":"user_message",'
+            b'"timestamp":1,"content":[{"type":"unknown"}]}],"pending":[],'
+            b'"compaction":null,"metadata":{"type":"object","entries":[]}}'
+        )
 
 
 def test_repository_cas_allows_revision_gap_and_rejects_stale_writer() -> None:
@@ -153,6 +186,30 @@ def test_persistence_failure_keeps_runtime_truth_and_next_save_uses_durable_revi
     asyncio.run(check())
 
 
+def test_persistence_coalesces_waiters_onto_latest_runtime_revision() -> None:
+    async def check() -> None:
+        class RecordingRepository(InMemorySessionRepository):
+            revisions = []
+
+            async def save(self, snapshot, *, expected_revision):
+                self.revisions.append((snapshot.revision, expected_revision))
+                return await super().save(snapshot, expected_revision=expected_revision)
+
+        repository = RecordingRepository()
+        session = Agent(_UnusedModel()).new_session(session_id="session", repository=repository)
+        await session._persist_lock.acquire()
+        first = asyncio.create_task(session.follow_up(UserMessage("one")))
+        second = asyncio.create_task(session.steer(UserMessage("two")))
+        while len(await session.pending_inputs()) < 2:
+            await asyncio.sleep(0)
+        session._persist_lock.release()
+        await asyncio.gather(first, second)
+        assert repository.revisions == [(2, None)]
+        assert session.runtime_revision == session.durable_revision == 2
+
+    asyncio.run(check())
+
+
 def test_local_repository_serializes_competing_cas_and_delete(tmp_path) -> None:
     async def check() -> None:
         first = LocalSessionRepository(tmp_path)
@@ -172,6 +229,35 @@ def test_local_repository_serializes_competing_cas_and_delete(tmp_path) -> None:
         await first.delete("session", expected_revision=loaded.revision)
         assert await first.load("session") is None
         assert not tuple(tmp_path.glob("*.tmp"))
+
+    asyncio.run(check())
+
+
+def test_local_repository_cas_is_atomic_across_processes(tmp_path) -> None:
+    asyncio.run(LocalSessionRepository(tmp_path).save(_snapshot(1), expected_revision=None))
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(3)
+    results = context.Queue()
+    processes = [
+        context.Process(target=_competing_cas_writer, args=(str(tmp_path), revision, barrier, results))
+        for revision in (2, 3)
+    ]
+    for process in processes:
+        process.start()
+    barrier.wait(timeout=5)
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    assert sorted(results.get(timeout=1) for _ in processes) == ["conflict", "saved"]
+
+
+def test_local_repository_rejects_snapshot_under_the_wrong_key(tmp_path) -> None:
+    async def check() -> None:
+        codec = JsonSessionSnapshotCodec()
+        (tmp_path / "expected.json").write_bytes(codec.encode(_snapshot(1, session_id="other")))
+        repository = LocalSessionRepository(tmp_path, codec)
+        with pytest.raises(SessionCorruptedError, match="does not match"):
+            await repository.load("expected")
 
     asyncio.run(check())
 

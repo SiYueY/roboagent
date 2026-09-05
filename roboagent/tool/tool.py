@@ -287,7 +287,8 @@ class ToolBatchAborted(RuntimeError):
         super().__init__(reason.message)
 
 
-ToolHandler = Callable[[FrozenJsonObject, ToolContext], ToolContent | RawToolResult | Awaitable[ToolContent | RawToolResult]]
+ToolReturn = ToolTextContent | ToolJsonContent | RawToolResult
+ToolHandler = Callable[[FrozenJsonObject, ToolContext], ToolReturn | Awaitable[ToolReturn]]
 TimeoutResolver = Callable[[FrozenJsonObject], float | None]
 
 
@@ -308,7 +309,7 @@ class Tool:
         if self.timeout is not None and (isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float)) or self.timeout <= 0):
             raise ValueError("Tool timeout must be positive.")
 
-    async def execute(self, arguments: FrozenJsonObject, context: ToolContext) -> ToolContent | RawToolResult:
+    async def execute(self, arguments: FrozenJsonObject, context: ToolContext) -> ToolReturn:
         value = self.handler(arguments, context)
         if inspect.isawaitable(value):
             value = await value

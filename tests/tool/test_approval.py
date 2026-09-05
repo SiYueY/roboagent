@@ -6,6 +6,7 @@ import pytest
 
 from roboagent.message import FrozenJsonObject, ToolCall, canonical_json_digest
 from roboagent.runtime import RuntimeCancellation
+from roboagent.runtime.event import RunEventEmitter
 from roboagent.tool import (
     ApprovalDecision,
     ApprovalResponse,
@@ -132,6 +133,76 @@ def test_approval_identity_mismatch_aborts_without_execution(field: str) -> None
             await executor.execute((ToolCall("call", "work"),), _context())
         assert caught.value.reason.code == "approval_mismatch"
         assert caught.value.effects == () and starts == 0
+
+    asyncio.run(check())
+
+
+def test_approval_provider_failure_aborts_without_execution_or_effect() -> None:
+    async def check() -> None:
+        starts = 0
+
+        async def handler(arguments, context):
+            nonlocal starts
+            starts += 1
+            return ToolTextContent("done")
+
+        class Broken:
+            async def request(self, request, cancellation):
+                raise ConnectionError("approval backend unavailable")
+
+        executor = ToolExecutor(
+            registry=ToolRegistry((Tool(_definition(), handler),)),
+            policy=_RequireApproval(),
+            approval_provider=Broken(),
+        )
+        with pytest.raises(ToolBatchAborted) as caught:
+            await executor.execute((ToolCall("call", "work"),), _context())
+        assert caught.value.reason.code == "approval_error"
+        assert caught.value.effects == () and starts == 0
+
+    asyncio.run(check())
+
+
+def test_approval_invalid_response_aborts_without_execution_or_effect() -> None:
+    async def check() -> None:
+        starts = 0
+
+        async def handler(arguments, context):
+            nonlocal starts
+            starts += 1
+            return ToolTextContent("done")
+
+        class Invalid:
+            async def request(self, request, cancellation):
+                return {"decision": "approve"}
+
+        with pytest.raises(ToolBatchAborted) as caught:
+            await ToolExecutor(
+                registry=ToolRegistry((Tool(_definition(), handler),)),
+                policy=_RequireApproval(),
+                approval_provider=Invalid(),
+            ).execute((ToolCall("call", "work"),), _context())
+        assert caught.value.reason.code == "approval_error"
+        assert caught.value.effects == () and starts == 0
+
+    asyncio.run(check())
+
+
+def test_approval_events_are_ordered_json_safe_and_redacted() -> None:
+    async def check() -> None:
+        events = RunEventEmitter("run")
+        arguments = FrozenJsonObject({"password": "do-not-publish"})
+        await ToolExecutor(
+            registry=ToolRegistry((Tool(_definition(), lambda arguments, context: ToolTextContent("done")),)),
+            policy=_RequireApproval(),
+            approval_provider=_Approver(),
+            events=events,
+        ).execute((ToolCall("call", "work", arguments),), _context())
+        approval_events = [event for event in events.history if event.type.startswith("approval.")]
+        assert [event.type for event in approval_events] == ["approval.requested", "approval.resolved"]
+        assert approval_events[1].payload["outcome"] == "approved"
+        assert "do-not-publish" not in repr(tuple(event.payload for event in approval_events))
+        assert all("arguments" not in event.payload and "reason" not in event.payload for event in approval_events)
 
     asyncio.run(check())
 

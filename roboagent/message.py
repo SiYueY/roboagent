@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from time import time
-from typing import TypeAlias
+from typing import TypeAlias, cast
 from urllib.parse import urlparse
 
 _MIME = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
@@ -44,7 +44,7 @@ class FrozenJsonArray(tuple):
             _json_equal(left, right) for left, right in zip(self, other, strict=True)
         )
 
-    __hash__ = None
+    __hash__ = None  # type: ignore[assignment]
 
 
 class FrozenJsonObject(Mapping[str, object]):
@@ -84,7 +84,7 @@ class FrozenJsonObject(Mapping[str, object]):
             key in other and _json_equal(value, other[key]) for key, value in self._items
         )
 
-    __hash__ = None
+    __hash__ = None  # type: ignore[assignment]
 
 
 JsonValue: TypeAlias = JsonScalar | FrozenJsonArray | FrozenJsonObject
@@ -102,7 +102,7 @@ def _json_equal(left: object, right: object) -> bool:
 def freeze_json(value: object) -> JsonValue:
     """Validate, deeply copy, and freeze one JSON-compatible value."""
     if value is None or type(value) in {str, bool}:
-        return value
+        return cast(JsonScalar, value)
     if type(value) is int:
         return value
     if type(value) is float:
@@ -127,7 +127,7 @@ def freeze_json_object(value: Mapping[str, object] | None = None) -> FrozenJsonO
 
 def thaw_json(value: JsonValue) -> object:
     if isinstance(value, FrozenJsonObject):
-        return {key: thaw_json(child) for key, child in value.items()}
+        return {key: thaw_json(cast(JsonValue, child)) for key, child in value.items()}
     if isinstance(value, FrozenJsonArray):
         return [thaw_json(child) for child in value]
     return value
@@ -423,7 +423,9 @@ class UserMessage:
 
     def __init__(self, content: Iterable[MessageContent] | str, *, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, timestamp: float | None = None) -> None:
         normalized = normalize_content(content, limits)
-        if not normalized or (all(isinstance(x, TextContent) for x in normalized) and not any(x.text.strip() for x in normalized)):
+        if not normalized or not any(
+            not isinstance(item, TextContent) or item.text.strip() for item in normalized
+        ):
             raise ProtocolError("UserMessage requires non-whitespace text or media.")
         object.__setattr__(self, "content", normalized)
         object.__setattr__(self, "timestamp", _message_timestamp(timestamp))

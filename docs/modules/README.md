@@ -13,6 +13,8 @@
 
 - [agent.md](agent.md)
 - [config.md](config.md)
+- [context.md](context.md)
+- [mcp.md](mcp.md)
 - [runtime.md](runtime.md)
 - [skill.md](skill.md)
 - [tool.md](tool.md)

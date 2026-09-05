@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Protocol
 
-from roboagent.message import ArtifactReferenceContent, ToolCall, canonical_json_dumps
+from roboagent.message import ArtifactReferenceContent, FrozenJsonObject, ToolCall, canonical_json_dumps
 from roboagent.runtime.types import CancellationToken
 
 from .tool import (
@@ -66,7 +66,9 @@ class InlineToolResultMaterializer:
             if isinstance(item, (ToolTextContent, ToolJsonContent)):
                 result.append(item)
             elif isinstance(item, ResourceToolContent) and item.data is None:
-                result.append(ToolTextContent(item.uri))
+                raise ToolMaterializationError(
+                    "workspace_artifact_missing", "Remote resource bytes are unavailable."
+                )
             else:
                 raise ToolMaterializationError("tool_materialization_error", "Binary content requires a Workspace.")
         cancellation.raise_if_cancelled()
@@ -92,12 +94,18 @@ class WorkspaceToolResultMaterializer:
             elif isinstance(item, ToolJsonContent) and inline_all:
                 result.append(item)
             elif isinstance(item, ResourceToolContent) and item.data is None:
-                result.append(ToolTextContent(_bounded_uri(item.uri, self.limits.max_inline_bytes)))
+                raise ToolMaterializationError(
+                    "workspace_artifact_missing", "Remote resource bytes are unavailable."
+                )
             else:
                 data, media_type, preview = _bytes(item)
                 digest = hashlib.sha256(data).hexdigest()
                 path = f"blobs/sha256/{digest}"
                 entry = await self.workspace.write(path, data, media_type=media_type)
+                if entry.path != path or entry.size != len(data) or entry.digest != f"sha256:{digest}":
+                    raise ToolMaterializationError(
+                        "tool_materialization_error", "Workspace returned inconsistent artifact metadata."
+                    )
                 result.append(
                     ArtifactReferenceContent(
                         workspace_uri(entry.path),
@@ -128,7 +136,7 @@ def raw_result_size(raw: RawToolResult) -> int:
 
 def raw_result_evidence(raw: RawToolResult, *, max_preview_bytes: int = 1024) -> ToolContent:
     digest = hashlib.sha256()
-    kinds = []
+    kinds: list[str] = []
     preview = ""
     for item in raw.content:
         kind = type(item).__name__
@@ -151,13 +159,15 @@ def raw_result_evidence(raw: RawToolResult, *, max_preview_bytes: int = 1024) ->
         digest.update(payload)
     bounded = preview.encode("utf-8")[:max_preview_bytes].decode("utf-8", errors="ignore")
     return ToolJsonContent(
-        {
+        FrozenJsonObject(
+            {
             "raw_digest": f"sha256:{digest.hexdigest()}",
             "block_count": len(raw.content),
             "block_kinds": kinds,
             "block_kinds_truncated": len(raw.content) > len(kinds),
             "preview": bounded or None,
-        }
+            }
+        )
     )
 
 
@@ -178,10 +188,3 @@ def _bytes(item: object) -> tuple[bytes, str | None, str | None]:
 def _preview(text: str) -> str | None:
     encoded = text.encode("utf-8")[:4096]
     return encoded.decode("utf-8", errors="ignore") or None
-
-
-def _bounded_uri(uri: str, limit: int) -> str:
-    encoded = uri.encode("utf-8")
-    if len(encoded) <= limit:
-        return uri
-    return encoded[:limit].decode("utf-8", errors="ignore")
