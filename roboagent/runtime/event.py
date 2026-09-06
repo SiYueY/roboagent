@@ -7,7 +7,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from time import time
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from roboagent.message import FrozenJsonObject, freeze_json_object
 from roboagent.runtime.execution import ExecutionLineage, ExecutionTree
@@ -103,12 +103,14 @@ class RunEventEmitter:
         config: EventSubscriptionConfig | None = None,
         *,
         execution_tree: ExecutionTree | None = None,
+        sequence_source: Callable[[], int] | None = None,
         lineage: ExecutionLineage | None = None,
     ) -> None:
         self.run_id = run_id
         self.config = config or EventSubscriptionConfig()
         self._sequence = 0
         self._execution_tree = execution_tree
+        self._sequence_source = sequence_source
         self._lineage = lineage
         self._history: deque[AgentEvent] = deque()
         self._subscriptions: dict[
@@ -126,7 +128,9 @@ class RunEventEmitter:
     ) -> AgentEvent:
         if self._terminal:
             raise RuntimeError("Cannot emit after the terminal Run event.")
-        if self._execution_tree is None:
+        if self._sequence_source is not None:
+            sequence = self._sequence_source()
+        elif self._execution_tree is None:
             sequence = self._sequence
             self._sequence += 1
         else:

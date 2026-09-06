@@ -455,6 +455,16 @@ class RunExecutionContext(Protocol):
     @property
     def budget(self) -> ExecutionBudgetView:
         ...
+
+    # Runtime orchestration semantics; these do not expose Scope/Tree.
+    def tool_context(self, executor: object, session_id: str) -> ToolExecutionContext:
+        ...
+
+    def contribute_usage(self, usage: UsageContribution) -> None:
+        ...
+
+    def mark_tool_calls_committed(self, call_ids: tuple[str, ...]) -> None:
+        ...
 ```
 
 RunExecutionContext 不提供：
@@ -462,10 +472,13 @@ RunExecutionContext 不提供：
 ```text
 任意 execute_tool
 任意 run_child_agent
-mutable contribution API
+ExecutionTree / ExecutionScope internal mutation
 ```
 
 Nested execution 只能从 Tool execution 发起。
+
+`AgentLoop`、`agent/*` 与 `tool/*` 不得访问 `_scope`、`_tree`，也不得导入
+`ExecutionTree` / `ExecutionScope`；所有 bookkeeping 必须通过上述语义 API。
 
 ---
 
@@ -2663,6 +2676,35 @@ deadline
 cancellation
 cleanup
 ```
+
+Runtime SPI 固定为一个入口，child 构造逻辑不得散落到 AgentLoop 或
+ToolExecutor 的其它分支：
+
+```python
+@dataclass(frozen=True)
+class ChildRunRequest:
+    agent: Agent
+    task: str
+    session_factory: object | None = None
+    run_config: RunConfig | None = None
+
+@dataclass(frozen=True)
+class ChildRunResult:
+    result: RunResult
+
+class ChildRunExecutor(Protocol):
+    async def run_child(
+        self,
+        request: ChildRunRequest,
+        parent: RuntimeToolExecutionContext,
+    ) -> ChildRunResult:
+        ...
+```
+
+归属规则固定为：child 使用独立 ephemeral/custom-isolated Session；child
+transcript 不写入 parent Session，只有 materialized child output 作为父 Tool
+result 进入 parent transcript。模型 usage 与真实 effects 归属 child scope，root
+aggregate 各累计一次；Agent Tool 不生成第二份 usage 或伪 outer effect。
 
 ---
 

@@ -33,13 +33,7 @@ from roboagent.model import (
     collect_model_stream,
 )
 from roboagent.runtime.event import RunEventEmitter
-from roboagent.runtime.execution import (
-    ExecutionContribution,
-    RuntimeRunExecutionContext,
-    RuntimeToolExecutionContext,
-    UsageContribution,
-    UsageKnowledge,
-)
+from roboagent.runtime.execution import UsageContribution, UsageKnowledge
 from roboagent.runtime.types import RunContext, RunError, RunPhase, ToolCallSummary
 from roboagent.tool import (
     ToolBatchAborted,
@@ -408,17 +402,15 @@ async def _run_loop_impl(
             ),
         )
         try:
-            assert isinstance(run_context.execution, RuntimeRunExecutionContext)
+            assert run_context.execution is not None
             batch = await tool_executor.execute(
                 response.message.tool_calls,
                 ToolContext(
                     run_context.run_id,
                     run_context.session_id,
                     run_context.cancellation,
-                    RuntimeToolExecutionContext(
-                        run_context.execution._scope,
-                        tool_executor,
-                        run_context.session_id,
+                    run_context.execution.tool_context(
+                        tool_executor, run_context.session_id
                     ),
                 ),
             )
@@ -443,14 +435,10 @@ async def _run_loop_impl(
 
             if isinstance(exc, SessionPersistenceError):
                 effects.extend(committed_effects(batch.effects))
-                assert isinstance(run_context.execution, RuntimeRunExecutionContext)
-                if (
-                    run_context.execution.lineage.execution_run_id
-                    == run_context.execution.lineage.root_run_id
-                ):
-                    run_context.execution._scope._tree.mark_tool_calls_committed(
-                        tuple(call.id for call in response.message.tool_calls)
-                    )
+                assert run_context.execution is not None
+                run_context.execution.mark_tool_calls_committed(
+                    tuple(call.id for call in response.message.tool_calls)
+                )
                 raise _RunFailure(
                     RunError(
                         "session_persistence_error",
@@ -476,13 +464,10 @@ async def _run_loop_impl(
             ) from exc
         final_effects = committed_effects(batch.effects)
         effects.extend(final_effects)
-        if (
-            run_context.execution.lineage.execution_run_id
-            == run_context.execution.lineage.root_run_id
-        ):
-            run_context.execution._scope._tree.mark_tool_calls_committed(
-                tuple(call.id for call in response.message.tool_calls)
-            )
+        assert run_context.execution is not None
+        run_context.execution.mark_tool_calls_committed(
+            tuple(call.id for call in response.message.tool_calls)
+        )
         await events.emit(
             "tool_batch.committed",
             turn=turn,
@@ -574,7 +559,6 @@ async def _collect_cancellable(
 
 def _contribute_usage(context: RunContext, usage: UsageContribution) -> None:
     execution = context.execution
-    if not isinstance(execution, RuntimeRunExecutionContext):
+    if execution is None:
         return
-    scope = execution._scope
-    scope.contribute(ExecutionContribution(scope.next_contribution_id(), usage=usage))
+    execution.contribute_usage(usage)

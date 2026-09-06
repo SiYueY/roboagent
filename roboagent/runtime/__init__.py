@@ -8,6 +8,9 @@ from .event import (
     RunEventEmitter,
 )
 from .execution import (
+    ChildRunExecutor,
+    ChildRunRequest,
+    ChildRunResult,
     CleanupError,
     ContributionId,
     EffectIdentity,
@@ -23,6 +26,7 @@ from .execution import (
     ExecutionResource,
     ExecutionScope,
     ExecutionScopeState,
+    ExecutionSummary,
     ExecutionTree,
     RetryBlocker,
     RetryBlockerCode,
@@ -62,6 +66,9 @@ from .types import (
 
 __all__ = [
     "AgentEvent",
+    "ChildRunExecutor",
+    "ChildRunRequest",
+    "ChildRunResult",
     "CancellationToken",
     "CancellationOrigin",
     "CancellationReason",
@@ -84,6 +91,7 @@ __all__ = [
     "ExecutionResource",
     "ExecutionScope",
     "ExecutionScopeState",
+    "ExecutionSummary",
     "ExecutionTree",
     "EventSubscription",
     "EventSubscriptionConfig",

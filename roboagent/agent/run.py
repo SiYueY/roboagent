@@ -26,11 +26,12 @@ from roboagent.runtime.types import (
     ToolCallSummary,
 )
 from roboagent.runtime.execution import (
+    ChildRunRequest,
+    ChildRunResult,
     CleanupError,
-    ExecutionTree,
-    ExecutionScope,
     ExecutionRequestError,
     RuntimeRunExecutionContext,
+    RuntimeToolExecutionContext,
     absolute_deadline,
 )
 from roboagent.tool import ToolEffectRecord, ToolExecutor, retry_safe
@@ -51,7 +52,7 @@ class Run:
         default_factory=RuntimeCancellation, init=False, repr=False
     )
     _events: RunEventEmitter = field(init=False, repr=False)
-    _execution_tree: ExecutionTree = field(init=False, repr=False)
+    _execution: RuntimeRunExecutionContext = field(init=False, repr=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _result: asyncio.Future[RunResult] | None = field(
         default=None, init=False, repr=False
@@ -62,13 +63,13 @@ class Run:
     _skill_catalog: object | None = field(default=None, init=False, repr=False)
     _initial_message: "UserMessage | None" = field(default=None, init=False, repr=False)
     _initial_pending_sequence: int = field(default=0, init=False, repr=False)
-    _nested_scope: ExecutionScope | None = field(default=None, init=False, repr=False)
+    _is_nested: bool = field(default=False, init=False, repr=False)
     _output_processor: Callable[[object], Awaitable[object]] | None = field(
         default=None, init=False, repr=False
     )
 
     def __post_init__(self) -> None:
-        self._execution_tree = ExecutionTree(
+        self._execution = RuntimeRunExecutionContext.create_root(
             root_run_id=self.run_id,
             cancellation=self._cancellation,
             deadline=absolute_deadline(self.config.timeout),
@@ -80,8 +81,8 @@ class Run:
         )
         self._events = RunEventEmitter(
             self.run_id,
-            execution_tree=self._execution_tree,
-            lineage=self._execution_tree.root_scope.lineage,
+            sequence_source=self._execution.next_event_sequence,
+            lineage=self._execution.lineage,
         )
 
     @property
@@ -98,16 +99,15 @@ class Run:
     def _attach_nested(
         self,
         *,
-        tree: ExecutionTree,
-        scope: ExecutionScope,
+        execution: RuntimeRunExecutionContext,
         events: RunEventEmitter,
         cancellation: RuntimeCancellation,
         output_processor: Callable[[object], Awaitable[object]],
     ) -> None:
         if self._task is not None:
             raise RuntimeError("Cannot attach a started Run.")
-        self._execution_tree = tree
-        self._nested_scope = scope
+        self._execution = execution
+        self._is_nested = True
         self._events = events
         self._cancellation = cancellation
         self._output_processor = output_processor
@@ -135,12 +135,12 @@ class Run:
         self._state = RunState(phase, turn, pending_tool_calls=pending_tool_calls)
 
     async def _execute(self) -> None:
-        execution_scope = self._nested_scope or self._execution_tree.root_scope
+        execution = self._execution
         context = RunContext(
             self.run_id,
             self.session.session_id,
             self._cancellation,
-            RuntimeRunExecutionContext(execution_scope),
+            execution,
         )
         status = RunStatus.FAILED
         output = None
@@ -156,9 +156,9 @@ class Run:
         try:
             await self._events.emit(
                 "child_run.started"
-                if self._nested_scope is not None
+                if self._is_nested
                 else "run.started",
-                lineage=execution_scope.lineage,
+                lineage=execution.lineage,
             )
             await self._invoke_hooks("on_run_start", RunHookContext(context))
             await self.session._commit_initial_input(
@@ -177,7 +177,7 @@ class Run:
                 result_materializer=self.session.result_materializer,
                 approval_provider=self.session.agent.approval_provider,
                 approval_settings=self.session.agent.approval_settings,
-                child_runner=self._run_child_agent,
+                child_executor=self,
             )
             outcome = await run_loop(
                 agent=self.session.agent,
@@ -258,31 +258,18 @@ class Run:
                     cause_type=type(exc).__name__,
                 )
 
-        if self._nested_scope is None:
-            await self._execution_tree.close()
-            usage, usage_known = self._execution_tree.usage_result
-            effects = self._execution_tree.effects
-            tree_cleanup = self._execution_tree.cleanup_errors
-            records = self._execution_tree.execution_records
-            blockers = self._execution_tree.retry_blockers
-        else:
-            await self._execution_tree.close_scope(self._nested_scope)
-            usage, usage_known = self._execution_tree.usage_for_scope(
-                self._nested_scope
-            )
-            effects = self._execution_tree.effects_for_scope(self._nested_scope)
-            tree_cleanup = self._execution_tree.cleanup_errors_for_scope(
-                self._nested_scope
-            )
-            records = self._execution_tree.records_for_scope(self._nested_scope)
-            blockers = self._execution_tree.blockers_for_scope(self._nested_scope)
+        summary = await execution.finalize()
+        usage, usage_known = summary.usage, summary.usage_known
+        effects = summary.effects
+        tree_cleanup = summary.cleanup_errors
+        records = summary.records
+        blockers = summary.retry_blockers
         cleanup_errors.extend(tree_cleanup)
-        cleanup_changes_status = any(
-            self._execution_tree.scopes[item.scope_id].lineage.agent_depth
-            == execution_scope.lineage.agent_depth
-            for item in tree_cleanup
-        )
-        if cleanup_changes_status and status is RunStatus.COMPLETED and error is None:
+        if (
+            summary.cleanup_affects_status
+            and status is RunStatus.COMPLETED
+            and error is None
+        ):
             status = RunStatus.FAILED
             error = RunError("cleanup_error", "Execution resource cleanup failed.")
 
@@ -354,7 +341,7 @@ class Run:
             retry_safe(effects, blockers),
             usage_known,
             records,
-            self._execution_tree.execution_records_complete,
+            summary.records_complete,
             blockers,
         )
         terminal = {
@@ -362,11 +349,11 @@ class Run:
             RunStatus.FAILED: "run.failed",
             RunStatus.CANCELLED: "run.cancelled",
         }[status]
-        if self._nested_scope is not None:
+        if self._is_nested:
             terminal = terminal.replace("run.", "child_run.")
         await self._events.emit(
             terminal,
-            lineage=execution_scope.lineage,
+            lineage=execution.lineage,
             status=status.value,
             error_code=error.code if error else None,
         )
@@ -427,15 +414,11 @@ class Run:
         await asyncio.sleep(self.config.timeout)
         self._cancellation.cancel(CancellationReason.TIMEOUT)
 
-    async def _run_child_agent(
+    async def run_child(
         self,
-        parent_scope: ExecutionScope,
-        agent: object,
-        task: str,
-        *,
-        session_factory: object | None = None,
-        run_config: RunConfig | None = None,
-    ) -> RunResult:
+        request: ChildRunRequest,
+        parent: RuntimeToolExecutionContext,
+    ) -> ChildRunResult:
         from roboagent.agent.agent import Agent
         from roboagent.agent.delegation import (
             ChildLifecycleError,
@@ -446,18 +429,17 @@ class Run:
         from roboagent.agent.session import Session
         from roboagent.message import AssistantMessage, UserMessage
 
+        agent = request.agent
         if not isinstance(agent, Agent):
             raise TypeError("run_child_agent requires a canonical Agent.")
-        effective = run_config or agent.default_run_config
-        child_cancellation = RuntimeCancellation(parent_scope.cancellation)
+        effective = request.run_config or agent.default_run_config
+        child_cancellation = RuntimeCancellation(parent.cancellation)
         child_id = uuid4().hex
         child_deadline = absolute_deadline(effective.timeout)
-        scope = self._execution_tree.new_child_run_scope(
-            parent=parent_scope,
+        child_execution = parent.begin_child_run(
             execution_run_id=child_id,
             cancellation=child_cancellation,
             deadline=child_deadline,
-            agent_tool_name=parent_scope._tool_name or "agent",
         )
         parent_context = ChildSessionContext(
             self.session._root_session_id,
@@ -472,7 +454,7 @@ class Run:
         failure: BaseException | None = None
         result: RunResult | None = None
         try:
-            if session_factory is None:
+            if request.session_factory is None:
                 child_session = Session(
                     agent,
                     session_id=uuid4().hex,
@@ -484,7 +466,7 @@ class Run:
                 child_session._root_session_id = self.session._root_session_id
             else:
                 try:
-                    factory = cast(ChildSessionFactory, session_factory)
+                    factory = cast(ChildSessionFactory, request.session_factory)
                     child_session = await factory.create(
                         parent=parent_context, agent=agent
                     )
@@ -545,10 +527,9 @@ class Run:
                 )
 
             child_run = child_session._start_nested(
-                UserMessage(task),
+                UserMessage(request.task),
                 config=effective,
-                tree=self._execution_tree,
-                scope=scope,
+                execution=child_execution,
                 events=self._events,
                 cancellation=child_cancellation,
                 output_processor=promote,
@@ -587,4 +568,4 @@ class Run:
             raise ChildLifecycleError(
                 "child_run_start_failed", "Child Run produced no result."
             )
-        return result
+        return ChildRunResult(result)

@@ -19,10 +19,34 @@ from roboagent.message import (
     freeze_json_object,
 )
 from roboagent.model import Usage
+from roboagent.runtime._execution.budget import (
+    ExecutionBudgetConfig,
+    ExecutionBudgetView,
+)
+from roboagent.runtime._execution.child import (
+    ChildRunExecutor as ChildRunExecutor,
+    ChildRunRequest,
+    ChildRunResult,
+)
+from roboagent.runtime._execution.facts import (
+    CleanupError,
+    ContributionId,
+    EffectIdentity,
+    ExecutionContribution,
+    ExecutionRecord,
+    ExecutionRecordStatus,
+    ExecutionRecordType,
+    RetryBlocker,
+    RetryBlockerCode,
+    SupplementalExecutionRecord,
+    UsageContribution,
+    UsageKnowledge,
+)
 from roboagent.runtime.types import CancellationToken
 
 if TYPE_CHECKING:
     from roboagent.agent import Agent, RunConfig, RunResult
+    from roboagent.message import ToolCall
     from roboagent.tool import ToolEffectRecord, ToolExecutionResult
 
 
@@ -70,198 +94,16 @@ class ExecutionLineage:
             raise ValueError("Execution lineage depths must be non-negative integers.")
 
 
-@dataclass(frozen=True, slots=True, order=True)
-class EffectIdentity:
-    scope_id: str
-    sequence: int
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.scope_id, str)
-            or not self.scope_id
-            or type(self.sequence) is not int
-            or self.sequence < 0
-        ):
-            raise ValueError("Invalid EffectIdentity.")
-
-
 @dataclass(frozen=True, slots=True)
-class ContributionId:
-    scope_id: str
-    sequence: int
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.scope_id, str)
-            or not self.scope_id
-            or type(self.sequence) is not int
-            or self.sequence < 0
-        ):
-            raise ValueError("Invalid ContributionId.")
-
-
-class UsageKnowledge(str, Enum):
-    KNOWN = "known"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class UsageContribution:
-    state: UsageKnowledge
+class ExecutionSummary:
     usage: Usage | None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.state, UsageKnowledge):
-            raise TypeError("UsageContribution.state must be UsageKnowledge.")
-        if self.state is UsageKnowledge.KNOWN and not isinstance(self.usage, Usage):
-            raise ValueError("KNOWN usage requires a Usage value.")
-        if self.state is UsageKnowledge.UNKNOWN and self.usage is not None:
-            raise ValueError("UNKNOWN usage cannot contain a Usage value.")
-
-
-class ExecutionRecordStatus(str, Enum):
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    UNKNOWN = "unknown"
-
-
-class ExecutionRecordType(str, Enum):
-    TOOL = "tool"
-    SUMMARY = "summary"
-
-
-@dataclass(frozen=True, slots=True)
-class SupplementalExecutionRecord:
-    status: ExecutionRecordStatus
-    error_code: str | None = None
-    evidence: FrozenJsonObject | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.status, ExecutionRecordStatus):
-            raise TypeError("SupplementalExecutionRecord.status must be canonical.")
-        if self.error_code is not None and (
-            not isinstance(self.error_code, str) or not self.error_code
-        ):
-            raise ValueError("error_code must be non-empty or None.")
-        if self.evidence is not None:
-            object.__setattr__(self, "evidence", freeze_json_object(self.evidence))
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionRecord:
-    sequence: int
-    record_type: ExecutionRecordType
-    root_run_id: str
-    execution_run_id: str
-    scope_id: str
-    tool_call_id: str | None
-    tool_name: str | None
-    arguments_digest: str | None
-    arguments_preview: FrozenJsonObject | None
-    status: ExecutionRecordStatus
-    error_code: str | None
-    evidence: FrozenJsonObject | None
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.sequence) is not int
-            or self.sequence < 0
-            or not isinstance(self.record_type, ExecutionRecordType)
-        ):
-            raise ValueError("Invalid ExecutionRecord identity.")
-        if not all(
-            isinstance(value, str) and value
-            for value in (self.root_run_id, self.execution_run_id, self.scope_id)
-        ):
-            raise ValueError("ExecutionRecord requires execution identities.")
-        if not isinstance(self.status, ExecutionRecordStatus):
-            raise TypeError("ExecutionRecord.status must be canonical.")
-        if self.arguments_preview is not None:
-            object.__setattr__(
-                self, "arguments_preview", freeze_json_object(self.arguments_preview)
-            )
-        if self.evidence is not None:
-            object.__setattr__(self, "evidence", freeze_json_object(self.evidence))
-
-
-@dataclass(frozen=True, slots=True)
-class CleanupError:
-    scope_id: str
-    resource_type: str
-    code: str
-    message: str
-    forced: bool
-
-
-class RetryBlockerCode(str, Enum):
-    SETTLEMENT_UNCERTAIN = "settlement_uncertain"
-    TRUSTED_EXECUTION = "trusted_execution"
-    CLEANUP_UNCERTAIN = "cleanup_uncertain"
-
-
-@dataclass(frozen=True, slots=True)
-class RetryBlocker:
-    code: RetryBlockerCode
-    scope_id: str
-    message: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.code, RetryBlockerCode)
-            or not self.scope_id
-            or not self.message
-        ):
-            raise ValueError("Invalid RetryBlocker.")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionContribution:
-    contribution_id: ContributionId
-    usage: UsageContribution | None = None
-    effects: tuple[ToolEffectRecord, ...] = ()
-    records: tuple[SupplementalExecutionRecord, ...] = ()
-    cleanup_errors: tuple[CleanupError, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "effects", tuple(self.effects))
-        object.__setattr__(self, "records", tuple(self.records))
-        object.__setattr__(self, "cleanup_errors", tuple(self.cleanup_errors))
-        if not isinstance(self.contribution_id, ContributionId):
-            raise TypeError("ExecutionContribution requires ContributionId.")
-        if self.usage is not None and not isinstance(self.usage, UsageContribution):
-            raise TypeError("ExecutionContribution.usage must be canonical.")
-        if not all(
-            isinstance(item, SupplementalExecutionRecord) for item in self.records
-        ):
-            raise TypeError("Only supplemental SUMMARY records may be contributed.")
-        if not all(isinstance(item, CleanupError) for item in self.cleanup_errors):
-            raise TypeError("cleanup_errors must be canonical.")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionBudgetConfig:
-    max_agent_depth: int = 4
-    max_child_runs: int = 32
-    max_nested_tool_calls: int = 256
-
-    def __post_init__(self) -> None:
-        if any(
-            type(value) is not int or value < 0
-            for value in (
-                self.max_agent_depth,
-                self.max_child_runs,
-                self.max_nested_tool_calls,
-            )
-        ):
-            raise ValueError("Execution budget values must be non-negative integers.")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionBudgetView:
-    max_agent_depth: int
-    remaining_child_runs: int
-    remaining_nested_tool_calls: int
+    usage_known: bool | None
+    effects: tuple[ToolEffectRecord, ...]
+    cleanup_errors: tuple[CleanupError, ...]
+    records: tuple[ExecutionRecord, ...]
+    records_complete: bool
+    retry_blockers: tuple[RetryBlocker, ...]
+    cleanup_affects_status: bool
 
 
 class SettlementHandler(Protocol):
@@ -283,6 +125,9 @@ class RunExecutionContext(Protocol):
     def deadline(self) -> float | None: ...
     @property
     def budget(self) -> ExecutionBudgetView: ...
+    def tool_context(self, executor: object, session_id: str) -> ToolExecutionContext: ...
+    def contribute_usage(self, usage: UsageContribution) -> None: ...
+    def mark_tool_calls_committed(self, call_ids: tuple[str, ...]) -> None: ...
 
 
 class ToolExecutionContext(RunExecutionContext, Protocol):
@@ -885,6 +730,31 @@ class RuntimeRunExecutionContext:
     def __init__(self, scope: ExecutionScope) -> None:
         self._scope = scope
 
+    @classmethod
+    def create_root(
+        cls,
+        *,
+        root_run_id: str,
+        cancellation: CancellationToken,
+        deadline: float | None,
+        budget: ExecutionBudgetConfig,
+        settlement_timeout: float,
+        cleanup_timeout: float,
+        max_execution_records: int,
+        max_record_evidence_bytes: int,
+    ) -> RuntimeRunExecutionContext:
+        tree = ExecutionTree(
+            root_run_id=root_run_id,
+            cancellation=cancellation,
+            deadline=deadline,
+            budget=budget,
+            settlement_timeout=settlement_timeout,
+            cleanup_timeout=cleanup_timeout,
+            max_execution_records=max_execution_records,
+            max_record_evidence_bytes=max_record_evidence_bytes,
+        )
+        return cls(tree.root_scope)
+
     @property
     def lineage(self) -> ExecutionLineage:
         return self._scope.lineage
@@ -900,6 +770,56 @@ class RuntimeRunExecutionContext:
     @property
     def budget(self) -> ExecutionBudgetView:
         return self._scope.budget
+
+    def tool_context(
+        self, executor: object, session_id: str
+    ) -> RuntimeToolExecutionContext:
+        return RuntimeToolExecutionContext(self._scope, executor, session_id)
+
+    def contribute_usage(self, usage: UsageContribution) -> None:
+        self._scope.contribute(
+            ExecutionContribution(self._scope.next_contribution_id(), usage=usage)
+        )
+
+    def mark_tool_calls_committed(self, call_ids: tuple[str, ...]) -> None:
+        if self.lineage.execution_run_id == self.lineage.root_run_id:
+            self._scope._tree.mark_tool_calls_committed(call_ids)
+
+    def next_event_sequence(self) -> int:
+        return self._scope._tree.event_sequences.next()
+
+    async def finalize(self) -> ExecutionSummary:
+        tree = self._scope._tree
+        is_root = self._scope is tree.root_scope
+        if is_root:
+            await tree.close()
+            usage, usage_known = tree.usage_result
+            effects = tree.effects
+            cleanup_errors = tree.cleanup_errors
+            records = tree.execution_records
+            retry_blockers = tree.retry_blockers
+        else:
+            await tree.close_scope(self._scope)
+            usage, usage_known = tree.usage_for_scope(self._scope)
+            effects = tree.effects_for_scope(self._scope)
+            cleanup_errors = tree.cleanup_errors_for_scope(self._scope)
+            records = tree.records_for_scope(self._scope)
+            retry_blockers = tree.blockers_for_scope(self._scope)
+        cleanup_affects_status = any(
+            tree.scopes[item.scope_id].lineage.agent_depth
+            == self.lineage.agent_depth
+            for item in cleanup_errors
+        )
+        return ExecutionSummary(
+            usage,
+            usage_known,
+            effects,
+            cleanup_errors,
+            records,
+            tree.execution_records_complete,
+            retry_blockers,
+            cleanup_affects_status,
+        )
 
 
 class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
@@ -950,7 +870,7 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
                 ),
             )
         try:
-            return await context_factory(call, self._scope, self._session_id)
+            return await context_factory(call, self, self._session_id)
         except ToolBatchAborted as exc:
             return ToolExecutionResult(
                 call.id,
@@ -963,18 +883,98 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
     async def run_child_agent(
         self, agent, task: str, *, session_factory=None, run_config=None
     ):
-        runner = getattr(self._executor, "run_child_agent", None)
+        runner = getattr(self._executor, "run_child", None)
         if not callable(runner):
             raise ExecutionRequestError(
                 "nested_execution_unavailable", "Child Agent execution is unavailable."
             )
-        return await runner(
-            self._scope,
-            agent,
-            task,
-            session_factory=session_factory,
-            run_config=run_config,
+        child = await runner(
+            ChildRunRequest(agent, task, session_factory, run_config), self
         )
+        if not isinstance(child, ChildRunResult):
+            raise ExecutionInvariantError(
+                "ChildRunExecutor returned a non-canonical result."
+            )
+        return child.result
+
+    def child_tool_context(
+        self, call: ToolCall, executor: object, session_id: str
+    ) -> RuntimeToolExecutionContext:
+        scope = self._scope.child_tool(tool_call_id=call.id, tool_name=call.name)
+        return RuntimeToolExecutionContext(scope, executor, session_id)
+
+    def begin_child_run(
+        self,
+        *,
+        execution_run_id: str,
+        cancellation: CancellationToken,
+        deadline: float | None,
+    ) -> RuntimeRunExecutionContext:
+        scope = self._scope._tree.new_child_run_scope(
+            parent=self._scope,
+            execution_run_id=execution_run_id,
+            cancellation=cancellation,
+            deadline=deadline,
+            agent_tool_name=self._scope._tool_name or "agent",
+        )
+        return RuntimeRunExecutionContext(scope)
+
+    def cap_deadline(self, deadline: float) -> None:
+        self._scope.deadline = _minimum_deadline(self._scope.deadline, deadline)
+
+    @property
+    def settlement_active(self) -> bool:
+        return self._scope.settlement_active
+
+    async def close_tool_scope(self) -> None:
+        if self._scope._terminal_recorded:
+            return
+        self._scope.begin_closing()
+        await self._scope._cleanup()
+        self._scope.freeze()
+
+    def next_effect_id(self) -> EffectIdentity:
+        return self._scope.next_effect_id()
+
+    def contribute_effects(self, effects: tuple[ToolEffectRecord, ...]) -> None:
+        if effects:
+            self._scope.contribute(
+                ExecutionContribution(
+                    self._scope.next_contribution_id(), effects=effects
+                )
+            )
+
+    def contribute_composite(
+        self,
+        effects: tuple[ToolEffectRecord, ...],
+        records: tuple[SupplementalExecutionRecord, ...],
+    ) -> None:
+        self._scope.contribute(
+            ExecutionContribution(
+                self._scope.next_contribution_id(), effects=effects, records=records
+            )
+        )
+
+    def record_tool_call(
+        self,
+        *,
+        call: ToolCall,
+        arguments_preview: FrozenJsonObject | None,
+        status: ExecutionRecordStatus,
+        error_code: str | None,
+        evidence: FrozenJsonObject | None,
+    ) -> None:
+        self._scope._tree.add_tool_record(
+            self._scope,
+            tool_call_id=call.id,
+            tool_name=call.name,
+            arguments=call.arguments,
+            arguments_preview=arguments_preview,
+            status=status,
+            error_code=error_code,
+            evidence=evidence,
+        )
+        self._scope._terminal_recorded = True
 
     def settlement_barrier(
         self, *, handler: SettlementHandler, timeout: float | None = None

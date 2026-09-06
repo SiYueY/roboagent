@@ -25,7 +25,7 @@ from roboagent.runtime.event import RunEventEmitter
 if TYPE_CHECKING:
     from roboagent.agent.agent import Agent
     from roboagent.agent.run import Run
-    from roboagent.runtime import ExecutionScope, ExecutionTree, RuntimeCancellation
+    from roboagent.runtime import RuntimeCancellation, RuntimeRunExecutionContext
     from roboagent.context import CompactionUpdate, ContextSummary
     from roboagent.tool import (
         ArtifactDestination,
@@ -417,18 +417,16 @@ class Session:
         message: UserMessage,
         *,
         config: RunConfig,
-        tree: ExecutionTree,
-        scope: ExecutionScope,
+        execution: RuntimeRunExecutionContext,
         events: RunEventEmitter,
         cancellation: RuntimeCancellation,
         output_processor,
     ) -> "Run":
         from roboagent.agent.run import Run
 
-        run = Run(self, config, run_id=scope.lineage.execution_run_id)
+        run = Run(self, config, run_id=execution.lineage.execution_run_id)
         run._attach_nested(
-            tree=tree,
-            scope=scope,
+            execution=execution,
             events=events,
             cancellation=cancellation,
             output_processor=output_processor,

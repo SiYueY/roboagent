@@ -6,7 +6,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass, replace
 from time import monotonic
-from typing import Awaitable, Callable, Protocol, Sequence, cast
+from typing import Awaitable, Protocol, Sequence, cast
 from uuid import uuid4
 
 from roboagent.message import (
@@ -20,7 +20,9 @@ from roboagent.message import (
     canonical_json_digest,
 )
 from roboagent.runtime.execution import (
-    ExecutionContribution,
+    ChildRunExecutor,
+    ChildRunRequest,
+    ChildRunResult,
     ExecutionLineage,
     ExecutionRecordStatus,
     RuntimeToolExecutionContext,
@@ -150,7 +152,7 @@ class ToolExecutor:
         result_materializer: ToolResultMaterializer | None = None,
         approval_provider: ApprovalProvider | None = None,
         approval_settings: ApprovalSettings | None = None,
-        child_runner: Callable[..., Awaitable[object]] | None = None,
+        child_executor: ChildRunExecutor | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or AllowAllToolPolicy()
@@ -161,7 +163,7 @@ class ToolExecutor:
         self.result_materializer = result_materializer or InlineToolResultMaterializer()
         self.approval_provider = approval_provider
         self.approval_settings = approval_settings or ApprovalSettings()
-        self.child_runner = child_runner
+        self.child_executor = child_executor
 
     async def execute(
         self, calls: tuple[ToolCall, ...], context: ToolContext
@@ -444,13 +446,7 @@ class ToolExecutor:
             isinstance(context.execution, RuntimeToolExecutionContext)
             and timeout is not None
         ):
-            requested_deadline = monotonic() + timeout
-            current = context.execution._scope.deadline
-            context.execution._scope.deadline = (
-                requested_deadline
-                if current is None
-                else min(current, requested_deadline)
-            )
+            context.execution.cap_deadline(monotonic() + timeout)
         return _PreparedCall(call, tool, timeout)
 
     async def _execute_prepared(
@@ -768,7 +764,7 @@ class ToolExecutor:
         try:
             settlement_active = (
                 isinstance(context.execution, RuntimeToolExecutionContext)
-                and context.execution._scope.settlement_active
+                and context.execution.settlement_active
             )
             if settlement_active:
                 returned = await asyncio.shield(task)
@@ -1182,26 +1178,26 @@ class ToolExecutor:
         execution = context.execution
         if not isinstance(execution, RuntimeToolExecutionContext):
             return tuple(context for _ in calls)
-        scopes = tuple(
-            execution._scope.child_tool(tool_call_id=call.id, tool_name=call.name)
-            for call in calls
-        )
         return tuple(
             ToolContext(
                 context.run_id,
                 context.session_id,
-                scope.cancellation,
-                RuntimeToolExecutionContext(scope, self, context.session_id),
+                child.cancellation,
+                child,
             )
-            for scope in scopes
+            for child in (
+                execution.child_tool_context(call, self, context.session_id)
+                for call in calls
+            )
         )
 
     async def execute_nested(
-        self, call: ToolCall, parent_scope: object, session_id: str = "nested"
+        self,
+        call: ToolCall,
+        parent_execution: object,
+        session_id: str = "nested",
     ) -> ToolExecutionResult:
-        from roboagent.runtime.execution import ExecutionScope
-
-        if not isinstance(parent_scope, ExecutionScope):
+        if not isinstance(parent_execution, RuntimeToolExecutionContext):
             return ToolExecutionResult(
                 call.id,
                 call.name,
@@ -1210,10 +1206,10 @@ class ToolExecutor:
                 ),
             )
         parent = ToolContext(
-            parent_scope.lineage.execution_run_id,
+            parent_execution.lineage.execution_run_id,
             session_id,
-            cast(CancellationToken, parent_scope.cancellation),
-            RuntimeToolExecutionContext(parent_scope, self, session_id),
+            cast(CancellationToken, parent_execution.cancellation),
+            parent_execution,
         )
         batch = await self.execute((call,), parent)
         return batch.results[0]
@@ -1229,33 +1225,22 @@ class ToolExecutor:
             )
         return None
 
-    async def run_child_agent(
-        self, scope, agent, task, *, session_factory=None, run_config=None
-    ):
-        if self.child_runner is None:
+    async def run_child(
+        self, request: ChildRunRequest, parent: RuntimeToolExecutionContext
+    ) -> ChildRunResult:
+        if self.child_executor is None:
             from roboagent.runtime import ExecutionRequestError
 
             raise ExecutionRequestError(
                 "nested_execution_unavailable", "Child Agent execution is unavailable."
             )
-        return await self.child_runner(
-            scope,
-            agent,
-            task,
-            session_factory=session_factory,
-            run_config=run_config,
-        )
+        return await self.child_executor.run_child(request, parent)
 
     async def _close_call_scope(self, context: ToolContext) -> None:
         execution = context.execution
         if not isinstance(execution, RuntimeToolExecutionContext):
             return
-        if execution._scope._terminal_recorded:
-            return
-        scope = execution._scope
-        scope.begin_closing()
-        await scope._cleanup()
-        scope.freeze()
+        await execution.close_tool_scope()
 
     async def _abort_unprocessed(
         self,
@@ -1280,7 +1265,7 @@ class ToolExecutor:
     ) -> ToolEffectRecord:
         effect_id = None
         if isinstance(context.execution, RuntimeToolExecutionContext):
-            effect_id = context.execution._scope.next_effect_id()
+            effect_id = context.execution.next_effect_id()
         certainty = (
             EffectCertainty.CERTAIN
             if status is ToolEffectStatus.SUCCEEDED
@@ -1304,7 +1289,6 @@ class ToolExecutor:
     ) -> tuple[ToolEffectRecord, ...]:
         if not isinstance(context.execution, RuntimeToolExecutionContext):
             return effects
-        scope = context.execution._scope
         identified: list[ToolEffectRecord] = []
         seen = set()
         for effect in effects:
@@ -1313,11 +1297,12 @@ class ToolExecutor:
             value = (
                 effect
                 if effect.effect_id is not None
-                else replace(effect, effect_id=scope.next_effect_id())
+                else replace(effect, effect_id=context.execution.next_effect_id())
             )
             if (
                 value.effect_id is not None
-                and value.effect_id.scope_id != scope.lineage.scope_id
+                and value.effect_id.scope_id
+                != context.execution.lineage.scope_id
             ):
                 raise ToolContractError(
                     "Composite Tool returned an effect owned by another scope."
@@ -1335,23 +1320,15 @@ class ToolExecutor:
             context.execution, RuntimeToolExecutionContext
         ):
             return
-        scope = context.execution._scope
-        scope.contribute(
-            ExecutionContribution(scope.next_contribution_id(), effects=effects)
-        )
+        context.execution.contribute_effects(effects)
 
     def _contribute_composite(self, context: ToolContext, effects, records) -> None:
         if not isinstance(context.execution, RuntimeToolExecutionContext):
             return
-        scope = context.execution._scope
         if not all(hasattr(record, "status") for record in records):
             raise ToolContractError("Composite Tool returned invalid records.")
-        scope.contribute(
-            ExecutionContribution(
-                scope.next_contribution_id(),
-                effects=tuple(effects),
-                records=tuple(records),
-            )
+        context.execution.contribute_composite(
+            tuple(effects), tuple(records)
         )
 
     def _contribute_cancelled(
@@ -1404,17 +1381,13 @@ class ToolExecutor:
             )
         elif result.content is not None:
             evidence = FrozenJsonObject({"content_blocks": len(result.content)})
-        execution._scope._tree.add_tool_record(
-            execution._scope,
-            tool_call_id=call.id,
-            tool_name=call.name,
-            arguments=call.arguments,
+        execution.record_tool_call(
+            call=call,
             arguments_preview=canonical_preview,
             status=status,
             error_code=result.error.code if result.error else None,
             evidence=evidence,
         )
-        execution._scope._terminal_recorded = True
 
     def _record_error(
         self,
