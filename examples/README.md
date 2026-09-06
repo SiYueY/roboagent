@@ -10,3 +10,4 @@
 当前示例：
 
 - [chat](chat/README.md)：使用 Gradio UI 的流式多轮浏览器聊天。
+- [coding](coding/README.md)：V1.3 进程隔离 CodingSession、Rich CLI 与集成评估。

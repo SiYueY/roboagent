@@ -7,6 +7,9 @@ models:
     params:
       model: qwen3.7-flash
       dashscope_api_key: ${DASHSCOPE_API_KEY}
+      # The strict coding protocol consumes only answer content, not reasoning_content.
+      extra_body:
+        enable_thinking: false
 skills: {}
 speech:
   # pipeline is the stable ASR -> Agent -> TTS path. realtime currently

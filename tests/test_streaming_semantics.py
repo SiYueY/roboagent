@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from roboagent.context import MessageSegment, ModelContext
-from roboagent.message import AssistantMessage, BytesSource, FrozenJsonObject, ImageContent, ToolCall, UserMessage
+from roboagent.message import (
+    AssistantMessage,
+    BytesSource,
+    FrozenJsonObject,
+    ImageContent,
+    ToolCall,
+    UserMessage,
+)
 from roboagent.model import (
     FinishReason,
     ModelCapabilities,
@@ -26,7 +33,30 @@ from roboagent.model import (
 )
 from roboagent.runtime import Modality
 from roboagent.tool import ToolDefinition
-from roboagent.model.client import _stream_chunks
+from roboagent.model.client import _provider_error, _stream_chunks
+
+
+@pytest.mark.parametrize(
+    ("status", "name", "code", "message"),
+    [
+        (401, "SDKError", "provider_authentication_error", "HTTP 401"),
+        (403, "SDKError", "provider_authentication_error", "endpoint region"),
+        (429, "SDKError", "provider_rate_limit", "HTTP 429"),
+        (500, "SDKError", "provider_http_error", "HTTP 500"),
+        (None, "APITimeoutError", "provider_timeout", "timed out"),
+        (None, "APIConnectionError", "provider_connection_error", "connect"),
+    ],
+)
+def test_provider_errors_are_classified_without_sdk_details(
+    status: int | None, name: str, code: str, message: str
+) -> None:
+    error_type = type(name, (Exception,), {})
+    source = error_type("secret provider response")
+    source.status_code = status
+    translated = _provider_error(source)
+    assert translated.code == code
+    assert message in str(translated)
+    assert "secret provider response" not in str(translated)
 
 
 @dataclass
@@ -50,7 +80,11 @@ class EventModel:
 def test_collects_text_tool_usage_and_closes_stream() -> None:
     async def check() -> None:
         call = ToolCall("id", "lookup", FrozenJsonObject({"q": "x"}))
-        response = ModelResponse(AssistantMessage("thinking", (call,)), FinishReason.TOOL_CALL, Usage(2, 3, 5))
+        response = ModelResponse(
+            AssistantMessage("thinking", (call,)),
+            FinishReason.TOOL_CALL,
+            Usage(2, 3, 5),
+        )
         model = EventModel(
             (
                 ResponseStarted("r", 0),
@@ -72,8 +106,14 @@ def test_collects_text_tool_usage_and_closes_stream() -> None:
     ("events", "code"),
     [
         ((TextDelta(0, "x"),), "invalid_stream_sequence"),
-        ((ResponseStarted("r", 0), ResponseStarted("r", 1)), "duplicate_response_started"),
-        ((ResponseStarted("r", 0), ToolCallArgumentsDelta(1, 0, "x", "{}")), "invalid_tool_call_delta_state"),
+        (
+            (ResponseStarted("r", 0), ResponseStarted("r", 1)),
+            "duplicate_response_started",
+        ),
+        (
+            (ResponseStarted("r", 0), ToolCallArgumentsDelta(1, 0, "x", "{}")),
+            "invalid_tool_call_delta_state",
+        ),
         ((ResponseStarted("r", 0),), "missing_terminal_response"),
     ],
 )
@@ -92,12 +132,29 @@ def test_duplicate_call_id_and_final_mismatch_rejected() -> None:
     async def check() -> None:
         first = ToolCall("same", "one", FrozenJsonObject())
         second = ToolCall("same", "two", FrozenJsonObject())
-        duplicate = EventModel((ResponseStarted("r", 0), ToolCallStarted(1, 0, "same", "one"), ToolCallCompleted(2, 0, first), ToolCallStarted(3, 1, "same", "two")))
+        duplicate = EventModel(
+            (
+                ResponseStarted("r", 0),
+                ToolCallStarted(1, 0, "same", "one"),
+                ToolCallCompleted(2, 0, first),
+                ToolCallStarted(3, 1, "same", "two"),
+            )
+        )
         with pytest.raises(ModelProtocolError, match="unique") as caught:
             await collect_model_stream(duplicate, ModelContext(None, (), ()))
         assert caught.value.code == "duplicate_tool_call_id"
 
-        mismatch = EventModel((ResponseStarted("r", 0), ResponseCompleted(1, ModelResponse(AssistantMessage(tool_calls=(second,)), FinishReason.TOOL_CALL))))
+        mismatch = EventModel(
+            (
+                ResponseStarted("r", 0),
+                ResponseCompleted(
+                    1,
+                    ModelResponse(
+                        AssistantMessage(tool_calls=(second,)), FinishReason.TOOL_CALL
+                    ),
+                ),
+            )
+        )
         with pytest.raises(ModelProtocolError) as caught:
             await collect_model_stream(mismatch, ModelContext(None, (), ()))
         assert caught.value.code == "tool_call_response_mismatch"
@@ -107,10 +164,20 @@ def test_duplicate_call_id_and_final_mismatch_rejected() -> None:
 
 def test_capability_validation_precedes_model_invocation() -> None:
     async def check() -> None:
-        definition = ToolDefinition("lookup", "Lookup.", FrozenJsonObject({"type": "object"}))
-        model = EventModel((), ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False))
+        definition = ToolDefinition(
+            "lookup", "Lookup.", FrozenJsonObject({"type": "object"})
+        )
+        model = EventModel(
+            (),
+            ModelCapabilities(
+                frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False
+            ),
+        )
         with pytest.raises(ModelCapabilityError) as caught:
-            await collect_model_stream(model, ModelContext(None, (MessageSegment(UserMessage("x")),), (definition,)))
+            await collect_model_stream(
+                model,
+                ModelContext(None, (MessageSegment(UserMessage("x")),), (definition,)),
+            )
         assert caught.value.code == "model_does_not_support_tools"
         assert not model.called
         assert not model.closed
@@ -122,7 +189,9 @@ def test_parallel_tool_calls_require_declared_capability() -> None:
     async def check() -> None:
         first = ToolCall("first", "lookup", FrozenJsonObject())
         second = ToolCall("second", "lookup", FrozenJsonObject())
-        response = ModelResponse(AssistantMessage(tool_calls=(first, second)), FinishReason.TOOL_CALL)
+        response = ModelResponse(
+            AssistantMessage(tool_calls=(first, second)), FinishReason.TOOL_CALL
+        )
         model = EventModel(
             (
                 ResponseStarted("r", 0),
@@ -137,7 +206,9 @@ def test_parallel_tool_calls_require_declared_capability() -> None:
             ),
         )
         with pytest.raises(ModelCapabilityError) as caught:
-            await collect_model_stream(model, ModelContext(None, (MessageSegment(UserMessage("x")),), ()))
+            await collect_model_stream(
+                model, ModelContext(None, (MessageSegment(UserMessage("x")),), ())
+            )
         assert caught.value.code == "parallel_tool_calls_unsupported"
         assert model.called and model.closed
 
@@ -148,13 +219,18 @@ def test_output_modality_requires_declared_capability() -> None:
     async def check() -> None:
         message = AssistantMessage((ImageContent(BytesSource(b"image"), "image/png"),))
         model = EventModel(
-            (ResponseStarted("r", 0), ResponseCompleted(1, ModelResponse(message, FinishReason.STOP))),
+            (
+                ResponseStarted("r", 0),
+                ResponseCompleted(1, ModelResponse(message, FinishReason.STOP)),
+            ),
             ModelCapabilities(
                 frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False
             ),
         )
         with pytest.raises(ModelCapabilityError) as caught:
-            await collect_model_stream(model, ModelContext(None, (MessageSegment(UserMessage("x")),), ()))
+            await collect_model_stream(
+                model, ModelContext(None, (MessageSegment(UserMessage("x")),), ())
+            )
         assert caught.value.code == "unsupported_output_modality"
         assert model.called and model.closed
 
@@ -170,7 +246,9 @@ def test_openai_adapter_assembles_fragmented_json_and_generates_stable_id() -> N
         def chunk(*calls, finish_reason=None):
             delta = SimpleNamespace(content=None, tool_calls=calls)
             choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
-            return SimpleNamespace(id="provider-response", usage=None, choices=(choice,))
+            return SimpleNamespace(
+                id="provider-response", usage=None, choices=(choice,)
+            )
 
         class Stream:
             def __aiter__(self):
@@ -183,7 +261,9 @@ def test_openai_adapter_assembles_fragmented_json_and_generates_stable_id() -> N
 
         events = [event async for event in _stream_chunks(Stream(), "model")]
         started = next(event for event in events if isinstance(event, ToolCallStarted))
-        completed = next(event for event in events if isinstance(event, ToolCallCompleted))
+        completed = next(
+            event for event in events if isinstance(event, ToolCallCompleted)
+        )
         assert completed.call.id == started.call_id
         assert completed.call.arguments == {"value": 1}
         assert [event.sequence for event in events] == list(range(len(events)))

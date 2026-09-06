@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Sequence, cast
 from uuid import uuid4
 
 from roboagent.agent.types import RunConfig, RunResult
@@ -25,8 +25,14 @@ from roboagent.runtime.event import RunEventEmitter
 if TYPE_CHECKING:
     from roboagent.agent.agent import Agent
     from roboagent.agent.run import Run
+    from roboagent.runtime import ExecutionScope, ExecutionTree, RuntimeCancellation
     from roboagent.context import CompactionUpdate, ContextSummary
-    from roboagent.tool import ToolResultMaterializer, Workspace
+    from roboagent.tool import (
+        ArtifactDestination,
+        ArtifactReader,
+        ToolResultMaterializer,
+        Workspace,
+    )
     from roboagent.agent.persistence import SessionRepository, SessionSnapshot
 
 
@@ -49,7 +55,15 @@ class InputReceipt:
     session_id: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.input_id, str) or not self.input_id or not isinstance(self.session_id, str) or not self.session_id or not isinstance(self.sequence, int) or isinstance(self.sequence, bool) or self.sequence < 1:
+        if (
+            not isinstance(self.input_id, str)
+            or not self.input_id
+            or not isinstance(self.session_id, str)
+            or not self.session_id
+            or not isinstance(self.sequence, int)
+            or isinstance(self.sequence, bool)
+            or self.sequence < 1
+        ):
             raise ValueError("Invalid InputReceipt.")
 
 
@@ -60,7 +74,9 @@ class PendingInput:
     kind: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.receipt, InputReceipt) or not isinstance(self.message, UserMessage):
+        if not isinstance(self.receipt, InputReceipt) or not isinstance(
+            self.message, UserMessage
+        ):
             raise TypeError("PendingInput requires canonical receipt and UserMessage.")
         if self.kind not in {"steer", "follow_up"}:
             raise ValueError("Invalid pending input kind.")
@@ -75,19 +91,34 @@ class Session:
     _closed: bool = field(default=False, init=False, repr=False)
     _sequence: int = field(default=0, init=False, repr=False)
     _pending: list[PendingInput] = field(default_factory=list, init=False, repr=False)
-    _current_compaction: ContextSummary | None = field(default=None, init=False, repr=False)
-    _ownership_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
-    _queue_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _transcript_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _compaction_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _current_compaction: ContextSummary | None = field(
+        default=None, init=False, repr=False
+    )
+    _ownership_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
+    _queue_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _transcript_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _compaction_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
     _media_limits: MediaLimits = field(init=False, repr=False)
     workspace: Workspace = field(init=False)
     result_materializer: ToolResultMaterializer = field(init=False)
     repository: SessionRepository | None = field(init=False, repr=False)
     metadata: FrozenJsonObject = field(init=False)
+    artifact_reader: ArtifactReader = field(init=False, repr=False)
+    artifact_destination: ArtifactDestination = field(init=False, repr=False)
+    _root_session_id: str = field(init=False, repr=False)
     _runtime_revision: int = field(default=0, init=False, repr=False)
     _durable_revision: int | None = field(default=None, init=False, repr=False)
-    _persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _persist_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
     _event_emitter: RunEventEmitter | None = field(default=None, init=False, repr=False)
 
     def __init__(
@@ -101,16 +132,27 @@ class Session:
         repository: SessionRepository | None = None,
         metadata: FrozenJsonObject | None = None,
         allow_nondurable_artifacts: bool = False,
+        artifact_reader: ArtifactReader | None = None,
+        artifact_destination: ArtifactDestination | None = None,
     ) -> None:
         from roboagent.agent.agent import Agent as CanonicalAgent
-        from roboagent.tool import InMemoryWorkspace, InlineToolResultMaterializer, WorkspaceToolResultMaterializer
+        from roboagent.tool import (
+            InMemoryWorkspace,
+            InlineToolResultMaterializer,
+            WorkspaceArtifactDestination,
+            WorkspaceArtifactReader,
+            WorkspaceToolResultMaterializer,
+        )
 
         if not isinstance(agent, CanonicalAgent):
             raise TypeError("Session requires a canonical Agent.")
-        if session_id is not None and (not isinstance(session_id, str) or not session_id):
+        if session_id is not None and (
+            not isinstance(session_id, str) or not session_id
+        ):
             raise ValueError("session_id must be non-empty or None.")
         self.agent = agent
         self.session_id = session_id or uuid4().hex
+        self._root_session_id = self.session_id
         self._messages = list(messages)
         self._active_run_id = None
         self._closed = False
@@ -126,10 +168,30 @@ class Session:
         self.result_materializer = result_materializer or InlineToolResultMaterializer()
         bound_workspace = getattr(self.result_materializer, "workspace", self.workspace)
         if bound_workspace is not self.workspace:
-            raise ValueError("ToolResultMaterializer must be bound to the Session Workspace.")
-        if repository is not None and isinstance(self.result_materializer, WorkspaceToolResultMaterializer) and not self.workspace.durable and not allow_nondurable_artifacts:
-            raise ValueError("Persistent Sessions require a durable Workspace for artifact materialization.")
+            raise ValueError(
+                "ToolResultMaterializer must be bound to the Session Workspace."
+            )
+        if (
+            repository is not None
+            and isinstance(self.result_materializer, WorkspaceToolResultMaterializer)
+            and not self.workspace.durable
+            and not allow_nondurable_artifacts
+        ):
+            raise ValueError(
+                "Persistent Sessions require a durable Workspace for artifact materialization."
+            )
         self.repository = repository
+        self.artifact_reader = cast(
+            "ArtifactReader", artifact_reader or WorkspaceArtifactReader(self.workspace)
+        )
+        self.artifact_destination = cast(
+            "ArtifactDestination",
+            artifact_destination or WorkspaceArtifactDestination(self.workspace),
+        )
+        if not callable(getattr(self.artifact_reader, "iter_bytes", None)):
+            raise TypeError("artifact_reader must implement iter_bytes().")
+        if not callable(getattr(self.artifact_destination, "create_temp", None)):
+            raise TypeError("artifact_destination must implement create_temp().")
         self.metadata = FrozenJsonObject(metadata or {})
         self._runtime_revision = 0
         self._durable_revision = None
@@ -153,10 +215,14 @@ class Session:
     def durable_revision(self) -> int | None:
         return self._durable_revision
 
-    async def capture_context_state(self, run_id: str) -> tuple[tuple[AgentMessage, ...], ContextSummary | None]:
+    async def capture_context_state(
+        self, run_id: str
+    ) -> tuple[tuple[AgentMessage, ...], ContextSummary | None]:
         """Capture immutable context inputs without exposing Session to a manager."""
         if self.active_run_id != run_id:
-            raise SessionOwnershipError("Only the active Run may capture context state.")
+            raise SessionOwnershipError(
+                "Only the active Run may capture context state."
+            )
         async with self._transcript_lock:
             async with self._compaction_lock:
                 return tuple(self._messages), self._current_compaction
@@ -166,11 +232,17 @@ class Session:
         from roboagent.context import CompactionUpdate
 
         if self.active_run_id != run_id:
-            raise SessionOwnershipError("Only the active Run may commit compaction state.")
+            raise SessionOwnershipError(
+                "Only the active Run may commit compaction state."
+            )
         if not isinstance(update, CompactionUpdate):
             raise TypeError("update must be CompactionUpdate.")
         async with self._compaction_lock:
-            current_digest = None if self._current_compaction is None else self._current_compaction.source_digest
+            current_digest = (
+                None
+                if self._current_compaction is None
+                else self._current_compaction.source_digest
+            )
             if current_digest != update.expected_summary_digest:
                 return False
             self._current_compaction = update.summary
@@ -189,10 +261,14 @@ class Session:
         with self._ownership_lock:
             return self._closed
 
-    async def acquire_run(self, run_id: str, events: RunEventEmitter | None = None) -> None:
+    async def acquire_run(
+        self, run_id: str, events: RunEventEmitter | None = None
+    ) -> None:
         self._acquire_run_nowait(run_id, events)
 
-    def _acquire_run_nowait(self, run_id: str, events: RunEventEmitter | None = None) -> None:
+    def _acquire_run_nowait(
+        self, run_id: str, events: RunEventEmitter | None = None
+    ) -> None:
         with self._ownership_lock:
             if self._closed:
                 raise SessionClosedError("Session is closed.")
@@ -207,7 +283,9 @@ class Session:
     def _release_run_nowait(self, run_id: str) -> None:
         with self._ownership_lock:
             if self._active_run_id != run_id:
-                raise SessionOwnershipError("Only the owning Run may release the Session.")
+                raise SessionOwnershipError(
+                    "Only the owning Run may release the Session."
+                )
             self._active_run_id = None
             self._event_emitter = None
 
@@ -231,9 +309,13 @@ class Session:
         await self._persist_required(revision)
         return receipt
 
-    async def consume_pending(self, run_id: str, cancellation: CancellationToken) -> tuple[PendingInput, ...]:
+    async def consume_pending(
+        self, run_id: str, cancellation: CancellationToken
+    ) -> tuple[PendingInput, ...]:
         if self.active_run_id != run_id:
-            raise SessionOwnershipError("Only the active Run may consume pending input.")
+            raise SessionOwnershipError(
+                "Only the active Run may consume pending input."
+            )
         async with self._queue_lock:
             async with self._transcript_lock:
                 cancellation.raise_if_cancelled()
@@ -290,7 +372,9 @@ class Session:
         async with self._queue_lock:
             return tuple(self._pending)
 
-    def start(self, message: UserMessage | None = None, *, config: RunConfig | None = None) -> "Run":
+    def start(
+        self, message: UserMessage | None = None, *, config: RunConfig | None = None
+    ) -> "Run":
         from roboagent.agent.run import Run
 
         if message is not None and not isinstance(message, UserMessage):
@@ -302,7 +386,9 @@ class Session:
         skill_bound = False
         if message is not None:
             try:
-                TranscriptValidator(self._media_limits).validate((*self._messages, message))
+                TranscriptValidator(self._media_limits).validate(
+                    (*self._messages, message)
+                )
             except BaseException:
                 self._release_run_nowait(run.run_id)
                 raise
@@ -321,12 +407,55 @@ class Session:
             raise
         return run
 
-    async def run(self, message: UserMessage | None = None, *, config: RunConfig | None = None) -> RunResult:
+    async def run(
+        self, message: UserMessage | None = None, *, config: RunConfig | None = None
+    ) -> RunResult:
         return await self.start(message, config=config).result()
+
+    def _start_nested(
+        self,
+        message: UserMessage,
+        *,
+        config: RunConfig,
+        tree: ExecutionTree,
+        scope: ExecutionScope,
+        events: RunEventEmitter,
+        cancellation: RuntimeCancellation,
+        output_processor,
+    ) -> "Run":
+        from roboagent.agent.run import Run
+
+        run = Run(self, config, run_id=scope.lineage.execution_run_id)
+        run._attach_nested(
+            tree=tree,
+            scope=scope,
+            events=events,
+            cancellation=cancellation,
+            output_processor=output_processor,
+        )
+        self._acquire_run_nowait(run.run_id, events)
+        run._initial_message = message
+        run._initial_pending_sequence = self._sequence
+        try:
+            TranscriptValidator(self._media_limits).validate((*self._messages, message))
+            if self.agent.skill_manager is not None:
+                run._skill_catalog = self.agent.skill_manager.bind_run(run.run_id)
+            run.start_eager()
+        except BaseException:
+            if self.agent.skill_manager is not None and run._skill_catalog is not None:
+                try:
+                    self.agent.skill_manager.release_run(run.run_id)
+                except Exception:
+                    pass
+            self._release_run_nowait(run.run_id)
+            raise
+        return run
 
     async def commit_message(self, run_id: str, message: AssistantMessage) -> None:
         if self.active_run_id != run_id:
-            raise SessionOwnershipError("Only the active Run may commit transcript facts.")
+            raise SessionOwnershipError(
+                "Only the active Run may commit transcript facts."
+            )
         async with self._transcript_lock:
             TranscriptValidator(self._media_limits).validate((*self._messages, message))
             self._messages.append(message)
@@ -334,9 +463,16 @@ class Session:
             revision = self._runtime_revision
         await self._persist_required(revision)
 
-    async def commit_exchange(self, run_id: str, assistant: AssistantMessage, results: tuple[ToolResultMessage, ...]) -> None:
+    async def commit_exchange(
+        self,
+        run_id: str,
+        assistant: AssistantMessage,
+        results: tuple[ToolResultMessage, ...],
+    ) -> None:
         if self.active_run_id != run_id:
-            raise SessionOwnershipError("Only the active Run may commit transcript facts.")
+            raise SessionOwnershipError(
+                "Only the active Run may commit transcript facts."
+            )
         block: tuple[AgentMessage, ...] = (assistant, *results)
         async with self._transcript_lock:
             TranscriptValidator(self._media_limits).validate((*self._messages, *block))
@@ -375,23 +511,34 @@ class Session:
         if self.repository is None:
             raise SessionPersistenceError("Session has no repository.")
         async with self._persist_lock:
-            if self._durable_revision is not None and self._durable_revision >= required_revision:
+            if (
+                self._durable_revision is not None
+                and self._durable_revision >= required_revision
+            ):
                 return self._durable_revision
             try:
                 snapshot = await self.snapshot()
                 expected = self._durable_revision
-                persisted = await self.repository.save(snapshot, expected_revision=expected)
+                persisted = await self.repository.save(
+                    snapshot, expected_revision=expected
+                )
                 if persisted != snapshot.revision:
-                    raise SessionPersistenceError("Repository returned an unexpected revision.")
+                    raise SessionPersistenceError(
+                        "Repository returned an unexpected revision."
+                    )
             except SessionPersistenceError as exc:
                 await self._emit_persistence_event(
-                    "session.persistence_failed", required_revision=required_revision, error_code=exc.code
+                    "session.persistence_failed",
+                    required_revision=required_revision,
+                    error_code=exc.code,
                 )
                 raise
             except Exception as exc:
                 error = SessionPersistenceError("Session repository save failed.")
                 await self._emit_persistence_event(
-                    "session.persistence_failed", required_revision=required_revision, error_code=error.code
+                    "session.persistence_failed",
+                    required_revision=required_revision,
+                    error_code=error.code,
                 )
                 raise error from exc
             self._durable_revision = persisted
@@ -401,7 +548,7 @@ class Session:
     async def _emit_persistence_event(self, event_type: str, **payload: object) -> None:
         emitter = self._event_emitter
         if emitter is not None:
-            await emitter.emit(event_type, **payload)
+            await emitter.emit(event_type, **payload)  # type: ignore[arg-type]
 
     @classmethod
     def restore(
@@ -413,6 +560,8 @@ class Session:
         workspace: Workspace | None = None,
         result_materializer: ToolResultMaterializer | None = None,
         allow_nondurable_artifacts: bool = False,
+        artifact_reader: ArtifactReader | None = None,
+        artifact_destination: ArtifactDestination | None = None,
     ) -> "Session":
         from roboagent.agent.persistence import (
             SCHEMA_VERSION,
@@ -424,17 +573,28 @@ class Session:
         if not isinstance(snapshot, SessionSnapshot):
             raise TypeError("snapshot must be SessionSnapshot.")
         if snapshot.schema_version != SCHEMA_VERSION:
-            raise SessionVersionUnsupportedError("Unsupported Session snapshot version.")
+            raise SessionVersionUnsupportedError(
+                "Unsupported Session snapshot version."
+            )
         TranscriptValidator(agent.media_limits).validate(snapshot.messages)
         if not all(isinstance(item, PendingInput) for item in snapshot.pending):
             raise SessionCorruptedError("Snapshot pending values are not canonical.")
         sequences = [item.receipt.sequence for item in snapshot.pending]
-        if any(item.receipt.session_id != snapshot.session_id for item in snapshot.pending):
-            raise SessionCorruptedError("Pending input belongs to another Session.")
-        if sequences != sorted(sequences) or len(sequences) != len(set(sequences)) or any(
-            left >= right for left, right in zip(sequences, sequences[1:], strict=False)
+        if any(
+            item.receipt.session_id != snapshot.session_id for item in snapshot.pending
         ):
-            raise SessionCorruptedError("Pending input sequence is not strictly increasing.")
+            raise SessionCorruptedError("Pending input belongs to another Session.")
+        if (
+            sequences != sorted(sequences)
+            or len(sequences) != len(set(sequences))
+            or any(
+                left >= right
+                for left, right in zip(sequences, sequences[1:], strict=False)
+            )
+        ):
+            raise SessionCorruptedError(
+                "Pending input sequence is not strictly increasing."
+            )
         if sequences and snapshot.last_pending_sequence < max(sequences):
             raise SessionCorruptedError("last_pending_sequence is stale.")
         session = cls(
@@ -446,6 +606,8 @@ class Session:
             repository=repository,
             metadata=snapshot.metadata,
             allow_nondurable_artifacts=allow_nondurable_artifacts,
+            artifact_reader=artifact_reader,
+            artifact_destination=artifact_destination,
         )
         session._pending = list(snapshot.pending)
         session._sequence = snapshot.last_pending_sequence
@@ -453,12 +615,15 @@ class Session:
         if compaction is not None:
             end = compaction.source_end_exclusive
             try:
-                TranscriptValidator(agent.media_limits).validate(snapshot.messages[:end])
+                TranscriptValidator(agent.media_limits).validate(
+                    snapshot.messages[:end]
+                )
             except Exception:
                 compaction = None
             if compaction is not None and (
                 end > len(snapshot.messages)
-                or canonical_message_digest(snapshot.messages[:end]) != compaction.source_digest
+                or canonical_message_digest(snapshot.messages[:end])
+                != compaction.source_digest
             ):
                 compaction = None
         session._current_compaction = compaction

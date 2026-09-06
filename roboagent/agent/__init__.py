@@ -1,6 +1,7 @@
 """Canonical Agent, Session, Run, hook, and result API."""
 
 from .agent import Agent
+from .delegation import ChildSessionContext, ChildSessionFactory
 from .hooks import (
     HookDecision,
     ModelHookContext,
@@ -39,6 +40,8 @@ __all__ = [
     "InputReceipt",
     "PendingInput",
     "CanonicalMessageCodec",
+    "ChildSessionContext",
+    "ChildSessionFactory",
     "InMemorySessionRepository",
     "JsonSessionSnapshotCodec",
     "LocalSessionRepository",

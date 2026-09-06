@@ -5,22 +5,46 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass, replace
-from typing import Awaitable, Protocol, Sequence, cast
+from time import monotonic
+from typing import Awaitable, Callable, Protocol, Sequence, cast
 from uuid import uuid4
 
-from roboagent.message import ArtifactReferenceContent, JsonContent, TextContent, ToolCall, ToolResultMessage, ToolResultStatus, canonical_json_digest
-from roboagent.runtime.types import RunError
+from roboagent.message import (
+    ArtifactReferenceContent,
+    FrozenJsonObject,
+    JsonContent,
+    TextContent,
+    ToolCall,
+    ToolResultMessage,
+    ToolResultStatus,
+    canonical_json_digest,
+)
+from roboagent.runtime.execution import (
+    ExecutionContribution,
+    ExecutionLineage,
+    ExecutionRecordStatus,
+    RuntimeToolExecutionContext,
+    SettlementError,
+    SupplementalExecutionRecord,
+)
+from roboagent.runtime.types import CancellationToken, RunError
 
 from .tool import (
     AllowAllToolPolicy,
+    CompositeToolOutcome,
+    CompositeToolExecutionFailure,
+    _CompositeToolCancellation,
+    EffectCertainty,
     RawToolResult,
     Tool,
     ToolBatchAborted,
     ToolBatchResult,
     ToolContractError,
     ToolContext,
+    ToolContent,
     ToolDecision,
     ToolEffectKind,
+    ToolEffectReporting,
     ToolEffectRecord,
     ToolEffectStatus,
     ToolEffectUnknown,
@@ -29,14 +53,20 @@ from .tool import (
     ToolExecutionFailure,
     ToolExecutionPolicy,
     ToolExecutionResult,
+    ToolHandlerReturn,
     ToolPolicyDecision,
     ToolJsonContent,
     ToolRegistry,
-    ToolReturn,
     ToolTextContent,
     validate_tool_arguments,
 )
-from .approval import ApprovalDecision, ApprovalProvider, ApprovalRequest, ApprovalResponse, ApprovalSettings
+from .approval import (
+    ApprovalDecision,
+    ApprovalProvider,
+    ApprovalRequest,
+    ApprovalResponse,
+    ApprovalSettings,
+)
 from .materializer import (
     InlineToolResultMaterializer,
     ToolMaterializationError,
@@ -54,9 +84,16 @@ class ToolExecutorConfig:
     max_error_chars: int = 2048
 
     def __post_init__(self) -> None:
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in (self.max_calls_per_turn, self.max_concurrency)):
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in (self.max_calls_per_turn, self.max_concurrency)
+        ):
             raise ValueError("Tool call and concurrency limits must be positive.")
-        if self.default_timeout is not None and (isinstance(self.default_timeout, bool) or not isinstance(self.default_timeout, (int, float)) or self.default_timeout <= 0):
+        if self.default_timeout is not None and (
+            isinstance(self.default_timeout, bool)
+            or not isinstance(self.default_timeout, (int, float))
+            or self.default_timeout <= 0
+        ):
             raise ValueError("default_timeout must be positive or None.")
         if (
             isinstance(self.cancellation_grace_period, bool)
@@ -70,7 +107,13 @@ class ToolExecutorConfig:
 
 
 class RunEventEmitter(Protocol):
-    async def emit(self, event_type: str, **payload: object) -> object: ...
+    async def emit(
+        self,
+        event_type: str,
+        *,
+        lineage: ExecutionLineage | None = None,
+        **payload: object,
+    ) -> object: ...
 
 
 class ToolBatchCancelled(asyncio.CancelledError):
@@ -88,6 +131,12 @@ class _PreparedCall:
     timeout: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class _CancellationEvidence:
+    effects: tuple[ToolEffectRecord, ...]
+    records: tuple[SupplementalExecutionRecord, ...] = ()
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -101,6 +150,7 @@ class ToolExecutor:
         result_materializer: ToolResultMaterializer | None = None,
         approval_provider: ApprovalProvider | None = None,
         approval_settings: ApprovalSettings | None = None,
+        child_runner: Callable[..., Awaitable[object]] | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or AllowAllToolPolicy()
@@ -111,11 +161,17 @@ class ToolExecutor:
         self.result_materializer = result_materializer or InlineToolResultMaterializer()
         self.approval_provider = approval_provider
         self.approval_settings = approval_settings or ApprovalSettings()
+        self.child_runner = child_runner
 
-    async def execute(self, calls: tuple[ToolCall, ...], context: ToolContext) -> ToolBatchResult:
+    async def execute(
+        self, calls: tuple[ToolCall, ...], context: ToolContext
+    ) -> ToolBatchResult:
         if len(calls) > self.config.max_calls_per_turn:
-            raise ToolBatchAborted(RunError("max_calls_per_turn", "Tool call limit exceeded."))
+            raise ToolBatchAborted(
+                RunError("max_calls_per_turn", "Tool call limit exceeded.")
+            )
         context.cancellation.raise_if_cancelled()
+        contexts = self._call_contexts(calls, context)
         tools = tuple(self.registry.get(call.name) for call in calls)
         concurrent = bool(calls) and all(
             tool is not None and tool.execution_mode is ToolExecutionMode.CONCURRENT
@@ -124,80 +180,139 @@ class ToolExecutor:
         if not concurrent:
             results: list[ToolExecutionResult] = []
             effects: list[ToolEffectRecord] = []
-            for call in calls:
+            for index, (call, call_context) in enumerate(
+                zip(calls, contexts, strict=True)
+            ):
                 try:
-                    result, effect = await self._one(call, context)
+                    result, call_effects = await self._one(call, call_context)
                 except ToolBatchAborted as exc:
-                    raise ToolBatchAborted(exc.reason, (*effects, *exc.effects)) from exc
+                    await self._abort_unprocessed(
+                        calls, contexts, index + 1, "batch_aborted"
+                    )
+                    raise ToolBatchAborted(
+                        exc.reason, (*effects, *exc.effects)
+                    ) from exc
                 except ToolBatchCancelled as exc:
+                    await self._abort_unprocessed(
+                        calls, contexts, index + 1, "cancelled"
+                    )
                     raise ToolBatchCancelled((*effects, *exc.effects)) from exc
                 except asyncio.CancelledError as exc:
+                    await self._abort_unprocessed(
+                        calls, contexts, index + 1, "cancelled"
+                    )
                     raise ToolBatchCancelled(tuple(effects)) from exc
                 results.append(result)
-                if effect:
-                    effects.append(effect)
+                effects.extend(call_effects)
             return ToolBatchResult(calls, tuple(results), tuple(effects))
-        return await self._concurrent(calls, context)
+        return await self._concurrent(calls, contexts)
 
-    async def _concurrent(self, calls: tuple[ToolCall, ...], context: ToolContext) -> ToolBatchResult:
+    async def _concurrent(
+        self, calls: tuple[ToolCall, ...], contexts: tuple[ToolContext, ...]
+    ) -> ToolBatchResult:
         results: list[ToolExecutionResult | None] = [None] * len(calls)
-        effects: list[ToolEffectRecord | None] = [None] * len(calls)
-        prepared: list[tuple[int, _PreparedCall]] = []
-        for index, call in enumerate(calls):
-            try:
+        effects: list[tuple[ToolEffectRecord, ...] | None] = [None] * len(calls)
+        prepared: list[tuple[int, _PreparedCall, ToolContext]] = []
+        try:
+            for index, (call, context) in enumerate(zip(calls, contexts, strict=True)):
                 value = await self._prepare(call, context)
-            except asyncio.CancelledError as exc:
-                raise ToolBatchCancelled(()) from exc
-            if isinstance(value, ToolExecutionResult):
-                results[index] = value
-            else:
-                prepared.append((index, value))
-        running: dict[asyncio.Task[tuple[ToolExecutionResult, ToolEffectRecord | None]], int] = {}
+                if isinstance(value, ToolExecutionResult):
+                    results[index] = value
+                    effects[index] = ()
+                    await self._close_call_scope(context)
+                else:
+                    prepared.append((index, value, context))
+        except ToolBatchAborted as exc:
+            self._record_error(context, call, exc.reason.code)
+            await self._abort_unprocessed(calls, contexts, 0, "batch_aborted")
+            raise
+        except BaseException:
+            await self._abort_unprocessed(calls, contexts, 0, "cancelled")
+            raise
+        running: dict[
+            asyncio.Task[tuple[ToolExecutionResult, tuple[ToolEffectRecord, ...]]], int
+        ] = {}
         next_index = 0
+
+        async def execute_prepared(
+            item: _PreparedCall, context: ToolContext
+        ) -> tuple[ToolExecutionResult, tuple[ToolEffectRecord, ...]]:
+            try:
+                return await self._execute_prepared(item, context)
+            except ToolBatchAborted as exc:
+                self._record_error(context, item.call, exc.reason.code)
+                raise
+            except ToolBatchCancelled:
+                self._record_error(
+                    context, item.call, "cancelled", ExecutionRecordStatus.CANCELLED
+                )
+                raise
+            finally:
+                await self._close_call_scope(context)
 
         def fill() -> None:
             nonlocal next_index
-            while next_index < len(prepared) and len(running) < self.config.max_concurrency:
-                index, item = prepared[next_index]
-                task = asyncio.create_task(self._execute_prepared(item, context))
-                running[task] = index
+            while (
+                next_index < len(prepared)
+                and len(running) < self.config.max_concurrency
+            ):
+                index, item, context = prepared[next_index]
+                running[asyncio.create_task(execute_prepared(item, context))] = index
                 next_index += 1
 
         fill()
         try:
             while running:
-                done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    running, return_when=asyncio.FIRST_COMPLETED
+                )
                 for task in done:
                     index = running.pop(task)
                     try:
-                        result, effect = task.result()
+                        result, call_effects = task.result()
                     except ToolBatchAborted as exc:
                         cancelled_effects = await self._cancel_tasks(running)
+                        await self._abort_unprocessed(
+                            calls, contexts, 0, "batch_aborted"
+                        )
                         raise ToolBatchAborted(
                             exc.reason,
-                            (*_present_effects(effects), *exc.effects, *cancelled_effects),
+                            (
+                                *_flatten_effects(effects),
+                                *exc.effects,
+                                *cancelled_effects,
+                            ),
                         ) from exc
                     except ToolBatchCancelled as exc:
                         cancelled_effects = await self._cancel_tasks(running)
+                        await self._abort_unprocessed(calls, contexts, 0, "cancelled")
                         raise ToolBatchCancelled(
-                            (*_present_effects(effects), *exc.effects, *cancelled_effects)
+                            (
+                                *_flatten_effects(effects),
+                                *exc.effects,
+                                *cancelled_effects,
+                            )
                         ) from exc
                     results[index] = result
-                    if effect:
-                        effects[index] = effect
+                    effects[index] = call_effects
                 fill()
         except asyncio.CancelledError as exc:
             cancelled_effects = await self._cancel_tasks(running)
-            raise ToolBatchCancelled((*_present_effects(effects), *cancelled_effects)) from exc
+            await self._abort_unprocessed(calls, contexts, 0, "cancelled")
+            raise ToolBatchCancelled(
+                (*_flatten_effects(effects), *cancelled_effects)
+            ) from exc
         return ToolBatchResult(
             calls,
             tuple(item for item in results if item is not None),
-            _present_effects(effects),
+            tuple(effect for group in effects if group is not None for effect in group),
         )
 
     async def _cancel_tasks(
         self,
-        running: dict[asyncio.Task[tuple[ToolExecutionResult, ToolEffectRecord | None]], int],
+        running: dict[
+            asyncio.Task[tuple[ToolExecutionResult, tuple[ToolEffectRecord, ...]]], int
+        ],
     ) -> tuple[ToolEffectRecord, ...]:
         for task in running:
             task.cancel()
@@ -208,103 +323,215 @@ class ToolExecutor:
                 effects.extend(value.effects)
             elif isinstance(value, ToolBatchAborted):
                 effects.extend(value.effects)
-            elif isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], ToolEffectRecord):
-                effects.append(value[1])
+            elif (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and isinstance(value[1], tuple)
+            ):
+                effects.extend(
+                    item for item in value[1] if isinstance(item, ToolEffectRecord)
+                )
         running.clear()
         return tuple(effects)
 
-    async def _one(self, call: ToolCall, context: ToolContext) -> tuple[ToolExecutionResult, ToolEffectRecord | None]:
-        prepared = await self._prepare(call, context)
-        if isinstance(prepared, ToolExecutionResult):
-            return prepared, None
-        return await self._execute_prepared(prepared, context)
+    async def _one(
+        self, call: ToolCall, context: ToolContext
+    ) -> tuple[ToolExecutionResult, tuple[ToolEffectRecord, ...]]:
+        try:
+            prepared = await self._prepare(call, context)
+            if isinstance(prepared, ToolExecutionResult):
+                return prepared, ()
+            return await self._execute_prepared(prepared, context)
+        except ToolBatchAborted as exc:
+            self._record_error(context, call, exc.reason.code)
+            raise
+        except ToolBatchCancelled:
+            self._record_error(
+                context, call, "cancelled", ExecutionRecordStatus.CANCELLED
+            )
+            raise
+        finally:
+            await self._close_call_scope(context)
 
-    async def _prepare(self, call: ToolCall, context: ToolContext) -> _PreparedCall | ToolExecutionResult:
+    async def _prepare(
+        self, call: ToolCall, context: ToolContext
+    ) -> _PreparedCall | ToolExecutionResult:
         context.cancellation.raise_if_cancelled()
         tool = self.registry.get(call.name)
+        if tool is not None and (
+            error := validate_tool_arguments(tool, call.arguments)
+        ):
+            result = ToolExecutionResult(
+                call.id, call.name, error=self._bounded_error(error)
+            )
+            await self._emit_terminal("tool.failed", call, "invalid_arguments", context)
+            await self._after_tool(context, result)
+            self._record(context, call, result, ExecutionRecordStatus.FAILED)
+            return result
         try:
             decision = await self.policy.evaluate(call, tool, context)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise ToolBatchAborted(RunError("policy_error", "Tool policy evaluation failed.", cause_type=type(exc).__name__)) from exc
+            raise ToolBatchAborted(
+                RunError(
+                    "policy_error",
+                    "Tool policy evaluation failed.",
+                    cause_type=type(exc).__name__,
+                )
+            ) from exc
         if isinstance(decision, ToolDecision):
             decision = ToolPolicyDecision(decision)
         if not isinstance(decision, ToolPolicyDecision):
-            raise ToolBatchAborted(RunError("policy_error", "Tool policy returned an invalid decision."))
+            raise ToolBatchAborted(
+                RunError("policy_error", "Tool policy returned an invalid decision.")
+            )
         if decision.action is ToolDecision.FAIL_RUN:
-            await self._emit_terminal("tool.failed", call, "policy_fail_run")
-            raise ToolBatchAborted(RunError("policy_fail_run", "Tool policy failed the Run."))
+            await self._emit_terminal("tool.failed", call, "policy_fail_run", context)
+            self._record_error(context, call, "policy_fail_run")
+            raise ToolBatchAborted(
+                RunError("policy_fail_run", "Tool policy failed the Run.")
+            )
         if decision.action is ToolDecision.REJECT:
             result = self._error(call, "rejected", "Tool call rejected by policy.")
-            await self._emit_terminal("tool.failed", call, "rejected")
+            await self._emit_terminal("tool.failed", call, "rejected", context)
             await self._after_tool(context, result)
+            self._record(context, call, result, ExecutionRecordStatus.FAILED)
             return result
         if tool is None:
             result = self._error(call, "unknown_tool", "Unknown tool.")
-            await self._emit_terminal("tool.failed", call, "unknown_tool")
+            await self._emit_terminal("tool.failed", call, "unknown_tool", context)
             await self._after_tool(context, result)
-            return result
-        if error := validate_tool_arguments(tool, call.arguments):
-            result = ToolExecutionResult(call.id, call.name, error=self._bounded_error(error))
-            await self._emit_terminal("tool.failed", call, "invalid_arguments")
-            await self._after_tool(context, result)
+            self._record(context, call, result, ExecutionRecordStatus.FAILED)
             return result
         if decision.action is ToolDecision.REQUIRE_APPROVAL:
-            approval = await self._approval(call, context, decision.reason)
+            approval = await self._approval(call, tool, context, decision.reason)
             if approval is not None:
                 await self._after_tool(context, approval)
+                self._record(context, call, approval, ExecutionRecordStatus.FAILED)
                 return approval
         try:
             timeout_resolver = getattr(tool, "requested_timeout", None)
-            timeout = timeout_resolver(call.arguments) if timeout_resolver is not None else None
+            timeout = (
+                timeout_resolver(call.arguments)
+                if timeout_resolver is not None
+                else None
+            )
         except Exception as exc:
             raise ToolBatchAborted(
-                RunError("tool_contract_error", "Tool timeout resolution failed.", cause_type=type(exc).__name__)
+                RunError(
+                    "tool_contract_error",
+                    "Tool timeout resolution failed.",
+                    cause_type=type(exc).__name__,
+                )
             ) from exc
         if timeout is not None and (
-            isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout <= 0
         ):
-            raise ToolBatchAborted(RunError("tool_contract_error", "Tool timeout resolution was invalid."))
-        timeout = timeout if timeout is not None else tool.timeout if tool.timeout is not None else self.config.default_timeout
+            raise ToolBatchAborted(
+                RunError("tool_contract_error", "Tool timeout resolution was invalid.")
+            )
+        timeout = (
+            timeout
+            if timeout is not None
+            else tool.timeout
+            if tool.timeout is not None
+            else self.config.default_timeout
+        )
+        if (
+            isinstance(context.execution, RuntimeToolExecutionContext)
+            and timeout is not None
+        ):
+            requested_deadline = monotonic() + timeout
+            current = context.execution._scope.deadline
+            context.execution._scope.deadline = (
+                requested_deadline
+                if current is None
+                else min(current, requested_deadline)
+            )
         return _PreparedCall(call, tool, timeout)
 
     async def _execute_prepared(
         self,
         prepared: _PreparedCall,
         context: ToolContext,
-    ) -> tuple[ToolExecutionResult, ToolEffectRecord | None]:
+    ) -> tuple[ToolExecutionResult, tuple[ToolEffectRecord, ...]]:
         call, tool, timeout = prepared.call, prepared.tool, prepared.timeout
         try:
             await self._before_tool(context, call)
         except ToolBatchAborted:
-            await self._emit_terminal("tool.failed", call, "hook_error")
+            await self._emit_terminal("tool.failed", call, "hook_error", context)
+            self._record_error(context, call, "hook_error")
             raise
         context.cancellation.raise_if_cancelled()
-        await self._emit("tool.started", call)
+        await self._emit("tool.started", call, context=context)
         task = asyncio.create_task(tool.execute(call.arguments, context))
         cancelled = asyncio.create_task(context.cancellation.wait_cancelled())
         try:
             waiters: set[asyncio.Task[object]] = {task, cancelled}  # type: ignore[arg-type]
-            done, _ = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
             if cancelled in done:
-                effect = await self._cancel_started(task, tool, call)
-                await self._emit("tool.cancelled", call, status="cancelled", error_code="cancelled")
-                raise ToolBatchCancelled((effect,))
+                cancellation_evidence = await self._cancel_started(
+                    task, tool, call, context
+                )
+                call_effects = cancellation_evidence.effects
+                self._contribute_cancelled(context, tool, cancellation_evidence)
+                self._record_error(
+                    context, call, "cancelled", ExecutionRecordStatus.CANCELLED
+                )
+                await self._emit(
+                    "tool.cancelled",
+                    call,
+                    context=context,
+                    status="cancelled",
+                    error_code="cancelled",
+                )
+                raise ToolBatchCancelled(call_effects)
             if task not in done:
-                effect = await self._cancel_started(task, tool, call, timed_out=True)
+                cancellation_evidence = await self._cancel_started(
+                    task, tool, call, context, timed_out=True
+                )
+                call_effects = cancellation_evidence.effects
                 result = ToolExecutionResult(
                     call.id,
                     call.name,
                     error=ToolErrorInfo("timeout", "Tool execution timed out."),
                 )
-                await self._emit_terminal("tool.failed", call, "timeout")
-                await self._after_with_effect(context, result, effect)
-                return result, effect
+                self._contribute_cancelled(context, tool, cancellation_evidence)
+                await self._emit_terminal("tool.failed", call, "timeout", context)
+                await self._after_with_effect(context, result, call_effects)
+                self._record(context, call, result, ExecutionRecordStatus.FAILED)
+                return result, call_effects
             returned = task.result()
-            raw = returned if isinstance(returned, RawToolResult) else RawToolResult((returned,))
+            if isinstance(returned, CompositeToolOutcome):
+                if tool.effect_reporting is not ToolEffectReporting.COMPOSITE:
+                    raise ToolContractError("Leaf Tool returned CompositeToolOutcome.")
+                content = self._validate_composite_content(returned)
+                returned_effects = self._identity_effects(context, returned.effects)
+                self._contribute_composite(context, returned_effects, returned.records)
+                result = ToolExecutionResult(call.id, call.name, content=content)
+                await self._emit_terminal("tool.completed", call, None, context)
+                await self._after_with_effect(context, result, returned_effects)
+                self._record(context, call, result, ExecutionRecordStatus.SUCCEEDED)
+                return result, returned_effects
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                raise ToolContractError(
+                    "Composite Tool must return CompositeToolOutcome."
+                )
+            raw = (
+                returned
+                if isinstance(returned, RawToolResult)
+                else RawToolResult((returned,))
+            )
             evidence = raw_result_evidence(raw)
-            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.SUCCEEDED, content=evidence)
+            effect = self._effect(
+                context, call, tool, ToolEffectStatus.SUCCEEDED, content=evidence
+            )
+            self._contribute_effects(context, (effect,))
             try:
                 content = await self.result_materializer.materialize(
                     raw,
@@ -315,115 +542,345 @@ class ToolExecutor:
             except asyncio.CancelledError as exc:
                 raise ToolBatchCancelled((effect,)) from exc
             except ToolMaterializationError as exc:
-                await self._emit_terminal("tool.failed", call, exc.code)
+                await self._emit_terminal("tool.failed", call, exc.code, context)
+                self._record_error(context, call, exc.code)
                 raise ToolBatchAborted(
-                    RunError(exc.code, "Tool result materialization failed.", cause_type=type(exc).__name__),
+                    RunError(
+                        exc.code,
+                        "Tool result materialization failed.",
+                        cause_type=type(exc).__name__,
+                    ),
                     (effect,),
                 ) from exc
             except Exception as exc:
-                await self._emit_terminal("tool.failed", call, "tool_materialization_error")
+                await self._emit_terminal(
+                    "tool.failed", call, "tool_materialization_error", context
+                )
+                self._record_error(context, call, "tool_materialization_error")
                 raise ToolBatchAborted(
-                    RunError("tool_materialization_error", "Tool result materialization failed.", cause_type=type(exc).__name__),
+                    RunError(
+                        "tool_materialization_error",
+                        "Tool result materialization failed.",
+                        cause_type=type(exc).__name__,
+                    ),
                     (effect,),
                 ) from exc
             result = ToolExecutionResult(call.id, call.name, content=content)
-            await self._emit_terminal("tool.completed", call, None)
-            await self._after_with_effect(context, result, effect)
-            return result, effect
+            await self._emit_terminal("tool.completed", call, None, context)
+            await self._after_with_effect(context, result, (effect,))
+            self._record(context, call, result, ExecutionRecordStatus.SUCCEEDED)
+            return result, (effect,)
         except ToolBatchCancelled:
             raise
         except ToolBatchAborted:
             raise
+        except _CompositeToolCancellation as exc:
+            if tool.effect_reporting is not ToolEffectReporting.COMPOSITE:
+                raise ToolContractError(
+                    "Leaf Tool raised composite cancellation evidence."
+                ) from exc
+            effects = self._identity_effects(context, exc.effects)
+            self._contribute_composite(context, effects, exc.records)
+            self._record_error(
+                context, call, "cancelled", ExecutionRecordStatus.CANCELLED
+            )
+            await self._emit(
+                "tool.cancelled",
+                call,
+                context=context,
+                status="cancelled",
+                error_code="cancelled",
+            )
+            raise ToolBatchCancelled(effects) from exc
         except ToolEffectUnknown as exc:
             error = self._bounded_error(exc.error)
             result = ToolExecutionResult(call.id, call.name, error=error)
-            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=error)
-            await self._emit_terminal("tool.failed", call, error.code)
-            await self._after_with_effect(context, result, effect)
-            return result, effect
+            effect = self._effect(
+                context, call, tool, ToolEffectStatus.UNKNOWN, error=error
+            )
+            self._contribute_effects(context, (effect,))
+            await self._emit_terminal("tool.failed", call, error.code, context)
+            await self._after_with_effect(context, result, (effect,))
+            self._record(context, call, result, ExecutionRecordStatus.UNKNOWN)
+            return result, (effect,)
+        except CompositeToolExecutionFailure as exc:
+            error = self._bounded_error(exc.error)
+            result = ToolExecutionResult(call.id, call.name, error=error)
+            effects = self._identity_effects(context, exc.effects)
+            self._contribute_composite(context, effects, exc.records)
+            await self._emit_terminal("tool.failed", call, error.code, context)
+            await self._after_with_effect(context, result, effects)
+            self._record(
+                context,
+                call,
+                result,
+                ExecutionRecordStatus.UNKNOWN
+                if effects
+                else ExecutionRecordStatus.FAILED,
+            )
+            return result, effects
         except ToolExecutionFailure as exc:
             error = self._bounded_error(exc.error)
             result = ToolExecutionResult(call.id, call.name, error=error)
-            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=error)
-            await self._emit_terminal("tool.failed", call, error.code)
-            await self._after_with_effect(context, result, effect)
-            return result, effect
+            effects = (
+                ()
+                if tool.effect_reporting is ToolEffectReporting.COMPOSITE
+                else (
+                    self._effect(
+                        context, call, tool, ToolEffectStatus.FAILED, error=error
+                    ),
+                )
+            )
+            self._contribute_effects(context, effects)
+            await self._emit_terminal("tool.failed", call, error.code, context)
+            await self._after_with_effect(context, result, effects)
+            self._record(context, call, result, ExecutionRecordStatus.FAILED)
+            return result, effects
         except ToolContractError as exc:
-            error = self._bounded_error(ToolErrorInfo("invalid_tool_output", "Tool returned non-canonical output."))
+            composite_error = str(exc) == "invalid_composite_tool_content"
+            error = self._bounded_error(
+                ToolErrorInfo(
+                    "invalid_composite_tool_content"
+                    if composite_error
+                    else "invalid_tool_output",
+                    "Composite Tool returned invalid canonical content."
+                    if composite_error
+                    else "Tool returned non-canonical output.",
+                )
+            )
             status = (
                 ToolEffectStatus.UNKNOWN
                 if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING
                 else ToolEffectStatus.FAILED
             )
-            effect = ToolEffectRecord(call.id, call.name, tool.effect_kind, status, error=error)
-            await self._emit_terminal("tool.failed", call, error.code)
+            effects = (
+                ()
+                if tool.effect_reporting is ToolEffectReporting.COMPOSITE
+                else (self._effect(context, call, tool, status, error=error),)
+            )
+            self._contribute_effects(context, effects)
+            await self._emit_terminal("tool.failed", call, error.code, context)
+            self._record_error(
+                context,
+                call,
+                error.code,
+                ExecutionRecordStatus.UNKNOWN
+                if status is ToolEffectStatus.UNKNOWN
+                else ExecutionRecordStatus.FAILED,
+            )
             raise ToolBatchAborted(
-                RunError("tool_contract_error", "Tool violated its output contract.", cause_type=type(exc).__name__),
-                (effect,),
+                RunError(
+                    "tool_contract_error",
+                    "Tool violated its output contract.",
+                    cause_type=type(exc).__name__,
+                ),
+                effects,
+            ) from exc
+        except SettlementError as exc:
+            self._record_error(context, call, exc.code, ExecutionRecordStatus.UNKNOWN)
+            await self._emit_terminal("tool.failed", call, exc.code, context)
+            raise ToolBatchAborted(
+                RunError(
+                    exc.code, "Tool settlement failed.", cause_type=type(exc).__name__
+                )
             ) from exc
         except asyncio.CancelledError as exc:
-            effect = await self._cancel_started(task, tool, call)
-            await self._emit("tool.cancelled", call, status="cancelled", error_code="cancelled")
-            raise ToolBatchCancelled((effect,)) from exc
+            cancellation_evidence = await self._cancel_started(
+                task, tool, call, context
+            )
+            effects = cancellation_evidence.effects
+            self._contribute_cancelled(context, tool, cancellation_evidence)
+            self._record_error(
+                context, call, "cancelled", ExecutionRecordStatus.CANCELLED
+            )
+            await self._emit(
+                "tool.cancelled",
+                call,
+                context=context,
+                status="cancelled",
+                error_code="cancelled",
+            )
+            raise ToolBatchCancelled(effects) from exc
         except Exception:
-            error = self._bounded_error(ToolErrorInfo("execution_error", "Tool execution failed."))
+            error = self._bounded_error(
+                ToolErrorInfo("execution_error", "Tool execution failed.")
+            )
             result = ToolExecutionResult(call.id, call.name, error=error)
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                await self._emit_terminal(
+                    "tool.failed", call, "execution_error", context
+                )
+                await self._after_with_effect(context, result, ())
+                self._record(context, call, result, ExecutionRecordStatus.UNKNOWN)
+                return result, ()
             if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
                 effect_error = self._bounded_error(
-                    ToolErrorInfo("effect_unknown", "Tool side effect could not be determined.")
+                    ToolErrorInfo(
+                        "effect_unknown", "Tool side effect could not be determined."
+                    )
                 )
-                effect = ToolEffectRecord(
-                    call.id,
-                    call.name,
-                    tool.effect_kind,
-                    ToolEffectStatus.UNKNOWN,
-                    error=effect_error,
+                effect = self._effect(
+                    context, call, tool, ToolEffectStatus.UNKNOWN, error=effect_error
                 )
             else:
-                effect = ToolEffectRecord(
-                    call.id,
-                    call.name,
-                    tool.effect_kind,
-                    ToolEffectStatus.FAILED,
-                    error=error,
+                effect = self._effect(
+                    context, call, tool, ToolEffectStatus.FAILED, error=error
                 )
-            await self._emit_terminal("tool.failed", call, "execution_error")
-            await self._after_with_effect(context, result, effect)
-            return result, effect
+            self._contribute_effects(context, (effect,))
+            await self._emit_terminal("tool.failed", call, "execution_error", context)
+            await self._after_with_effect(context, result, (effect,))
+            self._record(
+                context,
+                call,
+                result,
+                ExecutionRecordStatus.UNKNOWN
+                if effect.status is ToolEffectStatus.UNKNOWN
+                else ExecutionRecordStatus.FAILED,
+            )
+            return result, (effect,)
         finally:
             cancelled.cancel()
-            await asyncio.gather(cancelled, return_exceptions=True)
+            cancelled.add_done_callback(_consume_task_result)
 
     async def _cancel_started(
         self,
-        task: asyncio.Task[ToolReturn],
+        task: asyncio.Task[ToolHandlerReturn],
         tool: Tool,
         call: ToolCall,
+        context: ToolContext,
         *,
         timed_out: bool = False,
-    ) -> ToolEffectRecord:
+    ) -> _CancellationEvidence:
+        from roboagent.runtime import (
+            CancellationOrigin,
+            CancellationReason,
+            RuntimeCancellation,
+        )
+
+        if isinstance(context.execution, RuntimeToolExecutionContext) and isinstance(
+            context.cancellation, RuntimeCancellation
+        ):
+            context.cancellation.cancel(
+                CancellationReason.TIMEOUT if timed_out else CancellationReason.USER,
+                CancellationOrigin.RUNTIME,
+            )
         task.cancel()
         try:
-            returned = await asyncio.wait_for(asyncio.shield(task), self.config.cancellation_grace_period)
+            settlement_active = (
+                isinstance(context.execution, RuntimeToolExecutionContext)
+                and context.execution._scope.settlement_active
+            )
+            if settlement_active:
+                returned = await asyncio.shield(task)
+            else:
+                returned = await asyncio.wait_for(
+                    asyncio.shield(task), self.config.cancellation_grace_period
+                )
         except TimeoutError:
             task.cancel()
             task.add_done_callback(_consume_task_result)
+        except _CompositeToolCancellation as exc:
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                return _CancellationEvidence(
+                    self._identity_effects(context, exc.effects), exc.records
+                )
+            return _CancellationEvidence(())
+        except CompositeToolExecutionFailure as exc:
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                return _CancellationEvidence(
+                    self._identity_effects(context, exc.effects), exc.records
+                )
+            return _CancellationEvidence(
+                (
+                    self._effect(
+                        context,
+                        call,
+                        tool,
+                        ToolEffectStatus.FAILED,
+                        error=self._bounded_error(exc.error),
+                    ),
+                )
+            )
         except ToolEffectUnknown as exc:
-            return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=self._bounded_error(exc.error))
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                return _CancellationEvidence(())
+            return _CancellationEvidence(
+                (
+                    self._effect(
+                        context,
+                        call,
+                        tool,
+                        ToolEffectStatus.UNKNOWN,
+                        error=self._bounded_error(exc.error),
+                    ),
+                )
+            )
         except ToolExecutionFailure as exc:
-            return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=self._bounded_error(exc.error))
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                return _CancellationEvidence(())
+            return _CancellationEvidence(
+                (
+                    self._effect(
+                        context,
+                        call,
+                        tool,
+                        ToolEffectStatus.FAILED,
+                        error=self._bounded_error(exc.error),
+                    ),
+                )
+            )
         except asyncio.CancelledError:
             pass
         except Exception:
+            if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+                return _CancellationEvidence(())
             if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
-                error = ToolErrorInfo("effect_unknown", "Tool side effect could not be determined.")
-                return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=error)
-            error = ToolErrorInfo("execution_error", "Tool execution failed during cancellation.")
-            return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.FAILED, error=error)
+                error = ToolErrorInfo(
+                    "effect_unknown", "Tool side effect could not be determined."
+                )
+                return _CancellationEvidence(
+                    (
+                        self._effect(
+                            context, call, tool, ToolEffectStatus.UNKNOWN, error=error
+                        ),
+                    )
+                )
+            error = ToolErrorInfo(
+                "execution_error", "Tool execution failed during cancellation."
+            )
+            return _CancellationEvidence(
+                (
+                    self._effect(
+                        context, call, tool, ToolEffectStatus.FAILED, error=error
+                    ),
+                )
+            )
         else:
-            raw = returned if isinstance(returned, RawToolResult) else RawToolResult((returned,))
+            if isinstance(returned, CompositeToolOutcome):
+                if tool.effect_reporting is not ToolEffectReporting.COMPOSITE:
+                    return _CancellationEvidence(())
+                return _CancellationEvidence(
+                    self._identity_effects(context, returned.effects), returned.records
+                )
+            raw = (
+                returned
+                if isinstance(returned, RawToolResult)
+                else RawToolResult((returned,))
+            )
             evidence = raw_result_evidence(raw)
-            return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.SUCCEEDED, content=evidence)
+            return _CancellationEvidence(
+                (
+                    self._effect(
+                        context,
+                        call,
+                        tool,
+                        ToolEffectStatus.SUCCEEDED,
+                        content=evidence,
+                    ),
+                )
+            )
+        if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+            return _CancellationEvidence(())
         if tool.effect_kind is ToolEffectKind.SIDE_EFFECTING:
             error = ToolErrorInfo(
                 "timeout" if timed_out else "effect_unknown",
@@ -431,18 +888,27 @@ class ToolExecutor:
                 if timed_out
                 else "Tool side effect could not be determined.",
             )
-            return ToolEffectRecord(call.id, call.name, tool.effect_kind, ToolEffectStatus.UNKNOWN, error=error)
+            return _CancellationEvidence(
+                (
+                    self._effect(
+                        context, call, tool, ToolEffectStatus.UNKNOWN, error=error
+                    ),
+                )
+            )
         if timed_out:
             error = ToolErrorInfo("timeout", "Tool execution timed out.")
             status = ToolEffectStatus.TIMED_OUT
         else:
             error = ToolErrorInfo("cancelled", "Tool execution was cancelled.")
             status = ToolEffectStatus.CANCELLED
-        return ToolEffectRecord(call.id, call.name, tool.effect_kind, status, error=error)
+        return _CancellationEvidence(
+            (self._effect(context, call, tool, status, error=error),)
+        )
 
     async def _approval(
         self,
         call: ToolCall,
+        tool: Tool,
         context: ToolContext,
         reason: str | None,
     ) -> ToolExecutionResult | None:
@@ -455,17 +921,29 @@ class ToolExecutor:
             call.arguments,
             canonical_json_digest(call.arguments),
             reason,
+            context.execution.lineage if context.execution is not None else None,
+            tool.effect_kind.value,
         )
         await self._emit(
             "approval.requested",
             call,
+            context=context,
             approval_id=request.approval_id,
             arguments_digest=request.arguments_digest,
         )
         if self.approval_provider is None:
-            await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
-            raise ToolBatchAborted(RunError("approval_error", "Tool approval is required but no provider is configured."))
-        task = asyncio.create_task(self.approval_provider.request(request, context.cancellation))
+            await self._emit_approval_resolved(
+                request, call, context, outcome="error", error_code="approval_error"
+            )
+            raise ToolBatchAborted(
+                RunError(
+                    "approval_error",
+                    "Tool approval is required but no provider is configured.",
+                )
+            )
+        task = asyncio.create_task(
+            self.approval_provider.request(request, context.cancellation)
+        )
         cancelled = asyncio.create_task(context.cancellation.wait_cancelled())
         try:
             done, _ = await asyncio.wait(
@@ -476,45 +954,96 @@ class ToolExecutor:
             if cancelled in done:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-                await self._emit_approval_resolved(request, call, outcome="cancelled", error_code="cancelled")
+                await self._emit_approval_resolved(
+                    request, call, context, outcome="cancelled", error_code="cancelled"
+                )
                 raise asyncio.CancelledError()
             if task not in done:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 context.cancellation.raise_if_cancelled()
-                result = self._error(call, "approval_timeout", "Tool approval timed out.")
-                await self._emit_approval_resolved(
-                    request, call, outcome="timed_out", error_code="approval_timeout"
+                result = self._error(
+                    call, "approval_timeout", "Tool approval timed out."
                 )
-                await self._emit_terminal("tool.failed", call, "approval_timeout")
+                await self._emit_approval_resolved(
+                    request,
+                    call,
+                    context,
+                    outcome="timed_out",
+                    error_code="approval_timeout",
+                )
+                await self._emit_terminal(
+                    "tool.failed", call, "approval_timeout", context
+                )
                 return result
             try:
                 response = task.result()
             except asyncio.CancelledError as exc:
                 context.cancellation.raise_if_cancelled()
-                await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
+                await self._emit_approval_resolved(
+                    request, call, context, outcome="error", error_code="approval_error"
+                )
                 raise ToolBatchAborted(
-                    RunError("approval_error", "Approval provider cancelled unexpectedly.")
+                    RunError(
+                        "approval_error", "Approval provider cancelled unexpectedly."
+                    )
                 ) from exc
             except Exception as exc:
-                await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
+                await self._emit_approval_resolved(
+                    request, call, context, outcome="error", error_code="approval_error"
+                )
                 raise ToolBatchAborted(
-                    RunError("approval_error", "Approval provider failed.", cause_type=type(exc).__name__)
+                    RunError(
+                        "approval_error",
+                        "Approval provider failed.",
+                        cause_type=type(exc).__name__,
+                    )
                 ) from exc
             if not isinstance(response, ApprovalResponse):
-                await self._emit_approval_resolved(request, call, outcome="error", error_code="approval_error")
-                raise ToolBatchAborted(RunError("approval_error", "Approval provider returned an invalid response."))
-            if response.approval_id != request.approval_id or response.arguments_digest != request.arguments_digest:
-                await self._emit_approval_resolved(request, call, outcome="mismatch", error_code="approval_mismatch")
-                raise ToolBatchAborted(RunError("approval_mismatch", "Approval response did not match the ToolCall."))
-            if response.decision is ApprovalDecision.REJECT:
-                result = self._error(call, "approval_rejected", "Tool call was not approved.")
                 await self._emit_approval_resolved(
-                    request, call, outcome="rejected", error_code="approval_rejected"
+                    request, call, context, outcome="error", error_code="approval_error"
                 )
-                await self._emit_terminal("tool.failed", call, "approval_rejected")
+                raise ToolBatchAborted(
+                    RunError(
+                        "approval_error",
+                        "Approval provider returned an invalid response.",
+                    )
+                )
+            if (
+                response.approval_id != request.approval_id
+                or response.arguments_digest != request.arguments_digest
+            ):
+                await self._emit_approval_resolved(
+                    request,
+                    call,
+                    context,
+                    outcome="mismatch",
+                    error_code="approval_mismatch",
+                )
+                raise ToolBatchAborted(
+                    RunError(
+                        "approval_mismatch",
+                        "Approval response did not match the ToolCall.",
+                    )
+                )
+            if response.decision is ApprovalDecision.REJECT:
+                result = self._error(
+                    call, "approval_rejected", "Tool call was not approved."
+                )
+                await self._emit_approval_resolved(
+                    request,
+                    call,
+                    context,
+                    outcome="rejected",
+                    error_code="approval_rejected",
+                )
+                await self._emit_terminal(
+                    "tool.failed", call, "approval_rejected", context
+                )
                 return result
-            await self._emit_approval_resolved(request, call, outcome="approved", error_code=None)
+            await self._emit_approval_resolved(
+                request, call, context, outcome="approved", error_code=None
+            )
             return None
         finally:
             cancelled.cancel()
@@ -524,7 +1053,14 @@ class ToolExecutor:
         from roboagent.agent.hooks import HookDecision, ToolHookContext
         from roboagent.runtime.types import RunContext
 
-        hook_context = ToolHookContext(RunContext(context.run_id, context.session_id, context.cancellation))
+        hook_context = ToolHookContext(
+            RunContext(
+                context.run_id,
+                context.session_id,
+                context.cancellation,
+                context.execution,
+            )
+        )
         for hook in self.hooks:
             callback = getattr(hook, "before_tool", None)
             if callback is None:
@@ -537,18 +1073,39 @@ class ToolExecutor:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                raise ToolBatchAborted(RunError("hook_error", "before_tool hook failed.", cause_type=type(exc).__name__)) from exc
+                raise ToolBatchAborted(
+                    RunError(
+                        "hook_error",
+                        "before_tool hook failed.",
+                        cause_type=type(exc).__name__,
+                    )
+                ) from exc
             if not isinstance(decision, HookDecision):
-                raise ToolBatchAborted(RunError("hook_error", "before_tool hook returned an invalid decision."))
+                raise ToolBatchAborted(
+                    RunError(
+                        "hook_error", "before_tool hook returned an invalid decision."
+                    )
+                )
             if getattr(decision, "value", decision) == "fail_run":
-                raise ToolBatchAborted(RunError("hook_error", "before_tool hook failed the Run."))
+                raise ToolBatchAborted(
+                    RunError("hook_error", "before_tool hook failed the Run.")
+                )
 
-    async def _after_tool(self, context: ToolContext, result: ToolExecutionResult) -> None:
+    async def _after_tool(
+        self, context: ToolContext, result: ToolExecutionResult
+    ) -> None:
         from roboagent.agent.hooks import ToolHookContext
         from roboagent.runtime.types import RunContext
 
         context.cancellation.raise_if_cancelled()
-        hook_context = ToolHookContext(RunContext(context.run_id, context.session_id, context.cancellation))
+        hook_context = ToolHookContext(
+            RunContext(
+                context.run_id,
+                context.session_id,
+                context.cancellation,
+                context.execution,
+            )
+        )
         for hook in self.hooks:
             callback = getattr(hook, "after_tool", None)
             if callback is None:
@@ -563,20 +1120,26 @@ class ToolExecutor:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                raise ToolBatchAborted(RunError("hook_error", "after_tool hook failed.", cause_type=type(exc).__name__)) from exc
+                raise ToolBatchAborted(
+                    RunError(
+                        "hook_error",
+                        "after_tool hook failed.",
+                        cause_type=type(exc).__name__,
+                    )
+                ) from exc
 
     async def _after_with_effect(
         self,
         context: ToolContext,
         result: ToolExecutionResult,
-        effect: ToolEffectRecord,
+        effects: tuple[ToolEffectRecord, ...],
     ) -> None:
         try:
             await self._after_tool(context, result)
         except asyncio.CancelledError as exc:
-            raise ToolBatchCancelled((effect,)) from exc
+            raise ToolBatchCancelled(effects) from exc
         except ToolBatchAborted as exc:
-            raise ToolBatchAborted(exc.reason, (effect,)) from exc
+            raise ToolBatchAborted(exc.reason, effects) from exc
 
     async def _await_hook(self, awaitable: object, context: ToolContext) -> object:
         task = asyncio.ensure_future(cast(Awaitable[object], awaitable))
@@ -602,7 +1165,9 @@ class ToolExecutor:
             await asyncio.gather(cancelled, return_exceptions=True)
 
     def _error(self, call: ToolCall, code: str, message: str) -> ToolExecutionResult:
-        return ToolExecutionResult(call.id, call.name, error=self._bounded_error(ToolErrorInfo(code, message)))
+        return ToolExecutionResult(
+            call.id, call.name, error=self._bounded_error(ToolErrorInfo(code, message))
+        )
 
     def _bounded_error(self, error: ToolErrorInfo) -> ToolErrorInfo:
         if len(error.message) <= self.config.max_error_chars:
@@ -611,17 +1176,300 @@ class ToolExecutor:
         message = "…" if limit == 1 else error.message[: limit - 1] + "…"
         return ToolErrorInfo(error.code, message, error.retryable)
 
-    async def _emit(self, event_type: str, call: ToolCall, **payload: object) -> None:
-        if self.events:
-            await self.events.emit(event_type, tool_call_id=call.id, tool_name=call.name, **payload)
+    def _call_contexts(
+        self, calls: tuple[ToolCall, ...], context: ToolContext
+    ) -> tuple[ToolContext, ...]:
+        execution = context.execution
+        if not isinstance(execution, RuntimeToolExecutionContext):
+            return tuple(context for _ in calls)
+        scopes = tuple(
+            execution._scope.child_tool(tool_call_id=call.id, tool_name=call.name)
+            for call in calls
+        )
+        return tuple(
+            ToolContext(
+                context.run_id,
+                context.session_id,
+                scope.cancellation,
+                RuntimeToolExecutionContext(scope, self, context.session_id),
+            )
+            for scope in scopes
+        )
 
-    async def _emit_terminal(self, event_type: str, call: ToolCall, error_code: str | None) -> None:
-        await self._emit(event_type, call, error_code=error_code)
+    async def execute_nested(
+        self, call: ToolCall, parent_scope: object, session_id: str = "nested"
+    ) -> ToolExecutionResult:
+        from roboagent.runtime.execution import ExecutionScope
+
+        if not isinstance(parent_scope, ExecutionScope):
+            return ToolExecutionResult(
+                call.id,
+                call.name,
+                error=ToolErrorInfo(
+                    "nested_execution_unavailable", "Nested execution is unavailable."
+                ),
+            )
+        parent = ToolContext(
+            parent_scope.lineage.execution_run_id,
+            session_id,
+            cast(CancellationToken, parent_scope.cancellation),
+            RuntimeToolExecutionContext(parent_scope, self, session_id),
+        )
+        batch = await self.execute((call,), parent)
+        return batch.results[0]
+
+    def validate_nested(self, call: ToolCall) -> ToolExecutionResult | None:
+        tool = self.registry.get(call.name)
+        if tool is None:
+            return self._error(call, "unknown_tool", "Unknown tool.")
+        error = validate_tool_arguments(tool, call.arguments)
+        if error is not None:
+            return ToolExecutionResult(
+                call.id, call.name, error=self._bounded_error(error)
+            )
+        return None
+
+    async def run_child_agent(
+        self, scope, agent, task, *, session_factory=None, run_config=None
+    ):
+        if self.child_runner is None:
+            from roboagent.runtime import ExecutionRequestError
+
+            raise ExecutionRequestError(
+                "nested_execution_unavailable", "Child Agent execution is unavailable."
+            )
+        return await self.child_runner(
+            scope,
+            agent,
+            task,
+            session_factory=session_factory,
+            run_config=run_config,
+        )
+
+    async def _close_call_scope(self, context: ToolContext) -> None:
+        execution = context.execution
+        if not isinstance(execution, RuntimeToolExecutionContext):
+            return
+        if execution._scope._terminal_recorded:
+            return
+        scope = execution._scope
+        scope.begin_closing()
+        await scope._cleanup()
+        scope.freeze()
+
+    async def _abort_unprocessed(
+        self,
+        calls: tuple[ToolCall, ...],
+        contexts: tuple[ToolContext, ...],
+        start: int,
+        code: str,
+    ) -> None:
+        for call, context in zip(calls[start:], contexts[start:], strict=True):
+            self._record_error(context, call, code, ExecutionRecordStatus.CANCELLED)
+            await self._close_call_scope(context)
+
+    def _effect(
+        self,
+        context: ToolContext,
+        call: ToolCall,
+        tool: Tool,
+        status: ToolEffectStatus,
+        *,
+        content: ToolContent | None = None,
+        error: ToolErrorInfo | None = None,
+    ) -> ToolEffectRecord:
+        effect_id = None
+        if isinstance(context.execution, RuntimeToolExecutionContext):
+            effect_id = context.execution._scope.next_effect_id()
+        certainty = (
+            EffectCertainty.CERTAIN
+            if status is ToolEffectStatus.SUCCEEDED
+            else EffectCertainty.UNKNOWN
+            if status is ToolEffectStatus.UNKNOWN
+            else EffectCertainty.CERTAIN_NO_EFFECT
+        )
+        return ToolEffectRecord(
+            call.id,
+            call.name,
+            tool.effect_kind,
+            status,
+            content=content,
+            error=error,
+            effect_id=effect_id,
+            certainty=certainty,
+        )
+
+    def _identity_effects(
+        self, context: ToolContext, effects: tuple[ToolEffectRecord, ...]
+    ) -> tuple[ToolEffectRecord, ...]:
+        if not isinstance(context.execution, RuntimeToolExecutionContext):
+            return effects
+        scope = context.execution._scope
+        identified: list[ToolEffectRecord] = []
+        seen = set()
+        for effect in effects:
+            if not isinstance(effect, ToolEffectRecord):
+                raise ToolContractError("Composite Tool returned invalid effects.")
+            value = (
+                effect
+                if effect.effect_id is not None
+                else replace(effect, effect_id=scope.next_effect_id())
+            )
+            if (
+                value.effect_id is not None
+                and value.effect_id.scope_id != scope.lineage.scope_id
+            ):
+                raise ToolContractError(
+                    "Composite Tool returned an effect owned by another scope."
+                )
+            if value.effect_id in seen:
+                continue
+            seen.add(value.effect_id)
+            identified.append(value)
+        return tuple(identified)
+
+    def _contribute_effects(
+        self, context: ToolContext, effects: tuple[ToolEffectRecord, ...]
+    ) -> None:
+        if not effects or not isinstance(
+            context.execution, RuntimeToolExecutionContext
+        ):
+            return
+        scope = context.execution._scope
+        scope.contribute(
+            ExecutionContribution(scope.next_contribution_id(), effects=effects)
+        )
+
+    def _contribute_composite(self, context: ToolContext, effects, records) -> None:
+        if not isinstance(context.execution, RuntimeToolExecutionContext):
+            return
+        scope = context.execution._scope
+        if not all(hasattr(record, "status") for record in records):
+            raise ToolContractError("Composite Tool returned invalid records.")
+        scope.contribute(
+            ExecutionContribution(
+                scope.next_contribution_id(),
+                effects=tuple(effects),
+                records=tuple(records),
+            )
+        )
+
+    def _contribute_cancelled(
+        self,
+        context: ToolContext,
+        tool: Tool,
+        evidence: _CancellationEvidence,
+    ) -> None:
+        if tool.effect_reporting is ToolEffectReporting.COMPOSITE:
+            self._contribute_composite(context, evidence.effects, evidence.records)
+        else:
+            self._contribute_effects(context, evidence.effects)
+
+    def _validate_composite_content(
+        self, outcome: CompositeToolOutcome
+    ) -> tuple[ToolContent, ...]:
+        content = tuple(outcome.content)
+        if not all(
+            isinstance(
+                item, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)
+            )
+            for item in content
+        ):
+            raise ToolContractError("invalid_composite_tool_content")
+        return content
+
+    def _record(
+        self,
+        context: ToolContext,
+        call: ToolCall,
+        result: ToolExecutionResult,
+        status: ExecutionRecordStatus,
+    ) -> None:
+        execution = context.execution
+        if not isinstance(execution, RuntimeToolExecutionContext):
+            return
+        tool = self.registry.get(call.name)
+        preview: object = call.arguments
+        redactor = getattr(tool, "record_redactor", None)
+        if redactor is not None:
+            try:
+                preview = redactor(call.arguments)
+            except Exception:
+                preview = None
+        canonical_preview = preview if isinstance(preview, FrozenJsonObject) else None
+        evidence: FrozenJsonObject | None = None
+        if result.error is not None:
+            evidence = FrozenJsonObject(
+                {"error": result.error.message, "retryable": result.error.retryable}
+            )
+        elif result.content is not None:
+            evidence = FrozenJsonObject({"content_blocks": len(result.content)})
+        execution._scope._tree.add_tool_record(
+            execution._scope,
+            tool_call_id=call.id,
+            tool_name=call.name,
+            arguments=call.arguments,
+            arguments_preview=canonical_preview,
+            status=status,
+            error_code=result.error.code if result.error else None,
+            evidence=evidence,
+        )
+        execution._scope._terminal_recorded = True
+
+    def _record_error(
+        self,
+        context: ToolContext,
+        call: ToolCall,
+        code: str,
+        status: ExecutionRecordStatus = ExecutionRecordStatus.FAILED,
+    ) -> None:
+        self._record(
+            context,
+            call,
+            ToolExecutionResult(
+                call.id,
+                call.name,
+                error=ToolErrorInfo(code, "Tool execution did not complete."),
+            ),
+            status,
+        )
+
+    async def _emit(
+        self,
+        event_type: str,
+        call: ToolCall,
+        *,
+        context: ToolContext | None = None,
+        **payload: object,
+    ) -> None:
+        if self.events:
+            lineage = (
+                context.execution.lineage
+                if context is not None and context.execution is not None
+                else None
+            )
+            await self.events.emit(
+                event_type,
+                lineage=lineage,
+                tool_call_id=call.id,
+                tool_name=call.name,
+                **payload,
+            )
+
+    async def _emit_terminal(
+        self,
+        event_type: str,
+        call: ToolCall,
+        error_code: str | None,
+        context: ToolContext | None = None,
+    ) -> None:
+        await self._emit(event_type, call, context=context, error_code=error_code)
 
     async def _emit_approval_resolved(
         self,
         request: ApprovalRequest,
         call: ToolCall,
+        context: ToolContext,
         *,
         outcome: str,
         error_code: str | None,
@@ -629,6 +1477,7 @@ class ToolExecutor:
         await self._emit(
             "approval.resolved",
             call,
+            context=context,
             approval_id=request.approval_id,
             arguments_digest=request.arguments_digest,
             outcome=outcome,
@@ -646,9 +1495,14 @@ def result_message(result: ToolExecutionResult) -> ToolResultMessage:
             else item
             for item in result.content
         )
-        if not all(isinstance(item, (TextContent, JsonContent, ArtifactReferenceContent)) for item in content):
+        if not all(
+            isinstance(item, (TextContent, JsonContent, ArtifactReferenceContent))
+            for item in content
+        ):
             raise TypeError("Unknown canonical ToolContent.")
-        return ToolResultMessage(result.call_id, result.name, ToolResultStatus.SUCCESS, content)
+        return ToolResultMessage(
+            result.call_id, result.name, ToolResultStatus.SUCCESS, content
+        )
     assert result.error is not None
     return ToolResultMessage(
         result.call_id,
@@ -659,17 +1513,36 @@ def result_message(result: ToolExecutionResult) -> ToolResultMessage:
     )
 
 
-def committed_effects(effects: tuple[ToolEffectRecord, ...]) -> tuple[ToolEffectRecord, ...]:
+def committed_effects(
+    effects: tuple[ToolEffectRecord, ...],
+) -> tuple[ToolEffectRecord, ...]:
     return tuple(replace(effect, transcript_committed=True) for effect in effects)
 
 
-def retry_safe(effects: tuple[ToolEffectRecord, ...]) -> bool:
-    return not any(
-        effect.effect_kind is ToolEffectKind.SIDE_EFFECTING
-        and not effect.transcript_committed
-        and effect.status in {ToolEffectStatus.SUCCEEDED, ToolEffectStatus.UNKNOWN}
-        for effect in effects
-    )
+def retry_safe(
+    effects: tuple[ToolEffectRecord, ...], retry_blockers: tuple[object, ...] = ()
+) -> bool:
+    if retry_blockers:
+        return False
+    for effect in effects:
+        if effect.effect_kind is ToolEffectKind.READ_ONLY:
+            continue
+        if effect.status is ToolEffectStatus.SUCCEEDED:
+            if (
+                effect.certainty is not EffectCertainty.CERTAIN
+                or not effect.transcript_committed
+            ):
+                return False
+        elif effect.status in {
+            ToolEffectStatus.FAILED,
+            ToolEffectStatus.CANCELLED,
+            ToolEffectStatus.TIMED_OUT,
+        }:
+            if effect.certainty is not EffectCertainty.CERTAIN_NO_EFFECT:
+                return False
+        else:
+            return False
+    return True
 
 
 def _truncate_utf8(text: str, limit: int) -> str:
@@ -688,7 +1561,7 @@ def _consume_task_result(task: asyncio.Task[object]) -> None:
         pass
 
 
-def _present_effects(
-    effects: list[ToolEffectRecord | None],
+def _flatten_effects(
+    effects: list[tuple[ToolEffectRecord, ...] | None],
 ) -> tuple[ToolEffectRecord, ...]:
-    return tuple(effect for effect in effects if effect is not None)
+    return tuple(effect for group in effects if group is not None for effect in group)

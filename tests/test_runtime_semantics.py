@@ -21,6 +21,7 @@ from roboagent.message import (
 from roboagent.model import (
     FinishReason,
     ModelCapabilities,
+    ModelProviderError,
     ModelResponse,
     ResponseCompleted,
     ResponseStarted,
@@ -143,7 +144,9 @@ async def _tool_exchange_is_atomic_and_effect_is_committed() -> None:
             ),
         )
     )
-    session = Agent(model, tool_registry=registry, prompt=PromptInput("Help.")) .new_session()
+    session = Agent(
+        model, tool_registry=registry, prompt=PromptInput("Help.")
+    ).new_session()
     run = session.start(UserMessage("go"))
     result = await run.result()
     assert result.status is RunStatus.COMPLETED
@@ -159,12 +162,32 @@ def test_after_model_failure_does_not_commit_response() -> None:
     asyncio.run(_after_model_failure_does_not_commit_response())
 
 
+def test_provider_failure_preserves_safe_diagnostic() -> None:
+    class BrokenProvider:
+        capabilities = Replies.capabilities
+
+        async def stream(self, context, settings=None):
+            raise ModelProviderError(
+                "provider_authentication_error",
+                "Provider authentication failed (HTTP 401). Check the API key and endpoint region.",
+            )
+            yield  # pragma: no cover
+
+    result = asyncio.run(Agent(BrokenProvider()).new_session().run(UserMessage("go")))
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None
+    assert result.error.code == "provider_authentication_error"
+    assert "HTTP 401" in result.error.message
+
+
 async def _after_model_failure_does_not_commit_response() -> None:
     class Hook:
         async def after_model(self, context, response):
             raise RuntimeError("stop")
 
-    session = Agent(Replies((AssistantMessage("not committed"),)), hooks=(Hook(),)).new_session()
+    session = Agent(
+        Replies((AssistantMessage("not committed"),)), hooks=(Hook(),)
+    ).new_session()
     result = await session.run(UserMessage("go"))
     assert result.status is RunStatus.FAILED
     assert [message.role for message in session.messages] == ["user"]
@@ -216,7 +239,11 @@ def test_model_cancellation_closes_stream_and_timeout_is_failed() -> None:
         assert result.status is RunStatus.CANCELLED and cancelled_model.closed
 
         timeout_model = Blocking()
-        result = await Agent(timeout_model).new_session().run(UserMessage("go"), config=RunConfig(timeout=0.01))
+        result = (
+            await Agent(timeout_model)
+            .new_session()
+            .run(UserMessage("go"), config=RunConfig(timeout=0.01))
+        )
         assert result.status is RunStatus.FAILED
         assert result.error is not None and result.error.code == "timeout"
         assert timeout_model.closed
@@ -233,12 +260,16 @@ def test_cleanup_failure_retains_committed_output_and_terminal_is_last() -> None
                 provisional.append(context.provisional_status)
                 raise RuntimeError("cleanup")
 
-        session = Agent(Replies((AssistantMessage("committed"),)), hooks=(Hook(),)).new_session()
+        session = Agent(
+            Replies((AssistantMessage("committed"),)), hooks=(Hook(),)
+        ).new_session()
         run = session.start(UserMessage("go"))
         result = await run.result()
         events = [event async for event in run.subscribe()]
         assert provisional == [RunStatus.COMPLETED]
-        assert result.status is RunStatus.FAILED and result.output == session.messages[-1]
+        assert (
+            result.status is RunStatus.FAILED and result.output == session.messages[-1]
+        )
         assert result.error is not None and result.error.code == "cleanup_hook_error"
         assert events[-1].type == "run.failed"
 
@@ -257,8 +288,19 @@ def test_cancelled_side_effect_is_retained_and_exchange_not_committed() -> None:
             except asyncio.CancelledError:
                 return ToolTextContent("effect happened")
 
-        registry = ToolRegistry((Tool(ToolDefinition("act", "Act.", FrozenJsonObject({"type": "object"})), handler, ToolExecutionMode.SERIAL, ToolEffectKind.SIDE_EFFECTING),))
-        session = Agent(Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=registry).new_session()
+        registry = ToolRegistry(
+            (
+                Tool(
+                    ToolDefinition("act", "Act.", FrozenJsonObject({"type": "object"})),
+                    handler,
+                    ToolExecutionMode.SERIAL,
+                    ToolEffectKind.SIDE_EFFECTING,
+                ),
+            )
+        )
+        session = Agent(
+            Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=registry
+        ).new_session()
         run = session.start(UserMessage("go"))
         await started.wait()
         run.cancel()
@@ -292,7 +334,9 @@ def test_input_enqueued_during_cleanup_remains_for_next_run() -> None:
         result = await session.run(UserMessage("first"))
         assert result.status is RunStatus.COMPLETED
         pending = await session.pending_inputs()
-        assert len(pending) == 1 and pending[0].message.content[0] == TextContent("older")
+        assert len(pending) == 1 and pending[0].message.content[0] == TextContent(
+            "older"
+        )
 
         result = await session.run(UserMessage("newer"))
         assert result.status is RunStatus.COMPLETED
@@ -328,14 +372,24 @@ def test_commit_and_after_tool_failures_retain_uncommitted_effects() -> None:
             async def commit_exchange(self, run_id, assistant, results):
                 raise RuntimeError("injected commit failure")
 
-        commit_session = CommitFails(Agent(Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=registry))
+        commit_session = CommitFails(
+            Agent(
+                Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=registry
+            )
+        )
         commit_run = commit_session.start(UserMessage("go"))
         commit_result = await commit_run.result()
         commit_events = [event async for event in commit_run.subscribe()]
         assert commit_result.status is RunStatus.FAILED
-        assert commit_result.error is not None and commit_result.error.code == "transcript_commit_error"
+        assert (
+            commit_result.error is not None
+            and commit_result.error.code == "transcript_commit_error"
+        )
         assert len(commit_result.effects) == 1
-        assert not commit_result.effects[0].transcript_committed and not commit_result.retry_safe
+        assert (
+            not commit_result.effects[0].transcript_committed
+            and not commit_result.retry_safe
+        )
         assert [message.role for message in commit_session.messages] == ["user"]
         assert all(event.type != "tool_batch.committed" for event in commit_events)
 
@@ -365,7 +419,10 @@ def test_commit_and_after_tool_failures_retain_uncommitted_effects() -> None:
         assert hook_result.error is not None and hook_result.error.code == "hook_error"
         assert len(hook_result.effects) == 1
         assert hook_result.effects[0].status is ToolEffectStatus.UNKNOWN
-        assert not hook_result.effects[0].transcript_committed and not hook_result.retry_safe
+        assert (
+            not hook_result.effects[0].transcript_committed
+            and not hook_result.retry_safe
+        )
         assert [message.role for message in hook_session.messages] == ["user"]
 
         invalid_registry = ToolRegistry(
@@ -378,14 +435,21 @@ def test_commit_and_after_tool_failures_retain_uncommitted_effects() -> None:
             )
         )
         invalid_session = Agent(
-            Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=invalid_registry
+            Replies((AssistantMessage(tool_calls=(call,)),)),
+            tool_registry=invalid_registry,
         ).new_session()
         invalid_result = await invalid_session.run(UserMessage("go"))
         assert invalid_result.status is RunStatus.FAILED
-        assert invalid_result.error is not None and invalid_result.error.code == "tool_contract_error"
+        assert (
+            invalid_result.error is not None
+            and invalid_result.error.code == "tool_contract_error"
+        )
         assert len(invalid_result.effects) == 1
         assert invalid_result.effects[0].status is ToolEffectStatus.UNKNOWN
-        assert not invalid_result.effects[0].transcript_committed and not invalid_result.retry_safe
+        assert (
+            not invalid_result.effects[0].transcript_committed
+            and not invalid_result.retry_safe
+        )
         assert [message.role for message in invalid_session.messages] == ["user"]
 
     asyncio.run(check())
@@ -398,7 +462,9 @@ def test_pending_inputs_wait_for_model_boundary_and_keep_sequence() -> None:
 
         class BlockingFirst(Replies):
             def __init__(self) -> None:
-                super().__init__((AssistantMessage("first"), AssistantMessage("second")))
+                super().__init__(
+                    (AssistantMessage("first"), AssistantMessage("second"))
+                )
                 self.contexts: list[ModelContext] = []
 
             async def stream(self, context, settings=None):
@@ -421,10 +487,20 @@ def test_pending_inputs_wait_for_model_boundary_and_keep_sequence() -> None:
         assert [message.role for message in session.messages] == ["user"]
         release.set()
         assert (await run.result()).status is RunStatus.COMPLETED
-        assert [message.role for message in session.messages] == ["user", "assistant", "user", "user", "assistant"]
+        assert [message.role for message in session.messages] == [
+            "user",
+            "assistant",
+            "user",
+            "user",
+            "assistant",
+        ]
         tail = model.contexts[1].segments[-2:]
         assert all(isinstance(segment, MessageSegment) for segment in tail)
-        assert [segment.message.content[0].text for segment in tail if isinstance(segment, MessageSegment)] == ["steer", "follow"]
+        assert [
+            segment.message.content[0].text
+            for segment in tail
+            if isinstance(segment, MessageSegment)
+        ] == ["steer", "follow"]
 
     asyncio.run(check())
 
@@ -441,10 +517,19 @@ def test_pending_input_during_tool_waits_for_atomic_exchange() -> None:
             return ToolTextContent("done")
 
         registry = ToolRegistry(
-            (Tool(ToolDefinition("lookup", "Lookup.", FrozenJsonObject({"type": "object"})), handler),)
+            (
+                Tool(
+                    ToolDefinition(
+                        "lookup", "Lookup.", FrozenJsonObject({"type": "object"})
+                    ),
+                    handler,
+                ),
+            )
         )
         session = Agent(
-            Replies((AssistantMessage(tool_calls=(call,)), AssistantMessage("finished"))),
+            Replies(
+                (AssistantMessage(tool_calls=(call,)), AssistantMessage("finished"))
+            ),
             tool_registry=registry,
         ).new_session()
         run = session.start(UserMessage("initial"))
@@ -453,14 +538,23 @@ def test_pending_input_during_tool_waits_for_atomic_exchange() -> None:
         assert [message.role for message in session.messages] == ["user"]
         release.set()
         assert (await run.result()).status is RunStatus.COMPLETED
-        assert [message.role for message in session.messages] == ["user", "assistant", "tool", "user", "assistant"]
+        assert [message.role for message in session.messages] == [
+            "user",
+            "assistant",
+            "tool",
+            "user",
+            "assistant",
+        ]
 
     asyncio.run(check())
 
 
 def test_concurrent_completion_does_not_reorder_transcript_results() -> None:
     async def check() -> None:
-        calls = tuple(ToolCall(name, "lookup", FrozenJsonObject({"delay": delay})) for name, delay in (("a", 0.03), ("b", 0.01), ("c", 0.02)))
+        calls = tuple(
+            ToolCall(name, "lookup", FrozenJsonObject({"delay": delay}))
+            for name, delay in (("a", 0.03), ("b", 0.01), ("c", 0.02))
+        )
 
         async def handler(arguments, context):
             await asyncio.sleep(arguments["delay"])
@@ -478,14 +572,20 @@ def test_concurrent_completion_does_not_reorder_transcript_results() -> None:
                 }
             ),
         )
-        registry = ToolRegistry((Tool(definition, handler, ToolExecutionMode.CONCURRENT),))
+        registry = ToolRegistry(
+            (Tool(definition, handler, ToolExecutionMode.CONCURRENT),)
+        )
         session = Agent(
             Replies((AssistantMessage(tool_calls=calls), AssistantMessage("done"))),
             tool_registry=registry,
         ).new_session()
         result = await session.run(UserMessage("go"))
         assert result.status is RunStatus.COMPLETED
-        committed = [message for message in session.messages if isinstance(message, ToolResultMessage)]
+        committed = [
+            message
+            for message in session.messages
+            if isinstance(message, ToolResultMessage)
+        ]
         assert [message.tool_call_id for message in committed] == ["a", "b", "c"]
         assert [effect.call_id for effect in result.effects] == ["a", "b", "c"]
 
@@ -521,7 +621,10 @@ def test_unsupported_modalities_fail_without_model_output(content: object) -> No
         result = await run.result()
         events = [event async for event in run.subscribe()]
         assert result.status is RunStatus.FAILED
-        assert result.error is not None and result.error.code == "unsupported_input_modality"
+        assert (
+            result.error is not None
+            and result.error.code == "unsupported_input_modality"
+        )
         assert not model.called
         assert [message.role for message in session.messages] == ["user"]
         assert events[-1].type == "run.failed" and run.state.error == result.error
@@ -547,20 +650,33 @@ def test_failed_termination_reason_matches_result_state_and_event() -> None:
             return ToolTextContent("done")
 
         registry = ToolRegistry(
-            (Tool(ToolDefinition("lookup", "Lookup.", FrozenJsonObject({"type": "object"})), handler),)
+            (
+                Tool(
+                    ToolDefinition(
+                        "lookup", "Lookup.", FrozenJsonObject({"type": "object"})
+                    ),
+                    handler,
+                ),
+            )
         )
-        max_turns = Agent(
-            Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=registry
-        ).new_session().start(UserMessage("go"), config=RunConfig(max_turns=1))
+        max_turns = (
+            Agent(
+                Replies((AssistantMessage(tool_calls=(call,)),)), tool_registry=registry
+            )
+            .new_session()
+            .start(UserMessage("go"), config=RunConfig(max_turns=1))
+        )
         await assert_failed(max_turns, "max_turns")
 
         class BrokenContext:
             async def prepare(self, request, cancellation):
                 raise RuntimeError("context broke")
 
-        context_error = Agent(
-            Replies(()), context_manager=BrokenContext()
-        ).new_session().start(UserMessage("go"))
+        context_error = (
+            Agent(Replies(()), context_manager=BrokenContext())
+            .new_session()
+            .start(UserMessage("go"))
+        )
         await assert_failed(context_error, "context_error")
 
         class BrokenModel:

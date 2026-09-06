@@ -20,6 +20,11 @@ from roboagent.message import (
     freeze_json,
     freeze_json_object,
 )
+from roboagent.runtime.execution import (
+    EffectIdentity,
+    SupplementalExecutionRecord,
+    ToolExecutionContext,
+)
 from roboagent.runtime.types import CancellationToken, RunError
 
 _TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
@@ -41,6 +46,35 @@ class ToolEffectUnknown(ToolExecutionFailure):
     """The Tool started but cannot determine whether its side effect occurred."""
 
 
+class CompositeToolExecutionFailure(ToolExecutionFailure):
+    """A composite failure carrying already-settled effects and summary evidence."""
+
+    def __init__(
+        self,
+        error: "ToolErrorInfo",
+        *,
+        effects: tuple["ToolEffectRecord", ...] = (),
+        records: tuple[SupplementalExecutionRecord, ...] = (),
+    ) -> None:
+        super().__init__(error)
+        self.effects = tuple(effects)
+        self.records = tuple(records)
+
+
+class _CompositeToolCancellation(RuntimeError):
+    """Composite cancellation carrying effects settled before propagation."""
+
+    def __init__(
+        self,
+        *,
+        effects: tuple["ToolEffectRecord", ...] = (),
+        records: tuple[SupplementalExecutionRecord, ...] = (),
+    ) -> None:
+        self.effects = tuple(effects)
+        self.records = tuple(records)
+        super().__init__("Composite Tool execution was cancelled.")
+
+
 class ToolContractError(TypeError):
     """A Tool implementation violated the canonical Tool contract."""
 
@@ -53,6 +87,11 @@ class ToolExecutionMode(Enum):
 class ToolEffectKind(Enum):
     READ_ONLY = "read_only"
     SIDE_EFFECTING = "side_effecting"
+
+
+class ToolEffectReporting(str, Enum):
+    LEAF = "leaf"
+    COMPOSITE = "composite"
 
 
 class ToolDecision(Enum):
@@ -82,6 +121,12 @@ class ToolEffectStatus(Enum):
     UNKNOWN = "unknown"
 
 
+class EffectCertainty(str, Enum):
+    CERTAIN = "certain"
+    CERTAIN_NO_EFFECT = "certain_no_effect"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     name: str
@@ -91,12 +136,20 @@ class ToolDefinition:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _TOOL_NAME.fullmatch(self.name):
             raise ToolRegistrationError("Invalid tool name.")
-        normalized = " ".join(self.description.split()) if isinstance(self.description, str) else ""
+        normalized = (
+            " ".join(self.description.split())
+            if isinstance(self.description, str)
+            else ""
+        )
         if not normalized or len(normalized) > 4096:
-            raise ToolRegistrationError("Tool description must be non-empty and at most 4096 characters.")
+            raise ToolRegistrationError(
+                "Tool description must be non-empty and at most 4096 characters."
+            )
         schema = freeze_json_object(self.input_schema)
         if schema.get("type") != "object":
-            raise ToolRegistrationError("Tool input schema must have top-level type=object.")
+            raise ToolRegistrationError(
+                "Tool input schema must have top-level type=object."
+            )
         try:
             Draft202012Validator.check_schema(_plain(schema))
         except SchemaError as exc:
@@ -110,12 +163,28 @@ class ToolContext:
     run_id: str
     session_id: str
     cancellation: CancellationToken
+    execution: ToolExecutionContext | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.run_id, str) or not self.run_id or not isinstance(self.session_id, str) or not self.session_id:
+        if (
+            not isinstance(self.run_id, str)
+            or not self.run_id
+            or not isinstance(self.session_id, str)
+            or not self.session_id
+        ):
             raise ValueError("ToolContext requires run_id and session_id.")
-        if not all(hasattr(self.cancellation, name) for name in ("cancelled", "raise_if_cancelled", "wait_cancelled")):
+        if not all(
+            hasattr(self.cancellation, name)
+            for name in ("cancelled", "raise_if_cancelled", "wait_cancelled")
+        ):
             raise TypeError("ToolContext requires a CancellationToken.")
+        if self.execution is not None:
+            if self.run_id != self.execution.lineage.execution_run_id:
+                raise ValueError("ToolContext.run_id must match execution lineage.")
+            if self.cancellation is not self.execution.cancellation:
+                raise ValueError(
+                    "ToolContext cancellation must be the execution cancellation view."
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +237,9 @@ class ResourceToolContent:
 
 
 ToolContent = ToolTextContent | ToolJsonContent | ArtifactReferenceContent
-RawToolContent = ToolTextContent | ToolJsonContent | BinaryToolContent | ResourceToolContent
+RawToolContent = (
+    ToolTextContent | ToolJsonContent | BinaryToolContent | ResourceToolContent
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +248,18 @@ class RawToolResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "content", tuple(self.content))
-        if not all(isinstance(item, (ToolTextContent, ToolJsonContent, BinaryToolContent, ResourceToolContent)) for item in self.content):
+        if not all(
+            isinstance(
+                item,
+                (
+                    ToolTextContent,
+                    ToolJsonContent,
+                    BinaryToolContent,
+                    ResourceToolContent,
+                ),
+            )
+            for item in self.content
+        ):
             raise ToolContractError("RawToolResult contains non-canonical content.")
 
 
@@ -193,7 +275,9 @@ class ToolErrorInfo:
         if not isinstance(self.message, str) or not isinstance(self.retryable, bool):
             raise TypeError("Invalid ToolErrorInfo.")
         normalized = self.message.replace("\r\n", "\n").replace("\r", "\n")
-        normalized = "".join(char for char in normalized if char in "\n\t" or ord(char) >= 32)
+        normalized = "".join(
+            char for char in normalized if char in "\n\t" or ord(char) >= 32
+        )
         normalized = " ".join(normalized.split())
         if not normalized:
             raise ValueError("Tool error message must be non-empty.")
@@ -212,12 +296,21 @@ class ToolExecutionResult:
             raise ValueError("ToolExecutionResult must identify its ToolCall.")
         if self.content is not None:
             object.__setattr__(self, "content", tuple(self.content))
-            if not all(isinstance(item, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)) for item in self.content):
-                raise TypeError("ToolExecutionResult content must contain canonical ToolContent.")
+            if not all(
+                isinstance(
+                    item, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)
+                )
+                for item in self.content
+            ):
+                raise TypeError(
+                    "ToolExecutionResult content must contain canonical ToolContent."
+                )
         if self.error is not None and not isinstance(self.error, ToolErrorInfo):
             raise TypeError("ToolExecutionResult error must be ToolErrorInfo.")
         if bool(self.content is not None) == bool(self.error is not None):
-            raise ValueError("ToolExecutionResult requires exactly one of content or error.")
+            raise ValueError(
+                "ToolExecutionResult requires exactly one of content or error."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,28 +322,83 @@ class ToolEffectRecord:
     content: ToolContent | None = None
     error: ToolErrorInfo | None = None
     transcript_committed: bool = False
+    effect_id: EffectIdentity | None = None
+    certainty: EffectCertainty | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.call_id, str) or not self.call_id or not isinstance(self.tool_name, str) or not self.tool_name:
+        if (
+            not isinstance(self.call_id, str)
+            or not self.call_id
+            or not isinstance(self.tool_name, str)
+            or not self.tool_name
+        ):
             raise ValueError("ToolEffectRecord must identify its ToolCall.")
-        if not isinstance(self.effect_kind, ToolEffectKind) or not isinstance(self.status, ToolEffectStatus):
+        if not isinstance(self.effect_kind, ToolEffectKind) or not isinstance(
+            self.status, ToolEffectStatus
+        ):
             raise TypeError("ToolEffectRecord kind and status must be canonical enums.")
         if not isinstance(self.transcript_committed, bool):
             raise TypeError("transcript_committed must be bool.")
-        if self.content is not None and not isinstance(self.content, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)):
+        if self.effect_id is not None and not isinstance(
+            self.effect_id, EffectIdentity
+        ):
+            raise TypeError("effect_id must be EffectIdentity or None.")
+        if self.content is not None and not isinstance(
+            self.content, (ToolTextContent, ToolJsonContent, ArtifactReferenceContent)
+        ):
             raise TypeError("ToolEffectRecord content must be canonical ToolContent.")
         if self.error is not None and not isinstance(self.error, ToolErrorInfo):
             raise TypeError("ToolEffectRecord error must be ToolErrorInfo.")
         if bool(self.content is not None) == bool(self.error is not None):
-            raise ValueError("ToolEffectRecord requires exactly one of content or error.")
+            raise ValueError(
+                "ToolEffectRecord requires exactly one of content or error."
+            )
         if self.status is ToolEffectStatus.SUCCEEDED and self.content is None:
             raise ValueError("SUCCEEDED effect requires content.")
         if self.status is not ToolEffectStatus.SUCCEEDED and self.error is None:
             raise ValueError("Non-success effect requires error.")
-        if self.status is ToolEffectStatus.TIMED_OUT and self.error and self.error.code != "timeout":
+        if (
+            self.status is ToolEffectStatus.TIMED_OUT
+            and self.error
+            and self.error.code != "timeout"
+        ):
             raise ValueError("TIMED_OUT effect requires timeout error.")
-        if self.status is ToolEffectStatus.CANCELLED and self.error and self.error.code != "cancelled":
+        if (
+            self.status is ToolEffectStatus.CANCELLED
+            and self.error
+            and self.error.code != "cancelled"
+        ):
             raise ValueError("CANCELLED effect requires cancelled error.")
+        certainty = self.certainty
+        if certainty is None:
+            certainty = (
+                EffectCertainty.CERTAIN
+                if self.status is ToolEffectStatus.SUCCEEDED
+                else EffectCertainty.UNKNOWN
+                if self.status is ToolEffectStatus.UNKNOWN
+                else EffectCertainty.CERTAIN_NO_EFFECT
+            )
+            object.__setattr__(self, "certainty", certainty)
+        if not isinstance(certainty, EffectCertainty):
+            raise TypeError("certainty must be EffectCertainty.")
+        allowed = {
+            ToolEffectStatus.SUCCEEDED: {EffectCertainty.CERTAIN},
+            ToolEffectStatus.UNKNOWN: {EffectCertainty.UNKNOWN},
+            ToolEffectStatus.FAILED: {
+                EffectCertainty.CERTAIN_NO_EFFECT,
+                EffectCertainty.UNKNOWN,
+            },
+            ToolEffectStatus.CANCELLED: {
+                EffectCertainty.CERTAIN_NO_EFFECT,
+                EffectCertainty.UNKNOWN,
+            },
+            ToolEffectStatus.TIMED_OUT: {
+                EffectCertainty.CERTAIN_NO_EFFECT,
+                EffectCertainty.UNKNOWN,
+            },
+        }
+        if certainty not in allowed[self.status]:
+            raise ValueError("Invalid ToolEffectStatus/EffectCertainty combination.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +425,9 @@ class ToolBatchResult:
 
 
 class ToolBatchAborted(RuntimeError):
-    def __init__(self, reason: RunError, effects: tuple[ToolEffectRecord, ...] = ()) -> None:
+    def __init__(
+        self, reason: RunError, effects: tuple[ToolEffectRecord, ...] = ()
+    ) -> None:
         if not isinstance(reason, RunError):
             raise TypeError("ToolBatchAborted requires RunError.")
         self.reason = reason
@@ -287,8 +437,27 @@ class ToolBatchAborted(RuntimeError):
         super().__init__(reason.message)
 
 
+@dataclass(frozen=True, slots=True)
+class CompositeToolOutcome:
+    content: tuple[ToolContent, ...]
+    effects: tuple[ToolEffectRecord, ...] = ()
+    records: tuple[SupplementalExecutionRecord, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
+        object.__setattr__(self, "effects", tuple(self.effects))
+        object.__setattr__(self, "records", tuple(self.records))
+
+
+class ToolRecordRedactor(Protocol):
+    def __call__(self, arguments: FrozenJsonObject) -> FrozenJsonObject | None: ...
+
+
 ToolReturn = ToolTextContent | ToolJsonContent | RawToolResult
-ToolHandler = Callable[[FrozenJsonObject, ToolContext], ToolReturn | Awaitable[ToolReturn]]
+ToolHandlerReturn = ToolReturn | CompositeToolOutcome
+ToolHandler = Callable[
+    [FrozenJsonObject, ToolContext], ToolHandlerReturn | Awaitable[ToolHandlerReturn]
+]
 TimeoutResolver = Callable[[FrozenJsonObject], float | None]
 
 
@@ -300,20 +469,39 @@ class Tool:
     effect_kind: ToolEffectKind = ToolEffectKind.READ_ONLY
     timeout: float | None = None
     timeout_resolver: TimeoutResolver | None = field(default=None, repr=False)
+    effect_reporting: ToolEffectReporting = ToolEffectReporting.LEAF
+    record_redactor: ToolRecordRedactor | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.definition, ToolDefinition) or not callable(self.handler):
+        if not isinstance(self.definition, ToolDefinition) or not callable(
+            self.handler
+        ):
             raise TypeError("Tool requires a ToolDefinition and callable handler.")
-        if not isinstance(self.execution_mode, ToolExecutionMode) or not isinstance(self.effect_kind, ToolEffectKind):
-            raise TypeError("Tool execution_mode and effect_kind must be canonical enums.")
-        if self.timeout is not None and (isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float)) or self.timeout <= 0):
+        if (
+            not isinstance(self.execution_mode, ToolExecutionMode)
+            or not isinstance(self.effect_kind, ToolEffectKind)
+            or not isinstance(self.effect_reporting, ToolEffectReporting)
+        ):
+            raise TypeError(
+                "Tool execution_mode and effect_kind must be canonical enums."
+            )
+        if self.timeout is not None and (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, (int, float))
+            or self.timeout <= 0
+        ):
             raise ValueError("Tool timeout must be positive.")
 
-    async def execute(self, arguments: FrozenJsonObject, context: ToolContext) -> ToolReturn:
+    async def execute(
+        self, arguments: FrozenJsonObject, context: ToolContext
+    ) -> ToolHandlerReturn:
         value = self.handler(arguments, context)
         if inspect.isawaitable(value):
             value = await value
-        if not isinstance(value, (ToolTextContent, ToolJsonContent, RawToolResult)):
+        if not isinstance(
+            value,
+            (ToolTextContent, ToolJsonContent, RawToolResult, CompositeToolOutcome),
+        ):
             raise ToolContractError("Tool must return canonical ToolContent.")
         return value
 
@@ -325,11 +513,15 @@ class Tool:
 
 
 class ToolExecutionPolicy(Protocol):
-    async def evaluate(self, call: ToolCall, tool: Tool | None, context: ToolContext) -> ToolDecision | ToolPolicyDecision: ...
+    async def evaluate(
+        self, call: ToolCall, tool: Tool | None, context: ToolContext
+    ) -> ToolDecision | ToolPolicyDecision: ...
 
 
 class AllowAllToolPolicy:
-    async def evaluate(self, call: ToolCall, tool: Tool | None, context: ToolContext) -> ToolPolicyDecision:
+    async def evaluate(
+        self, call: ToolCall, tool: Tool | None, context: ToolContext
+    ) -> ToolPolicyDecision:
         return ToolPolicyDecision(ToolDecision.ALLOW)
 
 
@@ -351,10 +543,16 @@ class ToolRegistry:
             raise ToolRegistrationError("Tool must declare a canonical execution mode.")
         if getattr(tool, "effect_kind", None) not in set(ToolEffectKind):
             raise ToolRegistrationError("Tool must declare a canonical effect kind.")
+        if getattr(tool, "effect_reporting", None) not in set(ToolEffectReporting):
+            raise ToolRegistrationError("Tool must declare canonical effect reporting.")
         if not inspect.iscoroutinefunction(getattr(tool, "execute", None)):
             raise ToolRegistrationError("Tool must expose async execute().")
         timeout = getattr(tool, "timeout", None)
-        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout <= 0
+        ):
             raise ToolRegistrationError("Tool timeout must be positive or None.")
         name = tool.definition.name
         if name in self._tools and not replace:
@@ -375,13 +573,19 @@ class ToolRegistry:
         return self
 
 
-def validate_tool_arguments(tool: object, arguments: FrozenJsonObject) -> ToolErrorInfo | None:
+def validate_tool_arguments(
+    tool: object, arguments: FrozenJsonObject
+) -> ToolErrorInfo | None:
     definition = getattr(tool, "definition")
     assert isinstance(definition, ToolDefinition)
     try:
-        Draft202012Validator(_plain(definition.input_schema)).validate(_plain(arguments))
+        Draft202012Validator(_plain(definition.input_schema)).validate(
+            _plain(arguments)
+        )
     except ValidationError:
-        return ToolErrorInfo("invalid_arguments", "Tool arguments do not match the input schema.")
+        return ToolErrorInfo(
+            "invalid_arguments", "Tool arguments do not match the input schema."
+        )
     return None
 
 

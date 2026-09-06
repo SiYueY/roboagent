@@ -62,6 +62,32 @@ _RESERVED_REQUEST_KEYS = frozenset(
 )
 
 
+def _provider_error(exc: Exception) -> ModelProviderError:
+    """Translate SDK/network failures into bounded, credential-safe diagnostics."""
+    status = getattr(exc, "status_code", None)
+    if status in {401, 403}:
+        return ModelProviderError(
+            "provider_authentication_error",
+            f"Provider authentication failed (HTTP {status}). Check the API key and endpoint region.",
+        )
+    if status == 429:
+        return ModelProviderError(
+            "provider_rate_limit", "Provider rate limit exceeded (HTTP 429)."
+        )
+    if isinstance(status, int):
+        return ModelProviderError(
+            "provider_http_error", f"Provider request failed (HTTP {status})."
+        )
+    name = type(exc).__name__
+    if name in {"APITimeoutError", "TimeoutException", "TimeoutError"}:
+        return ModelProviderError("provider_timeout", "Provider request timed out.")
+    if name in {"APIConnectionError", "ConnectError", "ConnectionError"}:
+        return ModelProviderError(
+            "provider_connection_error", "Could not connect to the Provider endpoint."
+        )
+    return ModelProviderError("provider_error", "Provider request failed.")
+
+
 @dataclass(frozen=True, slots=True)
 class ModelCapabilities:
     input_modalities: frozenset[Modality] = frozenset({Modality.TEXT})
@@ -73,12 +99,19 @@ class ModelCapabilities:
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_modalities", frozenset(self.input_modalities))
         object.__setattr__(self, "output_modalities", frozenset(self.output_modalities))
-        if not all(isinstance(item, Modality) for item in self.input_modalities | self.output_modalities):
+        if not all(
+            isinstance(item, Modality)
+            for item in self.input_modalities | self.output_modalities
+        ):
             raise TypeError("Model modalities must contain Modality values.")
-        if not isinstance(self.tool_calling, bool) or not isinstance(self.parallel_tool_calls, bool):
+        if not isinstance(self.tool_calling, bool) or not isinstance(
+            self.parallel_tool_calls, bool
+        ):
             raise TypeError("Model capability flags must be bool.")
         if self.context_window is not None and (
-            not isinstance(self.context_window, int) or isinstance(self.context_window, bool) or self.context_window < 1
+            not isinstance(self.context_window, int)
+            or isinstance(self.context_window, bool)
+            or self.context_window < 1
         ):
             raise ValueError("context_window must be positive or None.")
 
@@ -91,11 +124,23 @@ class ModelSettings:
     extra: FrozenJsonObject = field(default_factory=FrozenJsonObject)
 
     def __post_init__(self) -> None:
-        if self.temperature is not None and (isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)) or not math.isfinite(self.temperature)):
+        if self.temperature is not None and (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+            or not math.isfinite(self.temperature)
+        ):
             raise ValueError("temperature must be finite.")
-        if self.top_p is not None and (isinstance(self.top_p, bool) or not isinstance(self.top_p, (int, float)) or not 0 < self.top_p <= 1):
+        if self.top_p is not None and (
+            isinstance(self.top_p, bool)
+            or not isinstance(self.top_p, (int, float))
+            or not 0 < self.top_p <= 1
+        ):
             raise ValueError("top_p must be in (0, 1].")
-        if self.max_output_tokens is not None and (not isinstance(self.max_output_tokens, int) or isinstance(self.max_output_tokens, bool) or self.max_output_tokens < 1):
+        if self.max_output_tokens is not None and (
+            not isinstance(self.max_output_tokens, int)
+            or isinstance(self.max_output_tokens, bool)
+            or self.max_output_tokens < 1
+        ):
             raise ValueError("max_output_tokens must be positive.")
         object.__setattr__(self, "extra", freeze_json_object(self.extra))
 
@@ -108,7 +153,11 @@ class Usage:
 
     def __post_init__(self) -> None:
         values = (self.input_tokens, self.output_tokens, self.total_tokens)
-        if any(value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0) for value in values):
+        if any(
+            value is not None
+            and (not isinstance(value, int) or isinstance(value, bool) or value < 0)
+            for value in values
+        ):
             raise ValueError("Usage values must be non-negative integers.")
 
 
@@ -127,8 +176,12 @@ class ModelResponse:
     usage: Usage | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.message, AssistantMessage) or not isinstance(self.finish_reason, FinishReason):
-            raise TypeError("ModelResponse requires canonical message and finish reason.")
+        if not isinstance(self.message, AssistantMessage) or not isinstance(
+            self.finish_reason, FinishReason
+        ):
+            raise TypeError(
+                "ModelResponse requires canonical message and finish reason."
+            )
         if self.usage is not None and not isinstance(self.usage, Usage):
             raise TypeError("ModelResponse usage must be Usage or None.")
 
@@ -179,7 +232,11 @@ class ToolCallArgumentsDelta:
 
     def __post_init__(self) -> None:
         _stream_identity(self.sequence, self.call_index)
-        if not isinstance(self.call_id, str) or not self.call_id or not isinstance(self.delta, str):
+        if (
+            not isinstance(self.call_id, str)
+            or not self.call_id
+            or not isinstance(self.delta, str)
+        ):
             raise ValueError("Invalid ToolCall arguments delta.")
 
 
@@ -231,7 +288,11 @@ ModelEvent = (
 def _stream_identity(sequence: int, call_index: int | None = None) -> None:
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
         raise ValueError("Model event sequence must be a non-negative integer.")
-    if call_index is not None and (not isinstance(call_index, int) or isinstance(call_index, bool) or call_index < 0):
+    if call_index is not None and (
+        not isinstance(call_index, int)
+        or isinstance(call_index, bool)
+        or call_index < 0
+    ):
         raise ValueError("Tool call index must be a non-negative integer.")
 
 
@@ -239,7 +300,9 @@ class Model(Protocol):
     @property
     def capabilities(self) -> ModelCapabilities: ...
 
-    def stream(self, context: "ModelContext", settings: ModelSettings | None = None) -> AsyncIterator[ModelEvent]: ...
+    def stream(
+        self, context: "ModelContext", settings: ModelSettings | None = None
+    ) -> AsyncIterator[ModelEvent]: ...
 
 
 class ModelProvider(Protocol):
@@ -252,18 +315,31 @@ def _event_sequence(event: ModelEvent) -> int:
     return event.sequence
 
 
-def validate_model_context(capabilities: ModelCapabilities, context: "ModelContext") -> None:
-    from roboagent.context import MessageSegment, SummarySegment, WorkspaceReferenceSegment
+def validate_model_context(
+    capabilities: ModelCapabilities, context: "ModelContext"
+) -> None:
+    from roboagent.context import (
+        MessageSegment,
+        SummarySegment,
+        WorkspaceReferenceSegment,
+    )
 
     for segment in context.segments:
         if isinstance(segment, MessageSegment):
             for content in segment.message.content:
                 if modality(content) not in capabilities.input_modalities:
-                    raise ModelCapabilityError("unsupported_input_modality", "Model does not support an input modality.")
+                    raise ModelCapabilityError(
+                        "unsupported_input_modality",
+                        "Model does not support an input modality.",
+                    )
         elif not isinstance(segment, (SummarySegment, WorkspaceReferenceSegment)):
-            raise ModelProtocolError("invalid_model_context", "Unknown ModelContext segment.")
+            raise ModelProtocolError(
+                "invalid_model_context", "Unknown ModelContext segment."
+            )
     if context.tools and not capabilities.tool_calling:
-        raise ModelCapabilityError("model_does_not_support_tools", "Model does not support tools.")
+        raise ModelCapabilityError(
+            "model_does_not_support_tools", "Model does not support tools."
+        )
 
 
 async def collect_model_stream(
@@ -274,14 +350,18 @@ async def collect_model_stream(
 ) -> ModelResponse:
     """Collect and strictly validate one canonical model stream."""
     if not isinstance(model.capabilities, ModelCapabilities):
-        raise ModelCapabilityError("invalid_model_capabilities", "Model capabilities are not canonical.")
+        raise ModelCapabilityError(
+            "invalid_model_capabilities", "Model capabilities are not canonical."
+        )
     validate_model_context(model.capabilities, context)
     iterator = model.stream(context, settings)
     if not hasattr(iterator, "__aiter__"):
         close_coroutine = getattr(iterator, "close", None)
         if close_coroutine is not None:
             close_coroutine()
-        raise ModelProtocolError("invalid_provider_response", "Model.stream must return an AsyncIterator.")
+        raise ModelProtocolError(
+            "invalid_provider_response", "Model.stream must return an AsyncIterator."
+        )
     expected_sequence = 0
     started = False
     completed: ModelResponse | None = None
@@ -291,69 +371,141 @@ async def collect_model_stream(
     latest_usage: Usage | None = None
     try:
         async for event in iterator:
-            if not isinstance(event, (ResponseStarted, TextDelta, ToolCallStarted, ToolCallArgumentsDelta, ToolCallCompleted, UsageUpdated, ResponseCompleted)):
-                raise ModelProtocolError("invalid_stream_sequence", "Unknown canonical model event.")
+            if not isinstance(
+                event,
+                (
+                    ResponseStarted,
+                    TextDelta,
+                    ToolCallStarted,
+                    ToolCallArgumentsDelta,
+                    ToolCallCompleted,
+                    UsageUpdated,
+                    ResponseCompleted,
+                ),
+            ):
+                raise ModelProtocolError(
+                    "invalid_stream_sequence", "Unknown canonical model event."
+                )
             if _event_sequence(event) != expected_sequence:
-                raise ModelProtocolError("invalid_stream_sequence", "Model event sequence is not contiguous.")
+                raise ModelProtocolError(
+                    "invalid_stream_sequence", "Model event sequence is not contiguous."
+                )
             expected_sequence += 1
             if completed is not None:
-                raise ModelProtocolError("invalid_stream_sequence", "No events may follow ResponseCompleted.")
+                raise ModelProtocolError(
+                    "invalid_stream_sequence", "No events may follow ResponseCompleted."
+                )
             if isinstance(event, ResponseStarted):
                 if started:
-                    raise ModelProtocolError("duplicate_response_started", "ResponseStarted occurred twice.")
+                    raise ModelProtocolError(
+                        "duplicate_response_started", "ResponseStarted occurred twice."
+                    )
                 if event.sequence != 0:
-                    raise ModelProtocolError("invalid_stream_sequence", "ResponseStarted must be first.")
+                    raise ModelProtocolError(
+                        "invalid_stream_sequence", "ResponseStarted must be first."
+                    )
                 started = True
             elif not started:
-                raise ModelProtocolError("invalid_stream_sequence", "ResponseStarted must be first.")
+                raise ModelProtocolError(
+                    "invalid_stream_sequence", "ResponseStarted must be first."
+                )
             elif isinstance(event, ToolCallStarted):
                 if event.call_index in call_states:
-                    raise ModelProtocolError("duplicate_tool_call_started", "ToolCall started twice.")
+                    raise ModelProtocolError(
+                        "duplicate_tool_call_started", "ToolCall started twice."
+                    )
                 if event.call_id in call_ids:
-                    raise ModelProtocolError("duplicate_tool_call_id", "ToolCall IDs must be unique.")
+                    raise ModelProtocolError(
+                        "duplicate_tool_call_id", "ToolCall IDs must be unique."
+                    )
                 call_ids.add(event.call_id)
                 call_states[event.call_index] = (event.call_id, event.name, False)
             elif isinstance(event, ToolCallArgumentsDelta):
                 state = call_states.get(event.call_index)
                 if state is None or state[2] or state[0] != event.call_id:
-                    raise ModelProtocolError("invalid_tool_call_delta_state", "ToolCall argument delta is out of state.")
+                    raise ModelProtocolError(
+                        "invalid_tool_call_delta_state",
+                        "ToolCall argument delta is out of state.",
+                    )
             elif isinstance(event, ToolCallCompleted):
                 state = call_states.get(event.call_index)
                 if state is None:
-                    raise ModelProtocolError("invalid_tool_call_delta_state", "ToolCall completed before it started.")
+                    raise ModelProtocolError(
+                        "invalid_tool_call_delta_state",
+                        "ToolCall completed before it started.",
+                    )
                 if state[2] or event.call_index in calls:
-                    raise ModelProtocolError("duplicate_tool_call_completed", "ToolCall completed twice.")
-                if state[0] != event.call.id or state[1] is not None and state[1] != event.call.name:
-                    raise ModelProtocolError("invalid_tool_call_delta_state", "Completed ToolCall identity changed.")
+                    raise ModelProtocolError(
+                        "duplicate_tool_call_completed", "ToolCall completed twice."
+                    )
+                if (
+                    state[0] != event.call.id
+                    or state[1] is not None
+                    and state[1] != event.call.name
+                ):
+                    raise ModelProtocolError(
+                        "invalid_tool_call_delta_state",
+                        "Completed ToolCall identity changed.",
+                    )
                 call_states[event.call_index] = (state[0], state[1], True)
                 calls[event.call_index] = event.call
             elif isinstance(event, UsageUpdated):
                 latest_usage = event.usage
             elif isinstance(event, ResponseCompleted):
                 if completed is not None:
-                    raise ModelProtocolError("invalid_stream_sequence", "ResponseCompleted occurred twice.")
+                    raise ModelProtocolError(
+                        "invalid_stream_sequence", "ResponseCompleted occurred twice."
+                    )
                 if any(not state[2] for state in call_states.values()):
-                    raise ModelProtocolError("incomplete_tool_call", "ResponseCompleted has an incomplete ToolCall.")
+                    raise ModelProtocolError(
+                        "incomplete_tool_call",
+                        "ResponseCompleted has an incomplete ToolCall.",
+                    )
                 expected_calls = tuple(call for _, call in sorted(calls.items()))
                 if event.response.message.tool_calls != expected_calls:
-                    raise ModelProtocolError("tool_call_response_mismatch", "Final ToolCalls differ from stream events.")
+                    raise ModelProtocolError(
+                        "tool_call_response_mismatch",
+                        "Final ToolCalls differ from stream events.",
+                    )
                 if latest_usage is not None and event.response.usage != latest_usage:
-                    raise ModelProtocolError("invalid_provider_response", "Final usage differs from latest usage event.")
+                    raise ModelProtocolError(
+                        "invalid_provider_response",
+                        "Final usage differs from latest usage event.",
+                    )
                 completed = event.response
             if on_event is not None:
                 observed = on_event(event)  # type: ignore[operator]
                 if inspect.isawaitable(observed):
                     await observed
         if not started or completed is None:
-            raise ModelProtocolError("missing_terminal_response", "Model stream ended without ResponseCompleted.")
+            raise ModelProtocolError(
+                "missing_terminal_response",
+                "Model stream ended without ResponseCompleted.",
+            )
         if any(not state[2] for state in call_states.values()):
-            raise ModelProtocolError("incomplete_tool_call", "Model stream ended with an incomplete ToolCall.")
-        if any(modality(part) not in model.capabilities.output_modalities for part in completed.message.content):
-            raise ModelCapabilityError("unsupported_output_modality", "Model emitted an unsupported modality.")
+            raise ModelProtocolError(
+                "incomplete_tool_call",
+                "Model stream ended with an incomplete ToolCall.",
+            )
+        if any(
+            modality(part) not in model.capabilities.output_modalities
+            for part in completed.message.content
+        ):
+            raise ModelCapabilityError(
+                "unsupported_output_modality", "Model emitted an unsupported modality."
+            )
         if completed.message.tool_calls and not model.capabilities.tool_calling:
-            raise ModelCapabilityError("model_does_not_support_tools", "Model emitted ToolCalls without tool capability.")
-        if not model.capabilities.parallel_tool_calls and len(completed.message.tool_calls) > 1:
-            raise ModelCapabilityError("parallel_tool_calls_unsupported", "Model emitted parallel ToolCalls.")
+            raise ModelCapabilityError(
+                "model_does_not_support_tools",
+                "Model emitted ToolCalls without tool capability.",
+            )
+        if (
+            not model.capabilities.parallel_tool_calls
+            and len(completed.message.tool_calls) > 1
+        ):
+            raise ModelCapabilityError(
+                "parallel_tool_calls_unsupported", "Model emitted parallel ToolCalls."
+            )
         return completed
     finally:
         close = getattr(iterator, "aclose", None)
@@ -388,7 +540,9 @@ class OpenAICompatibleModel:
         )
     )
 
-    async def stream(self, context: "ModelContext", settings: ModelSettings | None = None) -> AsyncIterator[ModelEvent]:
+    async def stream(
+        self, context: "ModelContext", settings: ModelSettings | None = None
+    ) -> AsyncIterator[ModelEvent]:
         validate_model_context(self.capabilities, context)
         owned_client = self.client is None
         client = self.client
@@ -409,9 +563,15 @@ class OpenAICompatibleModel:
                 )
             messages, resources = await _messages(context, self.media_resolver)
             effective = ModelSettings(
-                temperature=settings.temperature if settings and settings.temperature is not None else self.temperature,
-                max_output_tokens=settings.max_output_tokens if settings and settings.max_output_tokens is not None else self.max_tokens,
-                top_p=settings.top_p if settings and settings.top_p is not None else self.top_p,
+                temperature=settings.temperature
+                if settings and settings.temperature is not None
+                else self.temperature,
+                max_output_tokens=settings.max_output_tokens
+                if settings and settings.max_output_tokens is not None
+                else self.max_tokens,
+                top_p=settings.top_p
+                if settings and settings.top_p is not None
+                else self.top_p,
                 extra=settings.extra if settings else FrozenJsonObject(),
             )
             payload: dict[str, Any] = {
@@ -427,10 +587,13 @@ class OpenAICompatibleModel:
                         },
                     }
                     for tool in context.tools
-                ] or None,
+                ]
+                or None,
                 "stream": True,
                 "stream_options": {"include_usage": True},
-                "parallel_tool_calls": self.capabilities.parallel_tool_calls if context.tools else None,
+                "parallel_tool_calls": self.capabilities.parallel_tool_calls
+                if context.tools
+                else None,
             }
             if effective.temperature is not None:
                 payload["temperature"] = effective.temperature
@@ -458,7 +621,7 @@ class OpenAICompatibleModel:
         except (ModelCapabilityError, ModelProtocolError, MediaResolutionError):
             raise
         except Exception as exc:
-            raise ModelProviderError("provider_error", "Provider request failed.") from exc
+            raise _provider_error(exc) from exc
         finally:
             close_stream = getattr(stream, "aclose", None)
             if close_stream is not None:
@@ -467,7 +630,10 @@ class OpenAICompatibleModel:
                 try:
                     await resource.close()
                 except Exception as exc:
-                    _LOG.warning("Could not release model media resource (%s)", type(exc).__name__)
+                    _LOG.warning(
+                        "Could not release model media resource (%s)",
+                        type(exc).__name__,
+                    )
             if owned_client and client is not None:
                 await client.close()  # type: ignore[union-attr]
 
@@ -506,23 +672,33 @@ async def _stream_chunks(stream: object, model_name: str) -> AsyncIterator[Model
             for fragment in delta.tool_calls or ():
                 index = fragment.index
                 if index not in calls:
-                    call_id = fragment.id or f"{model_name}:tool:{index}:{uuid4().hex[:8]}"
+                    call_id = (
+                        fragment.id or f"{model_name}:tool:{index}:{uuid4().hex[:8]}"
+                    )
                     name = fragment.function.name if fragment.function else None
                     calls[index] = {"id": call_id, "name": name or "", "arguments": ""}
                     yield ToolCallStarted(sequence, index, call_id, name)
                     sequence += 1
                 state = calls[index]
                 if fragment.id and fragment.id != state["id"]:
-                    raise ModelProtocolError("invalid_tool_call_delta_state", "ToolCall ID changed during streaming.")
+                    raise ModelProtocolError(
+                        "invalid_tool_call_delta_state",
+                        "ToolCall ID changed during streaming.",
+                    )
                 if fragment.function:
                     if fragment.function.name:
                         if state["name"] and state["name"] != fragment.function.name:
-                            raise ModelProtocolError("invalid_tool_call_delta_state", "Tool name changed during streaming.")
+                            raise ModelProtocolError(
+                                "invalid_tool_call_delta_state",
+                                "Tool name changed during streaming.",
+                            )
                         state["name"] = fragment.function.name
                     piece = fragment.function.arguments or ""
                     if piece:
                         state["arguments"] += piece
-                        yield ToolCallArgumentsDelta(sequence, index, state["id"], piece)
+                        yield ToolCallArgumentsDelta(
+                            sequence, index, state["id"], piece
+                        )
                         sequence += 1
     normalized: list[ToolCall] = []
     ids: set[str] = set()
@@ -533,21 +709,31 @@ async def _stream_chunks(stream: object, model_name: str) -> AsyncIterator[Model
         try:
             arguments = json.loads(state["arguments"] or "{}")
         except (json.JSONDecodeError, ProtocolError) as exc:
-            raise ModelProtocolError("invalid_tool_arguments", "Tool arguments are invalid JSON.") from exc
+            raise ModelProtocolError(
+                "invalid_tool_arguments", "Tool arguments are invalid JSON."
+            ) from exc
         if not isinstance(arguments, dict):
-            raise ModelProtocolError("invalid_tool_arguments", "Tool arguments must be a JSON object.")
+            raise ModelProtocolError(
+                "invalid_tool_arguments", "Tool arguments must be a JSON object."
+            )
         try:
             call = ToolCall(state["id"], state["name"], freeze_json_object(arguments))
         except ProtocolError as exc:
-            raise ModelProtocolError("invalid_tool_arguments", "Tool arguments are not canonical JSON.") from exc
+            raise ModelProtocolError(
+                "invalid_tool_arguments", "Tool arguments are not canonical JSON."
+            ) from exc
         if call.id in ids:
-            raise ModelProtocolError("duplicate_tool_call_id", "ToolCall IDs must be unique.")
+            raise ModelProtocolError(
+                "duplicate_tool_call_id", "ToolCall IDs must be unique."
+            )
         ids.add(call.id)
         normalized.append(call)
         yield ToolCallCompleted(sequence, index, call)
         sequence += 1
     content = (TextContent("".join(text_parts)),) if text_parts else ()
-    response = ModelResponse(AssistantMessage(content, tuple(normalized)), finish_reason, usage)
+    response = ModelResponse(
+        AssistantMessage(content, tuple(normalized)), finish_reason, usage
+    )
     yield ResponseCompleted(sequence, response)
 
 
@@ -561,10 +747,20 @@ def _finish_reason(value: str) -> FinishReason:
     }.get(value, FinishReason.OTHER)
 
 
-async def _messages(context: "ModelContext", resolver: MediaResolver | None) -> tuple[list[dict[str, Any]], list[ResolvedMedia]]:
-    from roboagent.context import MessageSegment, SummarySegment, WorkspaceReferenceSegment
+async def _messages(
+    context: "ModelContext", resolver: MediaResolver | None
+) -> tuple[list[dict[str, Any]], list[ResolvedMedia]]:
+    from roboagent.context import (
+        MessageSegment,
+        SummarySegment,
+        WorkspaceReferenceSegment,
+    )
 
-    encoded = [{"role": "system", "content": context.system_prompt}] if context.system_prompt else []
+    encoded = (
+        [{"role": "system", "content": context.system_prompt}]
+        if context.system_prompt
+        else []
+    )
     resources: list[ResolvedMedia] = []
     try:
         for segment in context.segments:
@@ -589,12 +785,20 @@ async def _messages(context: "ModelContext", resolver: MediaResolver | None) -> 
                 encoded.append({"role": "user", "content": "\n".join(details)})
                 continue
             if not isinstance(segment, MessageSegment):
-                raise ModelProtocolError("invalid_model_context", "Unknown ModelContext segment.")
+                raise ModelProtocolError(
+                    "invalid_model_context", "Unknown ModelContext segment."
+                )
             message = segment.message
             content, owned = await _content(message.content, resolver)
             resources.extend(owned)
             if message.role == "tool":
-                encoded.append({"role": "tool", "tool_call_id": message.tool_call_id, "content": content})
+                encoded.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": message.tool_call_id,
+                        "content": content,
+                    }
+                )
             elif message.role == "assistant":
                 encoded.append(
                     {
@@ -604,10 +808,14 @@ async def _messages(context: "ModelContext", resolver: MediaResolver | None) -> 
                             {
                                 "id": call.id,
                                 "type": "function",
-                                "function": {"name": call.name, "arguments": canonical_json_dumps(call.arguments)},
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": canonical_json_dumps(call.arguments),
+                                },
                             }
                             for call in message.tool_calls
-                        ] or None,
+                        ]
+                        or None,
                     }
                 )
             else:
@@ -619,7 +827,9 @@ async def _messages(context: "ModelContext", resolver: MediaResolver | None) -> 
     return encoded, resources
 
 
-async def _content(items: tuple[object, ...], resolver: MediaResolver | None) -> tuple[object, list[ResolvedMedia]]:
+async def _content(
+    items: tuple[object, ...], resolver: MediaResolver | None
+) -> tuple[object, list[ResolvedMedia]]:
     if all(isinstance(item, TextContent) for item in items):
         return text_of(items), []
     result: list[dict[str, object]] = []
@@ -629,9 +839,15 @@ async def _content(items: tuple[object, ...], resolver: MediaResolver | None) ->
             if isinstance(item, TextContent):
                 result.append({"type": "text", "text": item.text})
             elif isinstance(item, JsonContent):
-                result.append({"type": "text", "text": canonical_json_dumps(item.value)})
+                result.append(
+                    {"type": "text", "text": canonical_json_dumps(item.value)}
+                )
             elif isinstance(item, ArtifactReferenceContent):
-                details = [f"Workspace artifact: {item.uri}", f"Digest: {item.digest}", f"Size: {item.size} bytes"]
+                details = [
+                    f"Workspace artifact: {item.uri}",
+                    f"Digest: {item.digest}",
+                    f"Size: {item.size} bytes",
+                ]
                 if item.media_type:
                     details.append(f"Media type: {item.media_type}")
                 if item.preview:
@@ -642,17 +858,47 @@ async def _content(items: tuple[object, ...], resolver: MediaResolver | None) ->
                     data = item.source.data
                 else:
                     if resolver is None:
-                        raise MediaResolutionError(MediaResolutionErrorCode.ACCESS_DENIED, "External media requires a resolver.")
-                    resource = await resolver.resolve(item.source, expected_media_type=item.media_type, cancellation=_NoCancellation())
+                        raise MediaResolutionError(
+                            MediaResolutionErrorCode.ACCESS_DENIED,
+                            "External media requires a resolver.",
+                        )
+                    resource = await resolver.resolve(
+                        item.source,
+                        expected_media_type=item.media_type,
+                        cancellation=_NoCancellation(),
+                    )
                     resources.append(resource)
-                    if item.media_type and resource.media_type and item.media_type != resource.media_type:
-                        raise MediaResolutionError(MediaResolutionErrorCode.MEDIA_TYPE_MISMATCH, "Resolved media type differs.")
-                    data = resource.payload if isinstance(resource.payload, bytes) else resource.payload.read_bytes()
-                result.append({"type": "image_url", "image_url": {"url": f"data:{item.media_type or 'image/png'};base64,{base64.b64encode(data).decode()}"}})
+                    if (
+                        item.media_type
+                        and resource.media_type
+                        and item.media_type != resource.media_type
+                    ):
+                        raise MediaResolutionError(
+                            MediaResolutionErrorCode.MEDIA_TYPE_MISMATCH,
+                            "Resolved media type differs.",
+                        )
+                    data = (
+                        resource.payload
+                        if isinstance(resource.payload, bytes)
+                        else resource.payload.read_bytes()
+                    )
+                result.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{item.media_type or 'image/png'};base64,{base64.b64encode(data).decode()}"
+                        },
+                    }
+                )
             elif isinstance(item, (AudioContent, FileContent)):
-                raise ModelCapabilityError("unsupported_input_modality", "This provider adapter cannot encode this modality.")
+                raise ModelCapabilityError(
+                    "unsupported_input_modality",
+                    "This provider adapter cannot encode this modality.",
+                )
             else:
-                raise ModelProtocolError("invalid_provider_response", "Unknown message content.")
+                raise ModelProtocolError(
+                    "invalid_provider_response", "Unknown message content."
+                )
     except BaseException:
         for resource in resources:
             await resource.close()

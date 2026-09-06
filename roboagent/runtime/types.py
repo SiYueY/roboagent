@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from roboagent.message import (
     ArtifactReferenceContent,
@@ -23,6 +23,9 @@ from roboagent.message import (
     _source,
 )
 
+if TYPE_CHECKING:
+    from .execution import RunExecutionContext
+
 _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
@@ -37,32 +40,76 @@ class CancellationReason(Enum):
     TIMEOUT = "timeout"
 
 
+class CancellationOrigin(Enum):
+    PARENT = "parent"
+    TIMEOUT = "timeout"
+    EXTERNAL = "external"
+    RUNTIME = "runtime"
+
+
 class RuntimeCancellation:
     """Small cooperative cancellation token used by the runtime."""
 
-    def __init__(self) -> None:
+    def __init__(self, parent: CancellationToken | None = None) -> None:
         self._event = asyncio.Event()
         self._reason: CancellationReason | None = None
+        self._origin: CancellationOrigin | None = None
+        self._parent = parent
 
     @property
     def cancelled(self) -> bool:
-        return self._event.is_set()
+        return self._event.is_set() or bool(
+            self._parent is not None and self._parent.cancelled
+        )
 
     @property
     def reason(self) -> CancellationReason | None:
-        return self._reason
+        return self._reason or getattr(self._parent, "reason", None)
 
-    def cancel(self, reason: CancellationReason = CancellationReason.USER) -> None:
+    @property
+    def origin(self) -> CancellationOrigin | None:
+        if self._event.is_set():
+            return self._origin
+        return (
+            CancellationOrigin.PARENT
+            if self._parent is not None and self._parent.cancelled
+            else None
+        )
+
+    def cancel(
+        self,
+        reason: CancellationReason = CancellationReason.USER,
+        origin: CancellationOrigin = CancellationOrigin.EXTERNAL,
+    ) -> None:
         if not self.cancelled:
             self._reason = reason
+            self._origin = (
+                CancellationOrigin.TIMEOUT
+                if reason is CancellationReason.TIMEOUT
+                else origin
+            )
             self._event.set()
 
     async def wait_cancelled(self) -> None:
-        await self._event.wait()
+        if self.cancelled:
+            return
+        local = asyncio.create_task(self._event.wait())
+        if self._parent is None:
+            await local
+            return
+        parent = asyncio.create_task(self._parent.wait_cancelled())
+        try:
+            await asyncio.wait({local, parent}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (local, parent):
+                if not task.done():
+                    task.cancel()
 
     def raise_if_cancelled(self) -> None:
         if self.cancelled:
-            raise asyncio.CancelledError(self._reason.value if self._reason else "cancelled")
+            raise asyncio.CancelledError(
+                self._reason.value if self._reason else "cancelled"
+            )
 
 
 class CancellationToken(Protocol):
@@ -79,12 +126,28 @@ class RunContext:
     run_id: str
     session_id: str
     cancellation: CancellationToken
+    execution: "RunExecutionContext | None" = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.run_id, str) or not self.run_id or not isinstance(self.session_id, str) or not self.session_id:
+        if (
+            not isinstance(self.run_id, str)
+            or not self.run_id
+            or not isinstance(self.session_id, str)
+            or not self.session_id
+        ):
             raise ValueError("RunContext requires run_id and session_id.")
-        if not all(hasattr(self.cancellation, name) for name in ("cancelled", "raise_if_cancelled", "wait_cancelled")):
+        if not all(
+            hasattr(self.cancellation, name)
+            for name in ("cancelled", "raise_if_cancelled", "wait_cancelled")
+        ):
             raise TypeError("RunContext requires a CancellationToken.")
+        if self.execution is not None:
+            if self.run_id != self.execution.lineage.execution_run_id:
+                raise ValueError("RunContext.run_id must match execution lineage.")
+            if self.cancellation is not self.execution.cancellation:
+                raise ValueError(
+                    "RunContext cancellation must be the execution cancellation view."
+                )
 
 
 class RunStatus(Enum):
@@ -111,7 +174,11 @@ class RunError:
 
     def __post_init__(self) -> None:
         safe_error_code(self.code)
-        if not isinstance(self.message, str) or not self.message or not isinstance(self.retryable, bool):
+        if (
+            not isinstance(self.message, str)
+            or not self.message
+            or not isinstance(self.retryable, bool)
+        ):
             raise TypeError("Invalid RunError metadata.")
         if self.cause_type is not None and not isinstance(self.cause_type, str):
             raise TypeError("RunError.cause_type must be str or None.")
@@ -152,9 +219,13 @@ def content_summary(content: MessageContent) -> ContentSummary:
     if isinstance(content, JsonContent):
         from roboagent.message import canonical_json_dumps
 
-        return ContentSummary(Modality.TEXT, size=len(canonical_json_dumps(content.value)))
+        return ContentSummary(
+            Modality.TEXT, size=len(canonical_json_dumps(content.value))
+        )
     if isinstance(content, ArtifactReferenceContent):
-        return ContentSummary(Modality.FILE, content.media_type, "workspace", content.size)
+        return ContentSummary(
+            Modality.FILE, content.media_type, "workspace", content.size
+        )
     source = content.source
     return ContentSummary(
         modality(content),
@@ -182,7 +253,12 @@ class RunState:
     def __post_init__(self) -> None:
         object.__setattr__(self, "streaming_content", tuple(self.streaming_content))
         object.__setattr__(self, "pending_tool_calls", tuple(self.pending_tool_calls))
-        if not isinstance(self.phase, RunPhase) or not isinstance(self.turn, int) or isinstance(self.turn, bool) or self.turn < 0:
+        if (
+            not isinstance(self.phase, RunPhase)
+            or not isinstance(self.turn, int)
+            or isinstance(self.turn, bool)
+            or self.turn < 0
+        ):
             raise ValueError("RunState requires canonical phase and non-negative turn.")
         if self.status is not None and not isinstance(self.status, RunStatus):
             raise TypeError("RunState.status must be RunStatus or None.")
@@ -223,7 +299,11 @@ class ResolvedMedia:
     def __post_init__(self) -> None:
         if not isinstance(self.payload, (bytes, Path)):
             raise TypeError("ResolvedMedia.payload must be bytes | Path.")
-        if self.size < 0 or isinstance(self.payload, bytes) and self.size != len(self.payload):
+        if (
+            self.size < 0
+            or isinstance(self.payload, bytes)
+            and self.size != len(self.payload)
+        ):
             raise ValueError("ResolvedMedia.size is invalid.")
         _source(self.source)
         _mime(self.media_type)

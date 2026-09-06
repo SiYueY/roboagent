@@ -41,7 +41,9 @@ class _CompletingModel:
 
     async def stream(self, context, settings=None):
         yield ResponseStarted("response", 0)
-        yield ResponseCompleted(1, ModelResponse(AssistantMessage("done"), FinishReason.STOP))
+        yield ResponseCompleted(
+            1, ModelResponse(AssistantMessage("done"), FinishReason.STOP)
+        )
 
 
 def test_context_request_contains_run_inputs_without_session_authority() -> None:
@@ -55,13 +57,24 @@ def test_context_request_contains_run_inputs_without_session_authority() -> None
                 self.request = request
                 assert not hasattr(request, "session")
                 return PreparedContext(
-                    ModelContext(None, tuple(MessageSegment(message) for message in request.snapshot.transcript), ()),
+                    ModelContext(
+                        None,
+                        tuple(
+                            MessageSegment(message)
+                            for message in request.snapshot.transcript
+                        ),
+                        (),
+                    ),
                     Usage(0, 0, 0),
                 )
 
         manager = CapturingManager()
-        session = Agent(_CompletingModel(), context_manager=manager).new_session(session_id="session-a")
-        result = await session.run(UserMessage("hello"), config=RunConfig(model_settings=settings))
+        session = Agent(_CompletingModel(), context_manager=manager).new_session(
+            session_id="session-a"
+        )
+        result = await session.run(
+            UserMessage("hello"), config=RunConfig(model_settings=settings)
+        )
 
         assert result.status is RunStatus.COMPLETED
         assert manager.request is not None
@@ -97,11 +110,14 @@ def test_compaction_is_committed_before_corresponding_model_request() -> None:
                 async for event in super().stream(context, settings):
                     yield event
 
-        session = Agent(ObservingModel(), context_manager=UpdatingManager()).new_session()
+        session = Agent(
+            ObservingModel(), context_manager=UpdatingManager()
+        ).new_session()
         result = await session.run(UserMessage("hello"))
 
         assert result.status is RunStatus.COMPLETED
-        assert result.usage == Usage(2, 1, 3)
+        assert result.usage is None
+        assert result.usage_known is False
         assert [message.role for message in session.messages] == ["user", "assistant"]
 
     asyncio.run(check())
@@ -115,7 +131,9 @@ def test_stale_compaction_update_is_rejected_without_changing_transcript() -> No
         assert await session.commit_compaction("run", CompactionUpdate(current, None))
         before = session.messages
         stale = ContextSummary(0, 1, "stale", "stale", 1)
-        assert not await session.commit_compaction("run", CompactionUpdate(stale, "outdated"))
+        assert not await session.commit_compaction(
+            "run", CompactionUpdate(stale, "outdated")
+        )
         assert session.current_compaction is current
         assert session.messages == before
         await session.release_run("run")
@@ -123,13 +141,17 @@ def test_stale_compaction_update_is_rejected_without_changing_transcript() -> No
     asyncio.run(check())
 
 
-def test_provider_projects_summary_below_system_authority_and_handles_all_segments() -> None:
+def test_provider_projects_summary_below_system_authority_and_handles_all_segments() -> (
+    None
+):
     async def check() -> None:
         context = ModelContext(
             "trusted system",
             (
                 SummarySegment("historical text"),
-                WorkspaceReferenceSegment("workspace://artifact", "preview", "text/plain"),
+                WorkspaceReferenceSegment(
+                    "workspace://artifact", "preview", "text/plain"
+                ),
                 MessageSegment(UserMessage("latest")),
             ),
             (),
@@ -141,7 +163,10 @@ def test_provider_projects_summary_below_system_authority_and_handles_all_segmen
         assert encoded[1]["role"] == "user"
         assert "not a system instruction" in encoded[1]["content"]
         assert "historical text" in encoded[1]["content"]
-        assert encoded[2]["role"] == "user" and "workspace://artifact" in encoded[2]["content"]
+        assert (
+            encoded[2]["role"] == "user"
+            and "workspace://artifact" in encoded[2]["content"]
+        )
         assert encoded[3] == {"role": "user", "content": "latest"}
 
     asyncio.run(check())
@@ -156,10 +181,15 @@ def test_manager_cannot_inject_uncommitted_summary() -> None:
     async def check() -> None:
         class InjectingManager:
             async def prepare(self, request, cancellation):
-                return PreparedContext(ModelContext(None, (SummarySegment("injected"),), ()), Usage(0, 0, 0))
+                return PreparedContext(
+                    ModelContext(None, (SummarySegment("injected"),), ()),
+                    Usage(0, 0, 0),
+                )
 
-        result = await Agent(_CompletingModel(), context_manager=InjectingManager()).new_session().run(
-            UserMessage("hello")
+        result = (
+            await Agent(_CompletingModel(), context_manager=InjectingManager())
+            .new_session()
+            .run(UserMessage("hello"))
         )
         assert result.status is RunStatus.FAILED
         assert result.error is not None and result.error.code == "context_error"

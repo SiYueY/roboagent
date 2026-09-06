@@ -54,6 +54,7 @@ class ProviderModelConfigTests(unittest.TestCase):
             "provider": "tongyi",
             "params": {
                 "model": "qwen-max",
+                "extra_body": {"enable_thinking": False},
             },
         }
 
@@ -61,6 +62,9 @@ class ProviderModelConfigTests(unittest.TestCase):
 
         self.assertIsInstance(parsed, TongyiModelConfig)
         self.assertEqual(parsed.params.model, "qwen-max")
+        self.assertEqual(parsed.params.extra_body, {"enable_thinking": False})
+        model = providers.create_tongyi_model(parsed)
+        self.assertEqual(model.extra_body, {"enable_thinking": False})
 
     def test_public_exports_do_not_include_legacy_union_name(self) -> None:
         self.assertFalse(hasattr(providers, "AnyProviderModelConfig"))

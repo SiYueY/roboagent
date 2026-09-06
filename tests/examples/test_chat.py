@@ -11,11 +11,19 @@ from pathlib import Path
 
 from roboagent.agent import Agent
 from roboagent.message import AssistantMessage
-from roboagent.model import FinishReason, ModelCapabilities, ModelResponse, ResponseCompleted, ResponseStarted, TextDelta
+from roboagent.model import (
+    FinishReason,
+    ModelCapabilities,
+    ModelResponse,
+    ResponseCompleted,
+    ResponseStarted,
+    TextDelta,
+)
 from roboagent.runtime import Modality
 
 try:
     import gradio as _gradio
+
     _HAS_GRADIO6 = hasattr(_gradio, "themes")
 except ImportError:
     _HAS_GRADIO6 = False
@@ -23,17 +31,23 @@ except ImportError:
 
 class ScriptedModel:
     model_name = "test-model"
-    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False)
+    capabilities = ModelCapabilities(
+        frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False
+    )
 
     async def stream(self, context, settings=None):
         yield ResponseStarted("response", 0)
         yield TextDelta(1, "测试回复")
-        yield ResponseCompleted(2, ModelResponse(AssistantMessage("测试回复"), FinishReason.STOP))
+        yield ResponseCompleted(
+            2, ModelResponse(AssistantMessage("测试回复"), FinishReason.STOP)
+        )
 
 
 class CancellableModel:
     model_name = "test-model"
-    capabilities = ModelCapabilities(frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False)
+    capabilities = ModelCapabilities(
+        frozenset({Modality.TEXT}), frozenset({Modality.TEXT}), False, False
+    )
 
     async def stream(self, context, settings=None):
         yield ResponseStarted("response", 0)
@@ -43,8 +57,10 @@ class CancellableModel:
 class RecordingModel:
     model_name = "test-model"
     capabilities = ModelCapabilities(
-        frozenset({Modality.TEXT, Modality.IMAGE}), frozenset({Modality.TEXT}),
-        False, False,
+        frozenset({Modality.TEXT, Modality.IMAGE}),
+        frozenset({Modality.TEXT}),
+        False,
+        False,
     )
 
     def __init__(self) -> None:
@@ -53,13 +69,17 @@ class RecordingModel:
     async def stream(self, context, settings=None):
         self.request = context
         yield ResponseStarted("response", 0)
-        yield ResponseCompleted(1, ModelResponse(AssistantMessage("seen"), FinishReason.STOP))
+        yield ResponseCompleted(
+            1, ModelResponse(AssistantMessage("seen"), FinishReason.STOP)
+        )
 
 
 class TextOnlyRecordingModel(RecordingModel):
     capabilities = ModelCapabilities(
-        frozenset({Modality.TEXT}), frozenset({Modality.TEXT}),
-        False, False,
+        frozenset({Modality.TEXT}),
+        frozenset({Modality.TEXT}),
+        False,
+        False,
     )
 
 
@@ -108,19 +128,36 @@ class ChatExampleTests(unittest.TestCase):
             if component["props"].get("elem_id")
         }
         self.assertEqual(components["composer"]["type"], "column")
-        self.assertEqual(sum(item["props"].get("elem_id") == "composer" for item in config["components"]), 1)
+        self.assertEqual(
+            sum(
+                item["props"].get("elem_id") == "composer"
+                for item in config["components"]
+            ),
+            1,
+        )
         self.assertEqual(components["message-input"]["props"]["lines"], 2)
         self.assertEqual(components["message-input"]["props"]["max_lines"], 8)
         self.assertEqual(components["voice-video"]["props"]["interactive"], True)
         self.assertEqual(components["voice-more"]["props"]["interactive"], False)
 
-        browser_javascript = [dependency["js"] for dependency in config["dependencies"] if dependency.get("js")]
-        action_javascript = [item for item in browser_javascript if item.startswith("() =>")]
+        browser_javascript = [
+            dependency["js"]
+            for dependency in config["dependencies"]
+            if dependency.get("js")
+        ]
+        action_javascript = [
+            item for item in browser_javascript if item.startswith("() =>")
+        ]
         self.assertEqual(
             action_javascript,
-            [f"() => window.roboagentChat?.{action}()" for action in self.BROWSER_ACTIONS],
+            [
+                f"() => window.roboagentChat?.{action}()"
+                for action in self.BROWSER_ACTIONS
+            ],
         )
-        self.assertTrue(any("captureCameraSnapshot" in item for item in browser_javascript))
+        self.assertTrue(
+            any("captureCameraSnapshot" in item for item in browser_javascript)
+        )
 
         for selector in (
             "#session-list",
@@ -159,7 +196,7 @@ class ChatExampleTests(unittest.TestCase):
             "waitForCameraMetadata",
             "cameraVideo.srcObject = null",
             "releaseStream",
-            "window.addEventListener(\"pagehide\"",
+            'window.addEventListener("pagehide"',
             "AudioContext",
             "ensureAudioOutput",
             "TTS_OUTPUT_GAIN = 1.8",
@@ -207,7 +244,10 @@ class ChatExampleTests(unittest.TestCase):
         self.assertNotIn("css_paths=", source)
         self.assertIn("bind_browser_action(component, method)", source)
         self.assertIn("browser_actions", source)
-        self.assertIn("window.roboagentChat?.{method}()", inspect.getsource(self.app.bind_browser_action))
+        self.assertIn(
+            "window.roboagentChat?.{method}()",
+            inspect.getsource(self.app.bind_browser_action),
+        )
         self.assertNotIn('type="messages"', source)
         self.assertNotIn("CHAT_LAYOUT_JS", source)
         self.assertIn("voice-call-button", source)
@@ -226,7 +266,9 @@ class ChatExampleTests(unittest.TestCase):
         self.assertNotIn("async def send", source)
         self.assertNotIn("container=False,\n                    scale=1,", source)
 
-    def test_example_server_uses_mounted_gradio_and_has_no_legacy_worklet_route(self) -> None:
+    def test_example_server_uses_mounted_gradio_and_has_no_legacy_worklet_route(
+        self,
+    ) -> None:
         chat_directory = Path(__file__).parents[2] / "examples" / "chat"
         source = (chat_directory / "app.py").read_text()
         certificate_script = (chat_directory / "generate_cert.sh").read_text()
@@ -256,13 +298,20 @@ class ChatExampleTests(unittest.TestCase):
 
     def test_camera_snapshot_becomes_verified_image_content(self) -> None:
         jpeg = bytes.fromhex("ffd8ffc00011080002000303011100021100031100ffd9")
-        snapshot = json.dumps({"data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(), "width": 3, "height": 2})
+        snapshot = json.dumps(
+            {
+                "data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+                "width": 3,
+                "height": 2,
+            }
+        )
         model = RecordingModel()
         state = self.app.create_page_state(Agent(model))
 
         async def check() -> None:
             async for _ in self.app.chat("what is this?", None, state, snapshot):
                 pass
+
         asyncio.run(check())
         assert model.request is not None
         contents = model.request.messages[-1].content
@@ -274,7 +323,13 @@ class ChatExampleTests(unittest.TestCase):
     def test_camera_snapshot_rejects_invalid_or_mismatched_input(self) -> None:
         self.assertIsNone(self.app._frame_from_data_url("not-json"))
         jpeg = bytes.fromhex("ffd8ffc00011080002000303011100021100031100ffd9")
-        snapshot = json.dumps({"data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(), "width": 2, "height": 2})
+        snapshot = json.dumps(
+            {
+                "data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+                "width": 2,
+                "height": 2,
+            }
+        )
         self.assertIsNone(self.app._frame_from_data_url(snapshot))
 
     def test_new_select_and_limit_conversations(self) -> None:
@@ -305,13 +360,17 @@ class ChatExampleTests(unittest.TestCase):
             agent = Agent(ScriptedModel())
             state = self.app.create_page_state(agent)
             first_id = state.active_id
-            first = [update async for update in self.app.chat("第一条会话", None, state)]
+            first = [
+                update async for update in self.app.chat("第一条会话", None, state)
+            ]
             self.assertEqual(first[-1][0][-1]["content"], "测试回复")
             self.assertEqual(self.app.active_conversation(state).title, "第一条会话")
 
             _, state, _, _, _ = self.app.create_conversation(state, agent)
             second_id = state.active_id
-            second = [update async for update in self.app.chat("第二条会话", None, state)]
+            second = [
+                update async for update in self.app.chat("第二条会话", None, state)
+            ]
             self.assertEqual(second[-1][0][-1]["content"], "测试回复")
 
             history, state, _, _, _ = self.app.select_conversation(first_id, state)

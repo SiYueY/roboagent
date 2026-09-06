@@ -10,6 +10,7 @@ from time import time
 from typing import AsyncIterator
 
 from roboagent.message import FrozenJsonObject, freeze_json_object
+from roboagent.runtime.execution import ExecutionLineage, ExecutionTree
 
 
 class EventConfigurationError(ValueError):
@@ -22,8 +23,13 @@ class EventSubscriptionConfig:
     replay_limit: int = 256
 
     def __post_init__(self) -> None:
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in (self.max_queue_size, self.replay_limit)):
-            raise EventConfigurationError("Event queue and replay limits must be positive.")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in (self.max_queue_size, self.replay_limit)
+        ):
+            raise EventConfigurationError(
+                "Event queue and replay limits must be positive."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +39,7 @@ class AgentEvent:
     type: str
     payload: FrozenJsonObject = field(default_factory=FrozenJsonObject)
     timestamp: float = field(default_factory=time)
+    lineage: ExecutionLineage | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -49,13 +56,20 @@ class AgentEvent:
         ):
             raise ValueError("Invalid AgentEvent identity.")
         object.__setattr__(self, "payload", freeze_json_object(self.payload))
+        if self.lineage is not None:
+            if not isinstance(self.lineage, ExecutionLineage):
+                raise TypeError("AgentEvent.lineage must be ExecutionLineage or None.")
+            if self.run_id != self.lineage.root_run_id:
+                raise ValueError("AgentEvent.run_id must identify the root Run.")
 
 
 _END = object()
 
 
 class EventSubscription:
-    def __init__(self, emitter: "RunEventEmitter", queue: asyncio.Queue[AgentEvent | object]) -> None:
+    def __init__(
+        self, emitter: "RunEventEmitter", queue: asyncio.Queue[AgentEvent | object]
+    ) -> None:
         self._emitter = emitter
         self._queue = queue
         self._closed = False
@@ -83,20 +97,47 @@ class EventSubscription:
 class RunEventEmitter:
     TERMINAL = frozenset({"run.completed", "run.failed", "run.cancelled"})
 
-    def __init__(self, run_id: str, config: EventSubscriptionConfig | None = None) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        config: EventSubscriptionConfig | None = None,
+        *,
+        execution_tree: ExecutionTree | None = None,
+        lineage: ExecutionLineage | None = None,
+    ) -> None:
         self.run_id = run_id
         self.config = config or EventSubscriptionConfig()
         self._sequence = 0
+        self._execution_tree = execution_tree
+        self._lineage = lineage
         self._history: deque[AgentEvent] = deque()
-        self._subscriptions: dict[EventSubscription, asyncio.Queue[AgentEvent | object]] = {}
+        self._subscriptions: dict[
+            EventSubscription, asyncio.Queue[AgentEvent | object]
+        ] = {}
         self._terminal = False
         self.dropped_events = 0
 
-    async def emit(self, event_type: str, **payload: object) -> AgentEvent:
+    async def emit(
+        self,
+        event_type: str,
+        *,
+        lineage: ExecutionLineage | None = None,
+        **payload: object,
+    ) -> AgentEvent:
         if self._terminal:
             raise RuntimeError("Cannot emit after the terminal Run event.")
-        event = AgentEvent(self.run_id, self._sequence, event_type, freeze_json_object(payload))
-        self._sequence += 1
+        if self._execution_tree is None:
+            sequence = self._sequence
+            self._sequence += 1
+        else:
+            sequence = self._execution_tree.event_sequences.next()
+        event = AgentEvent(
+            self.run_id,
+            sequence,
+            event_type,
+            freeze_json_object(payload),
+            lineage=lineage or self._lineage,
+        )
         self._retain(event)
         terminal = event_type in self.TERMINAL
         for queue in tuple(self._subscriptions.values()):
@@ -107,9 +148,13 @@ class RunEventEmitter:
                 self._enqueue_end(queue)
         return event
 
-    def subscribe(self, config: EventSubscriptionConfig | None = None) -> EventSubscription:
+    def subscribe(
+        self, config: EventSubscriptionConfig | None = None
+    ) -> EventSubscription:
         options = config or self.config
-        queue: asyncio.Queue[AgentEvent | object] = asyncio.Queue(options.max_queue_size + 1)
+        queue: asyncio.Queue[AgentEvent | object] = asyncio.Queue(
+            options.max_queue_size + 1
+        )
         retained = tuple(self._history)[-options.replay_limit :]
         subscription = EventSubscription(self, queue)
         for event in retained:
@@ -126,16 +171,35 @@ class RunEventEmitter:
 
     def _retain(self, event: AgentEvent) -> None:
         if len(self._history) >= self.config.replay_limit:
-            index = next((i for i, old in enumerate(self._history) if old.type not in self.TERMINAL), 0)
+            index = next(
+                (
+                    i
+                    for i, old in enumerate(self._history)
+                    if old.type not in self.TERMINAL
+                ),
+                0,
+            )
             del self._history[index]
         self._history.append(event)
 
-    def _enqueue(self, queue: asyncio.Queue[AgentEvent | object], event: AgentEvent, terminal: bool) -> None:
+    def _enqueue(
+        self,
+        queue: asyncio.Queue[AgentEvent | object],
+        event: AgentEvent,
+        terminal: bool,
+    ) -> None:
         while queue.qsize() >= queue.maxsize - 1:
             items: list[AgentEvent | object] = []
             while not queue.empty():
                 items.append(queue.get_nowait())
-            index = next((i for i, item in enumerate(items) if isinstance(item, AgentEvent) and item.type not in self.TERMINAL), 0)
+            index = next(
+                (
+                    i
+                    for i, item in enumerate(items)
+                    if isinstance(item, AgentEvent) and item.type not in self.TERMINAL
+                ),
+                0,
+            )
             if items:
                 items.pop(index)
                 self.dropped_events += 1

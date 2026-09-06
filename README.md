@@ -1,9 +1,10 @@
-# RoboAgent 1.2
+# RoboAgent 1.3
 
 RoboAgent is a provider-neutral Python runtime for multimodal, tool-calling
-agents. Version 1.2 extends the canonical V1.1 Runtime Kernel with bounded
-context compaction, durable Sessions, artifact materialization, MCP adaptation,
-and approval without introducing a parallel runtime.
+agents. Version 1.3 extends the same canonical Runtime with nested execution,
+Agent-as-Tool, a transactional `apply_patch` builtin, and a process-isolated
+coding reference harness. It does not introduce a second Agent, Session, Run,
+Loop, Model, Tool, policy, approval, event, or effect runtime.
 
 ## Explicit composition
 
@@ -45,4 +46,26 @@ Messages support text, image, audio, and file content. Model adapters declare
 their capabilities and reject unsupported inputs before issuing a request.
 
 Runnable integrations live in [examples](examples/README.md). The normative
-runtime contract is [docs/roboagent_v1.2.md](docs/roboagent_v1.2.md).
+runtime contract is [docs/roboagent_v1.3.md](docs/roboagent_v1.3.md).
+
+## Coding reference agent
+
+Install the terminal dependency and run one task against a workspace:
+
+```bash
+uv sync --extra coding
+uv run python -m examples.coding --workspace . "Inspect the repository and explain the test path."
+```
+
+Interactive mode supports `/steer TEXT`, `/follow-up TEXT`, `/cancel`, and
+`/quit`. Filesystem, shell, and `apply_patch` calls remain canonical RoboAgent
+Tools and pass through policy and approval. Python code runs in a separate
+worker and can invoke those Tools only through IPC and nested Tool execution.
+
+Restricted mode is the default and is a capability boundary for ordinary
+model-generated code, not a hostile-code sandbox. `--unsafe-python` enables
+trusted execution and prints a prominent warning; trusted execution is always
+side-effecting and retry-unsafe.
+
+See [examples/coding/README.md](examples/coding/README.md) for configuration,
+evaluation, attribution, and safety details.

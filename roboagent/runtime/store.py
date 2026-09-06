@@ -10,6 +10,7 @@ from typing import Protocol
 from roboagent.message import thaw_json
 
 from .event import AgentEvent
+from .execution import ExecutionLineage
 
 
 class EventStore(Protocol):
@@ -28,6 +29,18 @@ class EventCodec:
                 "type": event.type,
                 "payload": thaw_json(event.payload),
                 "timestamp": event.timestamp,
+                "lineage": None
+                if event.lineage is None
+                else {
+                    "root_run_id": event.lineage.root_run_id,
+                    "execution_run_id": event.lineage.execution_run_id,
+                    "scope_id": event.lineage.scope_id,
+                    "parent_scope_id": event.lineage.parent_scope_id,
+                    "scope_depth": event.lineage.scope_depth,
+                    "agent_depth": event.lineage.agent_depth,
+                    "tool_call_id": event.lineage.tool_call_id,
+                    "agent_tool_name": event.lineage.agent_tool_name,
+                },
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -38,6 +51,9 @@ class EventCodec:
         raw = json.loads(line)
         if not isinstance(raw, dict):
             raise ValueError("Event record must be an object.")
+        lineage = raw.get("lineage")
+        if isinstance(lineage, dict):
+            raw["lineage"] = ExecutionLineage(**lineage)
         return AgentEvent(**raw)
 
 

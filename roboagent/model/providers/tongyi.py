@@ -14,7 +14,9 @@ from roboagent.model.providers.base import BaseModelConfig, merge_model_settings
 class TongyiParams(BaseModel):
     """Provider-specific runtime parameters for Tongyi-backed models."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, populate_by_name=True
+    )
 
     model: str = Field(description="Qwen model identifier, for example `qwen-max`.")
     api_key: str | None = Field(
@@ -22,12 +24,29 @@ class TongyiParams(BaseModel):
         alias="dashscope_api_key",
         description="DashScope API key. Falls back to `DASHSCOPE_API_KEY` when omitted.",
     )
-    temperature: float | None = Field(default=None, description="Sampling temperature override.")
-    top_p: float | None = Field(default=None, description="Nucleus sampling probability mass.")
-    max_retries: int | None = Field(default=None, description="Maximum request retry attempts.")
-    request_timeout: float | None = Field(default=None, description="Client request timeout in seconds.")
-    base_url: str | None = Field(default=None, description="OpenAI-compatible endpoint override.")
-    model_kwargs: dict[str, Any] = Field(default_factory=dict, description="Extra keyword arguments forwarded to the model.")
+    temperature: float | None = Field(
+        default=None, description="Sampling temperature override."
+    )
+    top_p: float | None = Field(
+        default=None, description="Nucleus sampling probability mass."
+    )
+    max_retries: int | None = Field(
+        default=None, description="Maximum request retry attempts."
+    )
+    request_timeout: float | None = Field(
+        default=None, description="Client request timeout in seconds."
+    )
+    base_url: str | None = Field(
+        default=None, description="OpenAI-compatible endpoint override."
+    )
+    model_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra keyword arguments forwarded to the model.",
+    )
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional DashScope request fields such as enable_thinking.",
+    )
 
     @field_validator("model")
     @classmethod
@@ -55,7 +74,9 @@ class TongyiModelConfig(BaseModelConfig):
     params: TongyiParams = Field(description="Tongyi runtime parameter set.")
 
 
-def create_tongyi_model(config: TongyiModelConfig, **overrides: Any) -> OpenAICompatibleModel:
+def create_tongyi_model(
+    config: TongyiModelConfig, **overrides: Any
+) -> OpenAICompatibleModel:
     """Create a Tongyi OpenAI-compatible model from validated configuration.
 
     Args:
@@ -72,7 +93,9 @@ def create_tongyi_model(config: TongyiModelConfig, **overrides: Any) -> OpenAICo
     settings = merge_model_settings(base_settings, overrides)
     settings["model_name"] = settings.pop("model")
     settings["api_key"] = settings.get("api_key") or os.getenv("DASHSCOPE_API_KEY")
-    settings["base_url"] = settings.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    settings["base_url"] = (
+        settings.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
     return OpenAICompatibleModel(**settings)
 
 

@@ -2579,7 +2579,7 @@ wheels = [
 
 [[package]]
 name = "roboagent"
-version = "1.2.0"
+version = "1.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "jsonschema" },
@@ -2590,6 +2590,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+coding = [
+    { name = "rich" },
+]
 gradio = [
     { name = "gradio" },
 ]
@@ -2633,10 +2636,11 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pywebrtc-audio", marker = "extra == 'speech-webrtc'", specifier = ">=0.1.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "rich", marker = "extra == 'coding'", specifier = ">=13" },
     { name = "soxr", marker = "extra == 'speech'", specifier = ">=0.5" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'speech'", specifier = ">=0.30" },
 ]
-provides-extras = ["gradio", "speech", "speech-webrtc", "speech-alsa"]
+provides-extras = ["coding", "gradio", "speech", "speech-webrtc", "speech-alsa"]
 
 [package.metadata.requires-dev]
 dev = [

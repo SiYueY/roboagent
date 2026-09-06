@@ -18,9 +18,9 @@ jobs:
       - name: Install Python
         run: uv python install 3.12
       - name: Sync dependencies
-        run: uv sync --locked --dev
+        run: uv sync --locked --dev --extra coding
       - name: Lint
-        run: uv run ruff check roboagent tests
+        run: uv run ruff check roboagent tests examples/coding
       - name: Typecheck runtime foundations
         run: uv run mypy
       - name: Test

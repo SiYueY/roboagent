@@ -3,15 +3,43 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from roboagent.agent.hooks import HookDecision, ModelHookContext
 from roboagent.agent.types import RunConfig
-from roboagent.context import ContextRequest, ContextSnapshot, ContextSummary, ModelContext, PreparedContext, SummarySegment
+from roboagent.context import (
+    ContextRequest,
+    ContextSnapshot,
+    ContextSummary,
+    ModelContext,
+    PreparedContext,
+    SummarySegment,
+)
 from roboagent.message import AssistantMessage
-from roboagent.model import Model, ModelError, ModelResponse, ModelSettings, TextDelta, Usage, collect_model_stream
+from roboagent.model import (
+    Model,
+    ModelError,
+    ModelProviderError,
+    ModelResponse,
+    ModelSettings,
+    TextDelta,
+    ToolCallArgumentsDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
+    Usage,
+    UsageUpdated,
+    collect_model_stream,
+)
 from roboagent.runtime.event import RunEventEmitter
+from roboagent.runtime.execution import (
+    ExecutionContribution,
+    RuntimeRunExecutionContext,
+    RuntimeToolExecutionContext,
+    UsageContribution,
+    UsageKnowledge,
+)
 from roboagent.runtime.types import RunContext, RunError, RunPhase, ToolCallSummary
 from roboagent.tool import (
     ToolBatchAborted,
@@ -59,6 +87,15 @@ class LoopOutcome:
 
 HookInvoker = Callable[..., Awaitable[tuple[object, ...]]]
 StateUpdater = Callable[..., None]
+_PUBLIC_PROVIDER_ERROR_CODES = frozenset(
+    {
+        "provider_authentication_error",
+        "provider_connection_error",
+        "provider_http_error",
+        "provider_rate_limit",
+        "provider_timeout",
+    }
+)
 
 
 async def run_loop(
@@ -90,7 +127,9 @@ async def run_loop(
     except RunCancelled:
         raise
     except asyncio.CancelledError as exc:
-        raise RunCancelled(tuple(progress.effects), progress.output, progress.usage, progress.turns) from exc
+        raise RunCancelled(
+            tuple(progress.effects), progress.output, progress.usage, progress.turns
+        ) from exc
 
 
 @dataclass(slots=True)
@@ -125,7 +164,9 @@ async def _run_loop_impl(
         update_state(RunPhase.PREPARING_CONTEXT, turn)
         try:
             while True:
-                transcript, current_compaction = await session.capture_context_state(run_context.run_id)
+                transcript, current_compaction = await session.capture_context_state(
+                    run_context.run_id
+                )
                 request = ContextRequest(
                     snapshot=ContextSnapshot(
                         session_id=session.session_id,
@@ -138,36 +179,61 @@ async def _run_loop_impl(
                     model_capabilities=agent.model.capabilities,
                     current_compaction=current_compaction,
                 )
-                prepared = await agent.context_manager.prepare(request, run_context.cancellation)
+                prepared = await agent.context_manager.prepare(
+                    request, run_context.cancellation
+                )
                 if not isinstance(prepared, PreparedContext):
                     raise TypeError("ContextManager must return PreparedContext.")
                 _validate_prepared_summary(prepared, current_compaction)
                 usage = _merge_usage(usage, prepared.usage_delta)
                 progress.usage = usage
+                if prepared.usage_delta is not None:
+                    _contribute_usage(
+                        run_context,
+                        UsageContribution(UsageKnowledge.KNOWN, prepared.usage_delta),
+                    )
                 if prepared.compaction_update is None:
                     break
-                if await session.commit_compaction(run_context.run_id, prepared.compaction_update):
+                if await session.commit_compaction(
+                    run_context.run_id, prepared.compaction_update
+                ):
                     summary = prepared.compaction_update.summary
-                    payload: dict[str, object] = {"outcome": "cleared" if summary is None else "updated"}
+                    payload: dict[str, object] = {
+                        "outcome": "cleared" if summary is None else "updated"
+                    }
                     if summary is not None:
                         payload.update(
                             source_end_exclusive=summary.source_end_exclusive,
                             source_digest=summary.source_digest,
                             summary_format_version=summary.summary_format_version,
                         )
-                    await events.emit("context.compaction_completed", **payload)
+                    await events.emit("context.compaction_completed", **payload)  # type: ignore[arg-type]
                     break
             model_context = prepared.model_context
             if not isinstance(model_context, ModelContext):
                 raise TypeError("PreparedContext must contain ModelContext.")
+            if model_context.recent_tail_complete is not prepared.recent_tail_complete:
+                model_context = replace(
+                    model_context,
+                    recent_tail_complete=prepared.recent_tail_complete,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if getattr(exc, "code", None) == "context_compaction_error":
-                await events.emit("context.compaction_failed", error_code="context_compaction_error")
+                await events.emit(
+                    "context.compaction_failed", error_code="context_compaction_error"
+                )
             raise _RunFailure(
-                RunError(getattr(exc, "code", "context_error"), "Context preparation failed.", cause_type=type(exc).__name__),
-                tuple(effects), output, usage, turn,
+                RunError(
+                    getattr(exc, "code", "context_error"),
+                    "Context preparation failed.",
+                    cause_type=type(exc).__name__,
+                ),
+                tuple(effects),
+                output,
+                usage,
+                turn,
             ) from exc
         hook_context = ModelHookContext(run_context, model_context)
         try:
@@ -177,17 +243,62 @@ async def _run_loop_impl(
             raise _RunFailure(exc.error, tuple(effects), output, usage, turn) from exc
         if any(not isinstance(decision, HookDecision) for decision in decisions):
             await events.emit("model.failed", turn=turn, error_code="hook_error")
-            raise _RunFailure(RunError("hook_error", "before_model hook returned an invalid decision."), tuple(effects), output, usage, turn)
+            raise _RunFailure(
+                RunError(
+                    "hook_error", "before_model hook returned an invalid decision."
+                ),
+                tuple(effects),
+                output,
+                usage,
+                turn,
+            )
         if any(decision is HookDecision.FAIL_RUN for decision in decisions):
             await events.emit("model.failed", turn=turn, error_code="hook_error")
-            raise _RunFailure(RunError("hook_error", "before_model hook failed the Run."), tuple(effects), output, usage, turn)
+            raise _RunFailure(
+                RunError("hook_error", "before_model hook failed the Run."),
+                tuple(effects),
+                output,
+                usage,
+                turn,
+            )
         run_context.cancellation.raise_if_cancelled()
         update_state(RunPhase.MODEL, turn)
         await events.emit("model.started", turn=turn)
+        observed_usage: Usage | None = None
         try:
+
             async def observe_model(event: object, observed_turn: int = turn) -> None:
+                nonlocal observed_usage
                 if isinstance(event, TextDelta):
-                    await events.emit("model.delta", turn=observed_turn, text=event.text)
+                    await events.emit(
+                        "model.delta", turn=observed_turn, text=event.text
+                    )
+                elif isinstance(event, ToolCallStarted):
+                    await events.emit(
+                        "model.tool_call_started",
+                        turn=observed_turn,
+                        call_index=event.call_index,
+                        tool_call_id=event.call_id,
+                        tool_name=event.name,
+                    )
+                elif isinstance(event, ToolCallArgumentsDelta):
+                    await events.emit(
+                        "model.tool_call_arguments_delta",
+                        turn=observed_turn,
+                        call_index=event.call_index,
+                        tool_call_id=event.call_id,
+                        delta=event.delta,
+                    )
+                elif isinstance(event, ToolCallCompleted):
+                    await events.emit(
+                        "model.tool_call_completed",
+                        turn=observed_turn,
+                        call_index=event.call_index,
+                        tool_call_id=event.call.id,
+                        tool_name=event.call.name,
+                    )
+                elif isinstance(event, UsageUpdated):
+                    observed_usage = event.usage
 
             response = await _collect_cancellable(
                 agent.model,
@@ -197,22 +308,82 @@ async def _run_loop_impl(
                 run_context,
             )
         except asyncio.CancelledError:
+            _contribute_usage(
+                run_context,
+                UsageContribution(
+                    UsageKnowledge.KNOWN
+                    if observed_usage is not None
+                    else UsageKnowledge.UNKNOWN,
+                    observed_usage,
+                ),
+            )
             await events.emit("model.cancelled", turn=turn)
             raise
         except ModelError as exc:
-            await events.emit("model.failed", turn=turn, error_code=getattr(exc, "code", "model_error"))
+            _contribute_usage(
+                run_context,
+                UsageContribution(
+                    UsageKnowledge.KNOWN
+                    if observed_usage is not None
+                    else UsageKnowledge.UNKNOWN,
+                    observed_usage,
+                ),
+            )
+            await events.emit(
+                "model.failed",
+                turn=turn,
+                error_code=getattr(exc, "code", "model_error"),
+            )
+            message = (
+                str(exc)
+                if isinstance(exc, ModelProviderError)
+                and exc.code in _PUBLIC_PROVIDER_ERROR_CODES
+                else "Model invocation failed."
+            )
             raise _RunFailure(
-                RunError(getattr(exc, "code", "model_error"), "Model invocation failed.", cause_type=type(exc).__name__),
-                tuple(effects), output, usage, turn,
+                RunError(
+                    getattr(exc, "code", "model_error"),
+                    message,
+                    cause_type=type(exc).__name__,
+                ),
+                tuple(effects),
+                output,
+                usage,
+                turn,
             ) from exc
         except Exception as exc:
+            _contribute_usage(
+                run_context,
+                UsageContribution(
+                    UsageKnowledge.KNOWN
+                    if observed_usage is not None
+                    else UsageKnowledge.UNKNOWN,
+                    observed_usage,
+                ),
+            )
             await events.emit("model.failed", turn=turn, error_code="model_error")
             raise _RunFailure(
-                RunError("model_error", "Model invocation failed.", cause_type=type(exc).__name__),
-                tuple(effects), output, usage, turn,
+                RunError(
+                    "model_error",
+                    "Model invocation failed.",
+                    cause_type=type(exc).__name__,
+                ),
+                tuple(effects),
+                output,
+                usage,
+                turn,
             ) from exc
         usage = _merge_usage(usage, response.usage)
         progress.usage = usage
+        _contribute_usage(
+            run_context,
+            UsageContribution(
+                UsageKnowledge.KNOWN
+                if response.usage is not None
+                else UsageKnowledge.UNKNOWN,
+                response.usage,
+            ),
+        )
         await events.emit("model.completed", turn=turn)
         run_context.cancellation.raise_if_cancelled()
         try:
@@ -231,12 +402,25 @@ async def _run_loop_impl(
         update_state(
             RunPhase.TOOL,
             turn,
-            pending_tool_calls=tuple(ToolCallSummary(call.id, call.name) for call in response.message.tool_calls),
+            pending_tool_calls=tuple(
+                ToolCallSummary(call.id, call.name)
+                for call in response.message.tool_calls
+            ),
         )
         try:
+            assert isinstance(run_context.execution, RuntimeRunExecutionContext)
             batch = await tool_executor.execute(
                 response.message.tool_calls,
-                ToolContext(run_context.run_id, run_context.session_id, run_context.cancellation),
+                ToolContext(
+                    run_context.run_id,
+                    run_context.session_id,
+                    run_context.cancellation,
+                    RuntimeToolExecutionContext(
+                        run_context.execution._scope,
+                        tool_executor,
+                        run_context.session_id,
+                    ),
+                ),
             )
         except ToolBatchCancelled as exc:
             effects.extend(exc.effects)
@@ -251,14 +435,28 @@ async def _run_loop_impl(
             raise
         messages = tuple(result_message(result) for result in batch.results)
         try:
-            await session.commit_exchange(run_context.run_id, response.message, messages)
+            await session.commit_exchange(
+                run_context.run_id, response.message, messages
+            )
         except Exception as exc:
             from roboagent.agent.persistence import SessionPersistenceError
 
             if isinstance(exc, SessionPersistenceError):
                 effects.extend(committed_effects(batch.effects))
+                assert isinstance(run_context.execution, RuntimeRunExecutionContext)
+                if (
+                    run_context.execution.lineage.execution_run_id
+                    == run_context.execution.lineage.root_run_id
+                ):
+                    run_context.execution._scope._tree.mark_tool_calls_committed(
+                        tuple(call.id for call in response.message.tool_calls)
+                    )
                 raise _RunFailure(
-                    RunError("session_persistence_error", "Session persistence failed.", cause_type=type(exc).__name__),
+                    RunError(
+                        "session_persistence_error",
+                        "Session persistence failed.",
+                        cause_type=type(exc).__name__,
+                    ),
                     tuple(effects),
                     output,
                     usage,
@@ -266,7 +464,11 @@ async def _run_loop_impl(
                 ) from exc
             effects.extend(batch.effects)
             raise _RunFailure(
-                RunError("transcript_commit_error", "Tool exchange commit failed.", cause_type=type(exc).__name__),
+                RunError(
+                    "transcript_commit_error",
+                    "Tool exchange commit failed.",
+                    cause_type=type(exc).__name__,
+                ),
                 tuple(effects),
                 output,
                 usage,
@@ -274,6 +476,13 @@ async def _run_loop_impl(
             ) from exc
         final_effects = committed_effects(batch.effects)
         effects.extend(final_effects)
+        if (
+            run_context.execution.lineage.execution_run_id
+            == run_context.execution.lineage.root_run_id
+        ):
+            run_context.execution._scope._tree.mark_tool_calls_committed(
+                tuple(call.id for call in response.message.tool_calls)
+            )
         await events.emit(
             "tool_batch.committed",
             turn=turn,
@@ -300,9 +509,13 @@ class _RunFailure(Exception):
         super().__init__(error.message)
 
 
-def _validate_prepared_summary(prepared: PreparedContext, current_compaction: ContextSummary | None) -> None:
+def _validate_prepared_summary(
+    prepared: PreparedContext, current_compaction: ContextSummary | None
+) -> None:
     summaries = tuple(
-        segment for segment in prepared.model_context.segments if isinstance(segment, SummarySegment)
+        segment
+        for segment in prepared.model_context.segments
+        if isinstance(segment, SummarySegment)
     )
     update = prepared.compaction_update
     expected = update.summary if update is not None else current_compaction
@@ -310,8 +523,12 @@ def _validate_prepared_summary(prepared: PreparedContext, current_compaction: Co
         if summaries:
             raise TypeError("ModelContext cannot use an uncommitted SummarySegment.")
         return
-    if len(summaries) > 1 or (summaries and summaries[0].text != getattr(expected, "text", None)):
-        raise TypeError("ModelContext SummarySegment does not match Session compaction state.")
+    if len(summaries) > 1 or (
+        summaries and summaries[0].text != getattr(expected, "text", None)
+    ):
+        raise TypeError(
+            "ModelContext SummarySegment does not match Session compaction state."
+        )
 
 
 def _merge_usage(current: Usage | None, latest: Usage | None) -> Usage | None:
@@ -337,10 +554,14 @@ async def _collect_cancellable(
     observer: Callable[[object], Awaitable[None]],
     run_context: RunContext,
 ) -> ModelResponse:
-    task = asyncio.create_task(collect_model_stream(model, model_context, settings, observer))
+    task = asyncio.create_task(
+        collect_model_stream(model, model_context, settings, observer)
+    )
     cancelled = asyncio.create_task(run_context.cancellation.wait_cancelled())
     try:
-        done, _ = await asyncio.wait({task, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(
+            {task, cancelled}, return_when=asyncio.FIRST_COMPLETED
+        )
         if cancelled in done:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -349,3 +570,11 @@ async def _collect_cancellable(
     finally:
         cancelled.cancel()
         await asyncio.gather(cancelled, return_exceptions=True)
+
+
+def _contribute_usage(context: RunContext, usage: UsageContribution) -> None:
+    execution = context.execution
+    if not isinstance(execution, RuntimeRunExecutionContext):
+        return
+    scope = execution._scope
+    scope.contribute(ExecutionContribution(scope.next_contribution_id(), usage=usage))

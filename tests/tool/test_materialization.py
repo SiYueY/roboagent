@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
-from roboagent.message import ArtifactReferenceContent, FrozenJsonObject, JsonContent, TextContent, ToolCall
+from roboagent.message import (
+    ArtifactReferenceContent,
+    FrozenJsonObject,
+    JsonContent,
+    TextContent,
+    ToolCall,
+)
 from roboagent.runtime import RuntimeCancellation
 from roboagent.tool import (
     BinaryToolContent,
@@ -27,6 +34,7 @@ from roboagent.tool import (
     WorkspacePermissionError,
     WorkspaceError,
     WorkspaceArtifactMissingError,
+    WorkspaceArtifactDestination,
     WorkspaceToolResultMaterializer,
     read_artifact,
     result_message,
@@ -48,12 +56,28 @@ def _definition() -> ToolDefinition:
 
 def test_raw_multi_content_order_survives_inline_materialization() -> None:
     async def check() -> None:
-        raw = RawToolResult((ToolTextContent("one"), ToolJsonContent({"two": 2}), ToolTextContent("three")))
+        raw = RawToolResult(
+            (
+                ToolTextContent("one"),
+                ToolJsonContent({"two": 2}),
+                ToolTextContent("three"),
+            )
+        )
         tool = Tool(_definition(), lambda arguments, context: raw)
-        batch = await ToolExecutor(registry=ToolRegistry((tool,))).execute((_call(),), _context())
-        assert batch.results[0].content == (ToolTextContent("one"), ToolJsonContent({"two": 2}), ToolTextContent("three"))
+        batch = await ToolExecutor(registry=ToolRegistry((tool,))).execute(
+            (_call(),), _context()
+        )
+        assert batch.results[0].content == (
+            ToolTextContent("one"),
+            ToolJsonContent({"two": 2}),
+            ToolTextContent("three"),
+        )
         message = result_message(batch.results[0])
-        assert message.content == (TextContent("one"), JsonContent({"two": 2}), TextContent("three"))
+        assert message.content == (
+            TextContent("one"),
+            JsonContent({"two": 2}),
+            TextContent("three"),
+        )
 
     asyncio.run(check())
 
@@ -63,7 +87,9 @@ def test_transport_scoped_resource_without_bytes_fails_explicitly() -> None:
         raw = RawToolResult((ResourceToolContent("mcp://temporary/resource"),))
         tool = Tool(_definition(), lambda arguments, context: raw)
         with pytest.raises(ToolBatchAborted) as caught:
-            await ToolExecutor(registry=ToolRegistry((tool,))).execute((_call(),), _context())
+            await ToolExecutor(registry=ToolRegistry((tool,))).execute(
+                (_call(),), _context()
+            )
         assert caught.value.reason.code == "workspace_artifact_missing"
         assert caught.value.effects[0].status is ToolEffectStatus.SUCCEEDED
 
@@ -75,7 +101,9 @@ def test_workspace_metadata_mismatch_fails_after_preserving_physical_success() -
         class InconsistentWorkspace(InMemoryWorkspace):
             async def write(self, path, data, *, media_type=None):
                 entry = await super().write(path, data, media_type=media_type)
-                return type(entry)(entry.path, entry.size + 1, entry.media_type, entry.digest)
+                return type(entry)(
+                    entry.path, entry.size + 1, entry.media_type, entry.digest
+                )
 
         workspace = InconsistentWorkspace()
         materializer = WorkspaceToolResultMaterializer(
@@ -107,11 +135,19 @@ def test_large_and_binary_blocks_materialize_once_in_original_order() -> None:
             workspace=workspace,
             limits=ToolOutputLimits(max_raw_bytes=1000, max_inline_bytes=4),
         )
-        raw = RawToolResult((ToolTextContent("large text"), BinaryToolContent(b"png", "image/png")))
-        content = await materializer.materialize(raw, call=_call(), context=_context(), cancellation=_context().cancellation)
+        raw = RawToolResult(
+            (ToolTextContent("large text"), BinaryToolContent(b"png", "image/png"))
+        )
+        content = await materializer.materialize(
+            raw, call=_call(), context=_context(), cancellation=_context().cancellation
+        )
         assert workspace.writes == 2
-        assert len(content) == 2 and all(isinstance(item, ArtifactReferenceContent) for item in content)
-        assert content[0].preview == "large text" and content[1].media_type == "image/png"
+        assert len(content) == 2 and all(
+            isinstance(item, ArtifactReferenceContent) for item in content
+        )
+        assert (
+            content[0].preview == "large text" and content[1].media_type == "image/png"
+        )
 
     asyncio.run(check())
 
@@ -123,15 +159,19 @@ def test_materialization_failure_preserves_succeeded_physical_effect() -> None:
                 raise OSError("disk full")
 
         raw = RawToolResult((ToolTextContent("large result"),))
-        tool = Tool(_definition(), lambda arguments, context: raw, effect_kind=ToolEffectKind.SIDE_EFFECTING)
+        tool = Tool(
+            _definition(),
+            lambda arguments, context: raw,
+            effect_kind=ToolEffectKind.SIDE_EFFECTING,
+        )
         materializer = WorkspaceToolResultMaterializer(
             workspace=BrokenWorkspace(),
             limits=ToolOutputLimits(max_raw_bytes=1000, max_inline_bytes=2),
         )
         with pytest.raises(ToolBatchAborted) as caught:
-            await ToolExecutor(registry=ToolRegistry((tool,)), result_materializer=materializer).execute(
-                (_call(),), _context()
-            )
+            await ToolExecutor(
+                registry=ToolRegistry((tool,)), result_materializer=materializer
+            ).execute((_call(),), _context())
         effect = caught.value.effects[0]
         assert caught.value.reason.code == "tool_materialization_error"
         assert effect.status is ToolEffectStatus.SUCCEEDED
@@ -153,9 +193,9 @@ def test_output_over_raw_limit_has_same_effect_truth() -> None:
             limits=ToolOutputLimits(max_raw_bytes=3, max_inline_bytes=2),
         )
         with pytest.raises(ToolBatchAborted) as caught:
-            await ToolExecutor(registry=ToolRegistry((tool,)), result_materializer=materializer).execute(
-                (_call(),), _context()
-            )
+            await ToolExecutor(
+                registry=ToolRegistry((tool,)), result_materializer=materializer
+            ).execute((_call(),), _context())
         assert caught.value.reason.code == "tool_output_too_large"
         assert caught.value.effects[0].status is ToolEffectStatus.SUCCEEDED
 
@@ -230,5 +270,50 @@ def test_local_artifact_is_durable_immutable_and_integrity_checked(tmp_path) -> 
         with pytest.raises(WorkspaceArtifactMissingError) as caught:
             await read_artifact(reopened, missing)
         assert caught.value.code == "workspace_artifact_missing"
+
+    asyncio.run(check())
+
+
+def test_streaming_artifact_destination_is_atomic_and_rejects_corruption(
+    tmp_path,
+) -> None:
+    async def check() -> None:
+        workspace = LocalWorkspace(tmp_path / "workspace")
+        destination = WorkspaceArtifactDestination(workspace)
+        writer = await destination.create_temp(media_type="text/plain")
+        await writer.write(b"stream")
+        await writer.write(b"ed")
+        artifact = await writer.publish()
+        assert await read_artifact(workspace, artifact) == b"streamed"
+
+        duplicate = await destination.create_temp(media_type="text/plain")
+        await duplicate.write(b"streamed")
+        assert await duplicate.publish() == artifact
+
+        corrupt = await destination.create_temp(media_type=None)
+        await corrupt.write(b"expected")
+        digest = hashlib.sha256(b"expected").hexdigest()
+        target = workspace.root / "blobs" / "sha256" / digest
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"corrupt")
+        with pytest.raises(WorkspaceError, match="corrupted"):
+            await corrupt.publish()
+        await corrupt.abort()
+
+    asyncio.run(check())
+
+
+def test_streaming_artifact_destination_rejects_workspace_symlink_escape(
+    tmp_path,
+) -> None:
+    async def check() -> None:
+        workspace = LocalWorkspace(tmp_path / "workspace")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (workspace.root / "blobs").symlink_to(outside, target_is_directory=True)
+        destination = WorkspaceArtifactDestination(workspace)
+        with pytest.raises(WorkspacePermissionError):
+            await destination.create_temp(media_type=None)
+        assert not tuple(outside.iterdir())
 
     asyncio.run(check())

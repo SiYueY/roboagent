@@ -63,13 +63,22 @@ class ContextSnapshot:
         object.__setattr__(self, "skill_metadata", tuple(self.skill_metadata))
         if self.prompt is not None and not isinstance(self.prompt, PromptInput):
             raise TypeError("ContextSnapshot.prompt must be PromptInput or None.")
-        if not all(isinstance(item, (UserMessage, AssistantMessage, ToolResultMessage)) for item in self.transcript):
-            raise TypeError("ContextSnapshot transcript must contain canonical messages.")
+        if not all(
+            isinstance(item, (UserMessage, AssistantMessage, ToolResultMessage))
+            for item in self.transcript
+        ):
+            raise TypeError(
+                "ContextSnapshot transcript must contain canonical messages."
+            )
         _message_groups(self.transcript)
         if not all(isinstance(item, ToolDefinition) for item in self.tool_definitions):
-            raise TypeError("tool_definitions must contain canonical ToolDefinition values.")
+            raise TypeError(
+                "tool_definitions must contain canonical ToolDefinition values."
+            )
         if not all(isinstance(item, SkillMetadata) for item in self.skill_metadata):
-            raise TypeError("skill_metadata must contain canonical SkillMetadata values.")
+            raise TypeError(
+                "skill_metadata must contain canonical SkillMetadata values."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,15 +95,25 @@ class ContextSummary:
     def __post_init__(self) -> None:
         if self.source_start != 0:
             raise ValueError("Context summaries must start at the transcript prefix.")
-        if not isinstance(self.source_end_exclusive, int) or isinstance(self.source_end_exclusive, bool) or self.source_end_exclusive < 0:
+        if (
+            not isinstance(self.source_end_exclusive, int)
+            or isinstance(self.source_end_exclusive, bool)
+            or self.source_end_exclusive < 0
+        ):
             raise ValueError("source_end_exclusive must be a non-negative integer.")
         if not isinstance(self.source_digest, str) or not self.source_digest:
             raise ValueError("source_digest must be non-empty.")
         if not isinstance(self.text, str):
             raise TypeError("ContextSummary.text must be str.")
-        if not isinstance(self.summary_format_version, int) or isinstance(self.summary_format_version, bool) or self.summary_format_version < 1:
+        if (
+            not isinstance(self.summary_format_version, int)
+            or isinstance(self.summary_format_version, bool)
+            or self.summary_format_version < 1
+        ):
             raise ValueError("summary_format_version must be positive.")
-        if self.summarizer_id is not None and (not isinstance(self.summarizer_id, str) or not self.summarizer_id):
+        if self.summarizer_id is not None and (
+            not isinstance(self.summarizer_id, str) or not self.summarizer_id
+        ):
             raise ValueError("summarizer_id must be non-empty or None.")
 
 
@@ -111,9 +130,15 @@ class ContextRequest:
         if not isinstance(self.model_settings, ModelSettings):
             raise TypeError("ContextRequest.model_settings must be ModelSettings.")
         if not isinstance(self.model_capabilities, ModelCapabilities):
-            raise TypeError("ContextRequest.model_capabilities must be ModelCapabilities.")
-        if self.current_compaction is not None and not isinstance(self.current_compaction, ContextSummary):
-            raise TypeError("ContextRequest.current_compaction must be ContextSummary or None.")
+            raise TypeError(
+                "ContextRequest.model_capabilities must be ModelCapabilities."
+            )
+        if self.current_compaction is not None and not isinstance(
+            self.current_compaction, ContextSummary
+        ):
+            raise TypeError(
+                "ContextRequest.current_compaction must be ContextSummary or None."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +146,9 @@ class MessageSegment:
     message: AgentMessage
 
     def __post_init__(self) -> None:
-        if not isinstance(self.message, (UserMessage, AssistantMessage, ToolResultMessage)):
+        if not isinstance(
+            self.message, (UserMessage, AssistantMessage, ToolResultMessage)
+        ):
             raise TypeError("MessageSegment.message must be a canonical AgentMessage.")
 
 
@@ -146,10 +173,14 @@ class WorkspaceReferenceSegment:
         for name in ("preview", "media_type"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
-                raise TypeError(f"WorkspaceReferenceSegment.{name} must be str or None.")
+                raise TypeError(
+                    f"WorkspaceReferenceSegment.{name} must be str or None."
+                )
 
 
-ModelContextSegment: TypeAlias = MessageSegment | SummarySegment | WorkspaceReferenceSegment
+ModelContextSegment: TypeAlias = (
+    MessageSegment | SummarySegment | WorkspaceReferenceSegment
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,25 +188,41 @@ class ModelContext:
     system_prompt: str | None
     segments: tuple[ModelContextSegment, ...]
     tools: tuple[ToolDefinition, ...]
+    recent_tail_complete: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "segments", tuple(self.segments))
         object.__setattr__(self, "tools", tuple(self.tools))
         if self.system_prompt is not None and not isinstance(self.system_prompt, str):
             raise TypeError("ModelContext.system_prompt must be str or None.")
-        if not all(isinstance(item, (MessageSegment, SummarySegment, WorkspaceReferenceSegment)) for item in self.segments):
-            raise TypeError("ModelContext.segments must contain canonical ModelContextSegment values.")
+        if not all(
+            isinstance(
+                item, (MessageSegment, SummarySegment, WorkspaceReferenceSegment)
+            )
+            for item in self.segments
+        ):
+            raise TypeError(
+                "ModelContext.segments must contain canonical ModelContextSegment values."
+            )
         _validate_segment_exchanges(self.segments)
         if not all(isinstance(item, ToolDefinition) for item in self.tools):
-            raise TypeError("ModelContext.tools must contain canonical ToolDefinition values.")
+            raise TypeError(
+                "ModelContext.tools must contain canonical ToolDefinition values."
+            )
+        if not isinstance(self.recent_tail_complete, bool):
+            raise TypeError("ModelContext.recent_tail_complete must be bool.")
 
 
 class PromptRenderer(Protocol):
-    async def render(self, prompt: PromptInput | None, cancellation: CancellationToken) -> str | None: ...
+    async def render(
+        self, prompt: PromptInput | None, cancellation: CancellationToken
+    ) -> str | None: ...
 
 
 class DefaultPromptRenderer:
-    async def render(self, prompt: PromptInput | None, cancellation: CancellationToken) -> str | None:
+    async def render(
+        self, prompt: PromptInput | None, cancellation: CancellationToken
+    ) -> str | None:
         cancellation.raise_if_cancelled()
         if prompt is None or prompt.system is None:
             return None
@@ -203,7 +250,8 @@ class CompactionUpdate:
         if self.summary is not None and not isinstance(self.summary, ContextSummary):
             raise TypeError("CompactionUpdate.summary must be ContextSummary or None.")
         if self.expected_summary_digest is not None and (
-            not isinstance(self.expected_summary_digest, str) or not self.expected_summary_digest
+            not isinstance(self.expected_summary_digest, str)
+            or not self.expected_summary_digest
         ):
             raise ValueError("expected_summary_digest must be non-empty or None.")
 
@@ -213,25 +261,36 @@ class PreparedContext:
     model_context: ModelContext
     usage_delta: Usage
     compaction_update: CompactionUpdate | None = None
+    recent_tail_complete: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.model_context, ModelContext):
             raise TypeError("PreparedContext.model_context must be ModelContext.")
         if not isinstance(self.usage_delta, Usage):
             raise TypeError("PreparedContext.usage_delta must be Usage.")
-        if self.compaction_update is not None and not isinstance(self.compaction_update, CompactionUpdate):
-            raise TypeError("PreparedContext.compaction_update must be CompactionUpdate or None.")
+        if self.compaction_update is not None and not isinstance(
+            self.compaction_update, CompactionUpdate
+        ):
+            raise TypeError(
+                "PreparedContext.compaction_update must be CompactionUpdate or None."
+            )
+        if not isinstance(self.recent_tail_complete, bool):
+            raise TypeError("PreparedContext.recent_tail_complete must be bool.")
 
 
 class ContextManager(Protocol):
-    async def prepare(self, request: ContextRequest, cancellation: CancellationToken) -> PreparedContext: ...
+    async def prepare(
+        self, request: ContextRequest, cancellation: CancellationToken
+    ) -> PreparedContext: ...
 
 
 class FullContextManager:
     def __init__(self, renderer: PromptRenderer | None = None) -> None:
         self.renderer = renderer or DefaultPromptRenderer()
 
-    async def prepare(self, request: ContextRequest, cancellation: CancellationToken) -> PreparedContext:
+    async def prepare(
+        self, request: ContextRequest, cancellation: CancellationToken
+    ) -> PreparedContext:
         cancellation.raise_if_cancelled()
         snapshot = request.snapshot
         base = await self.renderer.render(snapshot.prompt, cancellation)
@@ -239,17 +298,23 @@ class FullContextManager:
         cancellation.raise_if_cancelled()
         _message_groups(snapshot.transcript)
         segments = _project_segments(snapshot.transcript, request.current_compaction)
-        return PreparedContext(ModelContext(prompt, segments, snapshot.tool_definitions), Usage(0, 0, 0))
+        return PreparedContext(
+            ModelContext(prompt, segments, snapshot.tool_definitions), Usage(0, 0, 0)
+        )
 
 
 class WindowContextManager(FullContextManager):
-    def __init__(self, *, max_messages: int = 64, renderer: PromptRenderer | None = None) -> None:
+    def __init__(
+        self, *, max_messages: int = 64, renderer: PromptRenderer | None = None
+    ) -> None:
         super().__init__(renderer)
         if max_messages < 1:
             raise ValueError("max_messages must be positive.")
         self.max_messages = max_messages
 
-    async def prepare(self, request: ContextRequest, cancellation: CancellationToken) -> PreparedContext:
+    async def prepare(
+        self, request: ContextRequest, cancellation: CancellationToken
+    ) -> PreparedContext:
         cancellation.raise_if_cancelled()
         snapshot = request.snapshot
         groups = _message_groups(snapshot.transcript)
@@ -258,7 +323,11 @@ class WindowContextManager(FullContextManager):
         cancellation.raise_if_cancelled()
         segments = tuple(MessageSegment(message) for message in selected)
         return PreparedContext(
-            ModelContext(_compose_prompt(base, snapshot.skill_metadata), segments, snapshot.tool_definitions),
+            ModelContext(
+                _compose_prompt(base, snapshot.skill_metadata),
+                segments,
+                snapshot.tool_definitions,
+            ),
             Usage(0, 0, 0),
         )
 
@@ -273,7 +342,10 @@ def _project_segments(
         raise ContextError("ContextSummary source range exceeds the transcript.")
     return (
         SummarySegment(summary.text),
-        *(MessageSegment(message) for message in transcript[summary.source_end_exclusive :]),
+        *(
+            MessageSegment(message)
+            for message in transcript[summary.source_end_exclusive :]
+        ),
     )
 
 
@@ -288,9 +360,20 @@ def _validate_segment_exchanges(segments: Sequence[ModelContextSegment]) -> None
         if isinstance(message, AssistantMessage) and message.tool_calls:
             count = len(message.tool_calls)
             results = segments[index + 1 : index + 1 + count]
-            if len(results) != count or not all(isinstance(item, MessageSegment) for item in results):
+            if len(results) != count or not all(
+                isinstance(item, MessageSegment) for item in results
+            ):
                 raise ContextError("A ModelContext segment split a ToolExchangeBlock.")
-            _message_groups((message, *(item.message for item in results if isinstance(item, MessageSegment))))
+            _message_groups(
+                (
+                    message,
+                    *(
+                        item.message
+                        for item in results
+                        if isinstance(item, MessageSegment)
+                    ),
+                )
+            )
             index += count + 1
         elif isinstance(message, ToolResultMessage):
             raise ContextError("Orphan ToolResultMessage in ModelContext.")
@@ -309,15 +392,27 @@ def _compose_prompt(base: str | None, skills: tuple[object, ...]) -> str:
     parts = [part for part in (base, RUNTIME_INSTRUCTIONS) if part]
     if skills:
         lines = ["## Available skills", ""]
-        ordered = sorted(skills, key=lambda item: (str(getattr(item, "name")), str(getattr(getattr(item, "source"), "value", getattr(item, "source")))))
+        ordered = sorted(
+            skills,
+            key=lambda item: (
+                str(getattr(item, "name")),
+                str(getattr(getattr(item, "source"), "value", getattr(item, "source"))),
+            ),
+        )
         for skill in ordered:
-            source = getattr(getattr(skill, "source"), "value", getattr(skill, "source"))
-            lines.append(f"- `{getattr(skill, 'name')}` [{source}]: {_normalize_description(str(getattr(skill, 'description')))}")
+            source = getattr(
+                getattr(skill, "source"), "value", getattr(skill, "source")
+            )
+            lines.append(
+                f"- `{getattr(skill, 'name')}` [{source}]: {_normalize_description(str(getattr(skill, 'description')))}"
+            )
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
 
-def _select_recent_groups(groups: Sequence[tuple[AgentMessage, ...]], max_messages: int) -> tuple[AgentMessage, ...]:
+def _select_recent_groups(
+    groups: Sequence[tuple[AgentMessage, ...]], max_messages: int
+) -> tuple[AgentMessage, ...]:
     selected: list[tuple[AgentMessage, ...]] = []
     count = 0
     for group in reversed(groups):
@@ -330,7 +425,9 @@ def _select_recent_groups(groups: Sequence[tuple[AgentMessage, ...]], max_messag
     return tuple(message for group in reversed(selected) for message in group)
 
 
-def _message_groups(messages: Sequence[AgentMessage]) -> tuple[tuple[AgentMessage, ...], ...]:
+def _message_groups(
+    messages: Sequence[AgentMessage],
+) -> tuple[tuple[AgentMessage, ...], ...]:
     groups: list[tuple[AgentMessage, ...]] = []
     index = 0
     while index < len(messages):
@@ -338,7 +435,9 @@ def _message_groups(messages: Sequence[AgentMessage]) -> tuple[tuple[AgentMessag
         if isinstance(message, AssistantMessage) and message.tool_calls:
             count = len(message.tool_calls)
             results = tuple(messages[index + 1 : index + 1 + count])
-            if len(results) != count or not all(isinstance(item, ToolResultMessage) for item in results):
+            if len(results) != count or not all(
+                isinstance(item, ToolResultMessage) for item in results
+            ):
                 raise ContextError("Incomplete ToolExchangeBlock.")
             for call, result in zip(message.tool_calls, results, strict=True):
                 assert isinstance(result, ToolResultMessage)

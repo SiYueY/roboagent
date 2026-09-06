@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import stat
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Protocol, Sequence
+from typing import BinaryIO, Protocol, Sequence
+from uuid import uuid4
 
 from roboagent.message import ArtifactReferenceContent
 
@@ -39,7 +42,11 @@ class WorkspaceEntry:
     def __post_init__(self) -> None:
         normalized = normalize_workspace_path(self.path)
         object.__setattr__(self, "path", normalized)
-        if not isinstance(self.size, int) or isinstance(self.size, bool) or self.size < 0:
+        if (
+            not isinstance(self.size, int)
+            or isinstance(self.size, bool)
+            or self.size < 0
+        ):
             raise ValueError("WorkspaceEntry.size must be non-negative.")
 
 
@@ -48,10 +55,154 @@ class Workspace(Protocol):
     def durable(self) -> bool: ...
 
     async def read(self, path: str) -> bytes: ...
-    async def write(self, path: str, data: bytes, *, media_type: str | None = None) -> WorkspaceEntry: ...
+    async def write(
+        self, path: str, data: bytes, *, media_type: str | None = None
+    ) -> WorkspaceEntry: ...
     async def stat(self, path: str) -> WorkspaceEntry: ...
     async def list(self, path: str = ".") -> Sequence[WorkspaceEntry]: ...
     async def delete(self, path: str) -> None: ...
+
+
+class ArtifactReader(Protocol):
+    def iter_bytes(
+        self, reference: ArtifactReferenceContent, *, chunk_size: int
+    ) -> AsyncIterator[bytes]: ...
+
+
+class ArtifactWriter(Protocol):
+    async def write(self, chunk: bytes) -> None: ...
+    async def publish(self) -> ArtifactReferenceContent: ...
+    async def abort(self) -> None: ...
+
+
+class ArtifactDestination(Protocol):
+    async def create_temp(self, *, media_type: str | None) -> ArtifactWriter: ...
+
+
+class WorkspaceArtifactReader:
+    def __init__(self, workspace: Workspace) -> None:
+        self.workspace = workspace
+
+    async def iter_bytes(
+        self, reference: ArtifactReferenceContent, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        if type(chunk_size) is not int or chunk_size <= 0:
+            raise ValueError("chunk_size must be positive.")
+        path = workspace_path(reference.uri)
+        if isinstance(self.workspace, LocalWorkspace):
+            target, _ = self.workspace._target(path)
+            stream = await asyncio.to_thread(_open_artifact_stream, target)
+            try:
+                while chunk := await asyncio.to_thread(stream.read, chunk_size):
+                    yield chunk
+            finally:
+                await asyncio.to_thread(stream.close)
+        else:
+            data = await self.workspace.read(path)
+            for offset in range(0, len(data), chunk_size):
+                yield data[offset : offset + chunk_size]
+
+
+class WorkspaceArtifactDestination:
+    def __init__(self, workspace: Workspace) -> None:
+        self.workspace = workspace
+
+    async def create_temp(self, *, media_type: str | None) -> ArtifactWriter:
+        return _WorkspaceArtifactWriter(self.workspace, media_type)
+
+
+class _WorkspaceArtifactWriter:
+    def __init__(self, workspace: Workspace, media_type: str | None) -> None:
+        self.workspace = workspace
+        self.media_type = media_type
+        self._data = bytearray()
+        self._digest = hashlib.sha256()
+        self._size = 0
+        self._published = False
+        self._aborted = False
+        self._temporary: Path | None = None
+        if isinstance(workspace, LocalWorkspace):
+            relative = f"blobs/tmp/artifact-{uuid4().hex}.tmp"
+            temporary, _ = workspace._target(relative, for_write=True)
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary, _ = workspace._target(relative, for_write=True)
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            os.close(descriptor)
+            self._temporary = temporary
+
+    async def write(self, chunk: bytes) -> None:
+        if type(chunk) is not bytes or self._published or self._aborted:
+            raise WorkspaceError("ArtifactWriter is not writable.")
+        self._digest.update(chunk)
+        self._size += len(chunk)
+        if self._temporary is None:
+            self._data.extend(chunk)
+        else:
+            await asyncio.to_thread(self._append, chunk)
+
+    def _append(self, chunk: bytes) -> None:
+        assert self._temporary is not None
+        descriptor = os.open(
+            self._temporary,
+            os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            view = memoryview(chunk)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+        finally:
+            os.close(descriptor)
+
+    async def publish(self) -> ArtifactReferenceContent:
+        if self._published or self._aborted:
+            raise WorkspaceError("ArtifactWriter is already settled.")
+        digest = self._digest.hexdigest()
+        path = f"blobs/sha256/{digest}"
+        if self._temporary is not None and isinstance(self.workspace, LocalWorkspace):
+            target, _ = self.workspace._target(path, for_write=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target, _ = self.workspace._target(path, for_write=True)
+            size, staged_digest = _file_identity(self._temporary)
+            if size != self._size or staged_digest != f"sha256:{digest}":
+                raise WorkspaceError("Temporary artifact integrity check failed.")
+            try:
+                os.link(self._temporary, target, follow_symlinks=False)
+            except FileExistsError:
+                size, existing_digest = _file_identity(target)
+                if size != self._size or existing_digest != f"sha256:{digest}":
+                    raise WorkspaceError(
+                        "Digest-addressed artifact is corrupted."
+                    ) from None
+            self._temporary.unlink(missing_ok=True)
+            directory = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        else:
+            entry = await self.workspace.write(
+                path, bytes(self._data), media_type=self.media_type
+            )
+            if entry.size != self._size or entry.digest != f"sha256:{digest}":
+                raise WorkspaceError(
+                    "Artifact destination returned inconsistent metadata."
+                )
+        self._published = True
+        return ArtifactReferenceContent(
+            workspace_uri(path), self.media_type, self._size, f"sha256:{digest}", None
+        )
+
+    async def abort(self) -> None:
+        if self._published:
+            return
+        self._aborted = True
+        if self._temporary is not None:
+            await asyncio.to_thread(self._temporary.unlink, missing_ok=True)
 
 
 def normalize_workspace_path(path: str, *, allow_root: bool = False) -> str:
@@ -90,7 +241,9 @@ def workspace_path(uri: str) -> str:
     return normalize_workspace_path(f"{parsed.netloc}{parsed.path}")
 
 
-async def read_artifact(workspace: Workspace, artifact: ArtifactReferenceContent) -> bytes:
+async def read_artifact(
+    workspace: Workspace, artifact: ArtifactReferenceContent
+) -> bytes:
     if not isinstance(artifact, ArtifactReferenceContent):
         raise TypeError("artifact must be ArtifactReferenceContent.")
     try:
@@ -118,12 +271,18 @@ class InMemoryWorkspace:
             except KeyError as exc:
                 raise WorkspaceMissingError(key) from exc
 
-    async def write(self, path: str, data: bytes, *, media_type: str | None = None) -> WorkspaceEntry:
+    async def write(
+        self, path: str, data: bytes, *, media_type: str | None = None
+    ) -> WorkspaceEntry:
         key = normalize_workspace_path(path)
         if type(data) is not bytes:
             raise TypeError("Workspace data must be bytes.")
         async with self._lock:
-            if key.startswith("blobs/sha256/") and key in self._items and self._items[key][0] != data:
+            if (
+                key.startswith("blobs/sha256/")
+                and key in self._items
+                and self._items[key][0] != data
+            ):
                 raise WorkspaceError("Digest-addressed blobs are immutable.")
             self._items[key] = (bytes(data), media_type)
         return _entry(key, data, media_type)
@@ -141,12 +300,18 @@ class InMemoryWorkspace:
         prefix = normalize_workspace_path(path, allow_root=True)
         prefix = "" if prefix == "." else prefix.rstrip("/") + "/"
         async with self._lock:
-            return tuple(_entry(key, data, media_type) for key, (data, media_type) in sorted(self._items.items()) if key.startswith(prefix))
+            return tuple(
+                _entry(key, data, media_type)
+                for key, (data, media_type) in sorted(self._items.items())
+                if key.startswith(prefix)
+            )
 
     async def delete(self, path: str) -> None:
         key = normalize_workspace_path(path)
         if key.startswith("blobs/sha256/"):
-            raise WorkspacePermissionError("Digest-addressed blobs cannot be deleted directly.")
+            raise WorkspacePermissionError(
+                "Digest-addressed blobs cannot be deleted directly."
+            )
         async with self._lock:
             try:
                 del self._items[key]
@@ -166,7 +331,9 @@ class LocalWorkspace:
     async def read(self, path: str) -> bytes:
         return await asyncio.to_thread(self._read, path)
 
-    async def write(self, path: str, data: bytes, *, media_type: str | None = None) -> WorkspaceEntry:
+    async def write(
+        self, path: str, data: bytes, *, media_type: str | None = None
+    ) -> WorkspaceEntry:
         if type(data) is not bytes:
             raise TypeError("Workspace data must be bytes.")
         return await asyncio.to_thread(self._write, path, data, media_type)
@@ -180,9 +347,15 @@ class LocalWorkspace:
     async def delete(self, path: str) -> None:
         await asyncio.to_thread(self._delete, path)
 
-    def _target(self, path: str, *, allow_root: bool = False, for_write: bool = False) -> tuple[Path, str]:
+    def _target(
+        self, path: str, *, allow_root: bool = False, for_write: bool = False
+    ) -> tuple[Path, str]:
         relative = normalize_workspace_path(path, allow_root=allow_root)
-        candidate = self.root if relative == "." else self.root.joinpath(*PurePosixPath(relative).parts)
+        candidate = (
+            self.root
+            if relative == "."
+            else self.root.joinpath(*PurePosixPath(relative).parts)
+        )
         check = candidate.parent.resolve() if for_write else candidate.resolve()
         if check != self.root and self.root not in check.parents:
             raise WorkspacePermissionError("Workspace path escapes through a symlink.")
@@ -208,7 +381,9 @@ class LocalWorkspace:
             if existing != data:
                 raise WorkspaceError("Digest-addressed blobs are immutable.")
             return _entry(relative, existing, media_type)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
@@ -251,7 +426,9 @@ class LocalWorkspace:
     def _delete(self, path: str) -> None:
         target, relative = self._target(path)
         if relative.startswith("blobs/sha256/"):
-            raise WorkspacePermissionError("Digest-addressed blobs cannot be deleted directly.")
+            raise WorkspacePermissionError(
+                "Digest-addressed blobs cannot be deleted directly."
+            )
         try:
             target.unlink()
         except FileNotFoundError as exc:
@@ -261,3 +438,41 @@ class LocalWorkspace:
 def _entry(path: str, data: bytes, media_type: str | None) -> WorkspaceEntry:
     digest = hashlib.sha256(data).hexdigest()
     return WorkspaceEntry(path, len(data), media_type, f"sha256:{digest}")
+
+
+def _file_identity(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise WorkspaceError("Digest-addressed artifact is not a regular file.")
+        while chunk := os.read(descriptor, 64 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    except OSError as exc:
+        raise WorkspaceError(
+            "Digest-addressed artifact could not be verified."
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return size, f"sha256:{digest.hexdigest()}"
+
+
+def _open_artifact_stream(path: Path) -> BinaryIO:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise WorkspaceError("Workspace artifact is not a regular file.")
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = None
+        return stream
+    except OSError as exc:
+        raise WorkspaceError("Workspace artifact could not be opened safely.") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
