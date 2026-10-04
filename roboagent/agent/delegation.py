@@ -107,8 +107,13 @@ async def promote_child_output(
             "child_output_materialization_failed",
             "Child output contains unsupported content.",
         )
+    # Promotion only materializes media references; it is the same assistant
+    # message, so its canonical identity must survive unchanged.
     return AssistantMessage(
-        tuple(promoted), output.tool_calls, timestamp=output.timestamp
+        tuple(promoted),
+        output.tool_calls,
+        timestamp=output.timestamp,
+        message_id=output.message_id,
     )
 
 

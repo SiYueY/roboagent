@@ -12,6 +12,8 @@ from .hooks import (
 )
 from .run import Run
 from .persistence import (
+    MIN_SUPPORTED_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     CanonicalMessageCodec,
     InMemorySessionRepository,
     JsonSessionSnapshotCodec,
@@ -30,6 +32,7 @@ from .session import (
     Session,
     SessionBusyError,
     SessionClosedError,
+    SessionNotFoundError,
     SessionOwnershipError,
 )
 from .types import RunConfig, RunResult
@@ -46,17 +49,20 @@ __all__ = [
     "JsonSessionSnapshotCodec",
     "LocalSessionRepository",
     "ModelHookContext",
+    "MIN_SUPPORTED_SCHEMA_VERSION",
     "Run",
     "RunConfig",
     "RunEndHookContext",
     "RunHook",
     "RunHookContext",
     "RunResult",
+    "SCHEMA_VERSION",
     "Session",
     "SessionBusyError",
     "SessionConflictError",
     "SessionCorruptedError",
     "SessionClosedError",
+    "SessionNotFoundError",
     "SessionOwnershipError",
     "SessionPersistenceError",
     "SessionRepository",

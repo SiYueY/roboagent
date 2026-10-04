@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import replace
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable
+from uuid import uuid4
 
 from roboagent.agent.hooks import HookDecision, ModelHookContext
 from roboagent.agent.types import RunConfig
@@ -33,7 +34,7 @@ from roboagent.model import (
     collect_model_stream,
 )
 from roboagent.runtime.event import RunEventEmitter
-from roboagent.runtime.execution import UsageContribution, UsageKnowledge
+from roboagent.runtime.execution import ExecutionLineage, UsageContribution, UsageKnowledge
 from roboagent.runtime.types import RunContext, RunError, RunPhase, ToolCallSummary
 from roboagent.tool import (
     ToolBatchAborted,
@@ -153,6 +154,13 @@ async def _run_loop_impl(
     for turn in range(1, config.max_turns + 1):
         progress.turns = turn
         run_context.cancellation.raise_if_cancelled()
+        # Model lifecycle events must be attributed to the owning execution scope
+        # so nested (child) Runs stay distinguishable from the root Run.
+        model_lineage = (
+            run_context.execution.lineage
+            if run_context.execution is not None
+            else None
+        )
         if turn > 1:
             await session.consume_pending(run_context.run_id, run_context.cancellation)
         update_state(RunPhase.PREPARING_CONTEXT, turn)
@@ -233,10 +241,14 @@ async def _run_loop_impl(
         try:
             decisions = await invoke_hooks("before_model", hook_context)
         except _RunFailure as exc:
-            await events.emit("model.failed", turn=turn, error_code="hook_error")
+            await events.emit(
+                "model.failed", turn=turn, error_code="hook_error", lineage=model_lineage
+            )
             raise _RunFailure(exc.error, tuple(effects), output, usage, turn) from exc
         if any(not isinstance(decision, HookDecision) for decision in decisions):
-            await events.emit("model.failed", turn=turn, error_code="hook_error")
+            await events.emit(
+                "model.failed", turn=turn, error_code="hook_error", lineage=model_lineage
+            )
             raise _RunFailure(
                 RunError(
                     "hook_error", "before_model hook returned an invalid decision."
@@ -247,7 +259,9 @@ async def _run_loop_impl(
                 turn,
             )
         if any(decision is HookDecision.FAIL_RUN for decision in decisions):
-            await events.emit("model.failed", turn=turn, error_code="hook_error")
+            await events.emit(
+                "model.failed", turn=turn, error_code="hook_error", lineage=model_lineage
+            )
             raise _RunFailure(
                 RunError("hook_error", "before_model hook failed the Run."),
                 tuple(effects),
@@ -257,39 +271,59 @@ async def _run_loop_impl(
             )
         run_context.cancellation.raise_if_cancelled()
         update_state(RunPhase.MODEL, turn)
-        await events.emit("model.started", turn=turn)
+        # Allocate the assistant identity before streaming so every model event
+        # and the committed AssistantMessage share the same message_id.
+        message_id = uuid4().hex
+        await events.emit(
+            "model.started", turn=turn, message_id=message_id, lineage=model_lineage
+        )
         observed_usage: Usage | None = None
         try:
 
-            async def observe_model(event: object, observed_turn: int = turn) -> None:
+            async def observe_model(
+                event: object,
+                observed_turn: int = turn,
+                observed_message_id: str = message_id,
+                observed_lineage: "ExecutionLineage | None" = model_lineage,
+            ) -> None:
                 nonlocal observed_usage
                 if isinstance(event, TextDelta):
                     await events.emit(
-                        "model.delta", turn=observed_turn, text=event.text
+                        "model.delta",
+                        turn=observed_turn,
+                        message_id=observed_message_id,
+                        text=event.text,
+                        lineage=observed_lineage,
                     )
                 elif isinstance(event, ToolCallStarted):
                     await events.emit(
                         "model.tool_call_started",
                         turn=observed_turn,
+                        message_id=observed_message_id,
                         call_index=event.call_index,
                         tool_call_id=event.call_id,
                         tool_name=event.name,
+                        lineage=observed_lineage,
                     )
                 elif isinstance(event, ToolCallArgumentsDelta):
                     await events.emit(
                         "model.tool_call_arguments_delta",
                         turn=observed_turn,
+                        message_id=observed_message_id,
                         call_index=event.call_index,
                         tool_call_id=event.call_id,
                         delta=event.delta,
+                        lineage=observed_lineage,
                     )
                 elif isinstance(event, ToolCallCompleted):
                     await events.emit(
                         "model.tool_call_completed",
                         turn=observed_turn,
+                        message_id=observed_message_id,
                         call_index=event.call_index,
                         tool_call_id=event.call.id,
                         tool_name=event.call.name,
+                        lineage=observed_lineage,
                     )
                 elif isinstance(event, UsageUpdated):
                     observed_usage = event.usage
@@ -300,6 +334,7 @@ async def _run_loop_impl(
                 config.model_settings,
                 observe_model,
                 run_context,
+                message_id,
             )
         except asyncio.CancelledError:
             _contribute_usage(
@@ -311,7 +346,9 @@ async def _run_loop_impl(
                     observed_usage,
                 ),
             )
-            await events.emit("model.cancelled", turn=turn)
+            await events.emit(
+                "model.cancelled", turn=turn, message_id=message_id, lineage=model_lineage
+            )
             raise
         except ModelError as exc:
             _contribute_usage(
@@ -326,7 +363,9 @@ async def _run_loop_impl(
             await events.emit(
                 "model.failed",
                 turn=turn,
+                message_id=message_id,
                 error_code=getattr(exc, "code", "model_error"),
+                lineage=model_lineage,
             )
             message = (
                 str(exc)
@@ -355,7 +394,13 @@ async def _run_loop_impl(
                     observed_usage,
                 ),
             )
-            await events.emit("model.failed", turn=turn, error_code="model_error")
+            await events.emit(
+                "model.failed",
+                turn=turn,
+                message_id=message_id,
+                error_code="model_error",
+                lineage=model_lineage,
+            )
             raise _RunFailure(
                 RunError(
                     "model_error",
@@ -378,7 +423,9 @@ async def _run_loop_impl(
                 response.usage,
             ),
         )
-        await events.emit("model.completed", turn=turn)
+        await events.emit(
+            "model.completed", turn=turn, message_id=message_id, lineage=model_lineage
+        )
         run_context.cancellation.raise_if_cancelled()
         try:
             await invoke_hooks("after_model", hook_context, response)
@@ -412,6 +459,7 @@ async def _run_loop_impl(
                     run_context.execution.tool_context(
                         tool_executor, run_context.session_id
                     ),
+                    message_id,
                 ),
             )
         except ToolBatchCancelled as exc:
@@ -471,7 +519,19 @@ async def _run_loop_impl(
         await events.emit(
             "tool_batch.committed",
             turn=turn,
+            message_id=message_id,
             tool_call_ids=[call.id for call in response.message.tool_calls],
+            effects=[
+                {
+                    "tool_call_id": effect.call_id,
+                    "tool_name": effect.tool_name,
+                    "effect_status": effect.status.value,
+                    "certainty": None
+                    if effect.certainty is None
+                    else effect.certainty.value,
+                }
+                for effect in final_effects
+            ],
         )
         update_state(RunPhase.BETWEEN_TURNS, turn)
     raise MaxTurnsError(LoopOutcome(output, usage, tuple(effects), config.max_turns))
@@ -538,9 +598,10 @@ async def _collect_cancellable(
     settings: ModelSettings | None,
     observer: Callable[[object], Awaitable[None]],
     run_context: RunContext,
+    message_id: str | None = None,
 ) -> ModelResponse:
     task = asyncio.create_task(
-        collect_model_stream(model, model_context, settings, observer)
+        collect_model_stream(model, model_context, settings, observer, message_id)
     )
     cancelled = asyncio.create_task(run_context.cancellation.wait_cancelled())
     try:

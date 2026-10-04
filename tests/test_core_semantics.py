@@ -73,7 +73,7 @@ def test_context_prompt_order_and_atomic_window() -> None:
         request = ContextRequest(snapshot, ModelSettings(), ModelCapabilities(), None)
         prepared = await WindowContextManager(max_messages=2).prepare(request, cancellation)
         context = prepared.model_context
-        assert context.segments == (MessageSegment(UserMessage("new", timestamp=transcript[-1].timestamp)),)
+        assert context.segments == (MessageSegment(transcript[-1]),)
         assert context.system_prompt is not None
         assert context.system_prompt.index("Base prompt") < context.system_prompt.index("RoboAgent runtime")
         assert context.system_prompt.index("RoboAgent runtime") < context.system_prompt.index("Available skills")

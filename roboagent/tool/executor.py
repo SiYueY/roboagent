@@ -1421,11 +1421,15 @@ class ToolExecutor:
                 if context is not None and context.execution is not None
                 else None
             )
+            attribution: dict[str, object] = {}
+            if context is not None and context.message_id is not None:
+                attribution["message_id"] = context.message_id
             await self.events.emit(
                 event_type,
                 lineage=lineage,
                 tool_call_id=call.id,
                 tool_name=call.name,
+                **attribution,
                 **payload,
             )
 

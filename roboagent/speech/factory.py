@@ -42,7 +42,19 @@ def create_vad(config: SpeechConfig):
 
 def create_speech_session(*, session, transport, config: SpeechConfig,
                           capture_format: AudioFormat = DEFAULT_INPUT_FORMAT,
-                          render_format: AudioFormat = DEFAULT_OUTPUT_FORMAT) -> SpeechSession:
+                          render_format: AudioFormat = DEFAULT_OUTPUT_FORMAT,
+                          asr: object | None = None,
+                          tts: object | None = None,
+                          vad: object | None = None,
+                          audio_processor: object | None = None) -> SpeechSession:
+    """Compose a speech session.
+
+    ``asr``/``tts``/``vad``/``audio_processor`` are optional injection points.
+    They exist so a host can run a speech session without the DashScope SDK or
+    the native VAD models — for example an application that drives speech
+    through its own media layer with deterministic test doubles.  When they are
+    omitted the previous behaviour is unchanged.
+    """
     if config.mode == "realtime":
         # The installed DashScope Python SDK exposes ASR and TTS realtime
         # clients, but not a stable full-duplex Qwen-Audio client surface.
@@ -50,8 +62,12 @@ def create_speech_session(*, session, transport, config: SpeechConfig,
         # instead of creating a half-connected session.
         logger.warning("speech.mode=realtime is unavailable in this runtime; falling back to pipeline")
     session = SpeechSession(
-        session=session, transport=transport, asr=DashScopeASR(config.asr), tts=DashScopeTTS(config.tts),
-        audio_processor=create_audio_processor(config), vad=create_vad(config),
+        session=session, transport=transport,
+        asr=asr if asr is not None else DashScopeASR(config.asr),
+        tts=tts if tts is not None else DashScopeTTS(config.tts),
+        audio_processor=(audio_processor if audio_processor is not None
+                         else create_audio_processor(config)),
+        vad=vad if vad is not None else create_vad(config),
         turn_detector=TurnDetector(config.turn.silence_ms, config.turn.max_duration_ms,
                                    config.turn.idle_timeout_ms, config.turn.min_speech_ms),
         interruption_detector=InterruptionDetector(**config.turn.interruption.model_dump()),

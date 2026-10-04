@@ -623,6 +623,8 @@ def test_child_output_streaming_promotion_for_media_and_reference(tmp_path) -> N
         assert promoted.content[-1].uri != reference.uri
         assert destination.published == [b"image", b"audio", b"file", source]
         assert reader.chunks > 1
+        # Promotion materializes media; the assistant identity must not change.
+        assert promoted.message_id == output.message_id
 
     asyncio.run(check())
 

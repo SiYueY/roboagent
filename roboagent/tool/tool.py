@@ -164,6 +164,7 @@ class ToolContext:
     session_id: str
     cancellation: CancellationToken
     execution: ToolExecutionContext | None = None
+    message_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -173,6 +174,10 @@ class ToolContext:
             or not self.session_id
         ):
             raise ValueError("ToolContext requires run_id and session_id.")
+        if self.message_id is not None and (
+            not isinstance(self.message_id, str) or not self.message_id
+        ):
+            raise ValueError("ToolContext.message_id must be non-empty or None.")
         if not all(
             hasattr(self.cancellation, name)
             for name in ("cancelled", "raise_if_cancelled", "wait_cancelled")

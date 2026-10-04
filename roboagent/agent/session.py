@@ -48,6 +48,10 @@ class SessionOwnershipError(RuntimeError):
     pass
 
 
+class SessionNotFoundError(RuntimeError):
+    """Raised when opening a Session that has no durable snapshot."""
+
+
 @dataclass(frozen=True, slots=True)
 class InputReceipt:
     input_id: str
@@ -372,6 +376,27 @@ class Session:
         async with self._queue_lock:
             return tuple(self._pending)
 
+    async def clear_pending(self) -> tuple[InputReceipt, ...]:
+        """Discard durable pending input and persist the empty queue.
+
+        Application hosts call this during restart recovery: input queued for an
+        execution context that no longer exists must not reappear in a later Run.
+        Idempotent — clearing an empty queue persists nothing.
+        """
+        if self.active_run_id is not None:
+            raise SessionBusyError(
+                "Cannot clear pending input while a Run is active."
+            )
+        async with self._queue_lock:
+            receipts = tuple(item.receipt for item in self._pending)
+            if not receipts:
+                return ()
+            self._pending.clear()
+            self._runtime_revision += 1
+            revision = self._runtime_revision
+        await self._persist_required(revision)
+        return receipts
+
     def start(
         self, message: UserMessage | None = None, *, config: RunConfig | None = None
     ) -> "Run":
@@ -562,6 +587,7 @@ class Session:
         artifact_destination: ArtifactDestination | None = None,
     ) -> "Session":
         from roboagent.agent.persistence import (
+            MIN_SUPPORTED_SCHEMA_VERSION,
             SCHEMA_VERSION,
             SessionCorruptedError,
             SessionSnapshot,
@@ -570,7 +596,9 @@ class Session:
 
         if not isinstance(snapshot, SessionSnapshot):
             raise TypeError("snapshot must be SessionSnapshot.")
-        if snapshot.schema_version != SCHEMA_VERSION:
+        if not (
+            MIN_SUPPORTED_SCHEMA_VERSION <= snapshot.schema_version <= SCHEMA_VERSION
+        ):
             raise SessionVersionUnsupportedError(
                 "Unsupported Session snapshot version."
             )
@@ -647,3 +675,62 @@ class Session:
             self._closed = True
         async with self._queue_lock:
             return tuple(item.receipt for item in self._pending)
+
+    async def delete(self) -> None:
+        """Delete this Session's durable snapshot and close the handle.
+
+        The Application Host should not need to reach into a concrete repository
+        implementation to remove a Session. Deleting an already-absent snapshot
+        is a no-op so repeated deletes stay idempotent.
+        """
+        from roboagent.agent.persistence import SessionPersistenceError
+
+        if self.active_run_id is not None:
+            raise SessionBusyError("Cannot delete a Session with an active Run.")
+        repository = self.repository
+        if repository is None:
+            raise SessionPersistenceError("Session has no repository.")
+        revision = self._durable_revision
+        if revision is None:
+            existing = await repository.load(self.session_id)
+            if existing is None:
+                await self.close()
+                return
+            revision = existing.revision
+        await self.close()
+        await repository.delete(self.session_id, expected_revision=revision)
+        self._durable_revision = None
+
+    @classmethod
+    async def open(
+        cls,
+        *,
+        agent: "Agent",
+        session_id: str,
+        repository: "SessionRepository",
+        workspace: "Workspace | None" = None,
+        result_materializer: "ToolResultMaterializer | None" = None,
+        allow_nondurable_artifacts: bool = False,
+        artifact_reader: "ArtifactReader | None" = None,
+        artifact_destination: "ArtifactDestination | None" = None,
+    ) -> "Session":
+        """Load a persisted Session by id and restore its runtime handle.
+
+        Convenience wrapper over ``repository.load`` + ``Session.restore`` so
+        hosts do not need to assemble the two steps themselves.
+        """
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string.")
+        snapshot = await repository.load(session_id)
+        if snapshot is None:
+            raise SessionNotFoundError(f"Session {session_id!r} does not exist.")
+        return cls.restore(
+            agent=agent,
+            snapshot=snapshot,
+            repository=repository,
+            workspace=workspace,
+            result_materializer=result_materializer,
+            allow_nondurable_artifacts=allow_nondurable_artifacts,
+            artifact_reader=artifact_reader,
+            artifact_destination=artifact_destination,
+        )

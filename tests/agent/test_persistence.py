@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import multiprocessing
 
 import pytest
 
 from roboagent import Agent
 from roboagent.agent import (
+    SCHEMA_VERSION,
     InMemorySessionRepository,
     InputReceipt,
     JsonSessionSnapshotCodec,
@@ -77,7 +79,7 @@ def test_snapshot_codec_round_trips_all_current_content_and_ordered_json() -> No
     )
     pending = (PendingInput(InputReceipt("input", 7, "session"), UserMessage("later"), "follow_up"),)
     summary = ContextSummary(0, 1, canonical_message_digest(messages[:1]), "summary", 1)
-    snapshot = SessionSnapshot(1, "session", 9, 7, messages, pending, summary, FrozenJsonObject((("z", 1), ("a", 2))))
+    snapshot = SessionSnapshot(SCHEMA_VERSION, "session", 9, 7, messages, pending, summary, FrozenJsonObject((("z", 1), ("a", 2))))
     codec = JsonSessionSnapshotCodec()
 
     restored = codec.decode(codec.encode(snapshot))
@@ -85,6 +87,146 @@ def test_snapshot_codec_round_trips_all_current_content_and_ordered_json() -> No
     assert restored == snapshot
     assert list(restored.metadata) == ["z", "a"]
     assert canonical_message_digest(restored.messages[:1]) == summary.source_digest
+    assert [item.message_id for item in restored.messages] == [item.message_id for item in messages]
+    assert restored.pending[0].message.message_id == pending[0].message.message_id
+
+
+_LEGACY_V1_SNAPSHOT = (
+    b'{"schema_version":1,"session_id":"legacy","revision":3,"last_pending_sequence":1,'
+    b'"messages":[{"type":"user_message","timestamp":1.0,"content":[{"type":"text","text":"hello"}]},'
+    b'{"type":"assistant_message","timestamp":2.0,"content":[{"type":"text","text":"hi"}]}],'
+    b'"pending":[{"receipt":{"input_id":"input","sequence":1,"session_id":"legacy"},'
+    b'"message":{"type":"user_message","timestamp":3.0,"content":[{"type":"text","text":"later"}]},'
+    b'"kind":"follow_up"}],"compaction":null,"metadata":{"type":"object","entries":[]}}'
+)
+
+
+def test_snapshot_codec_upgrades_legacy_schema_and_allocates_message_ids() -> None:
+    codec = JsonSessionSnapshotCodec()
+
+    assert codec.needs_migration(_LEGACY_V1_SNAPSHOT) is True
+    assert codec.raw_schema_version(_LEGACY_V1_SNAPSHOT) == 1
+
+    snapshot, migrated = codec.decode_with_migration(_LEGACY_V1_SNAPSHOT)
+
+    assert migrated is True
+    assert snapshot.schema_version == SCHEMA_VERSION
+    ids = [item.message_id for item in snapshot.messages]
+    assert all(isinstance(item, str) and item for item in ids)
+    assert len(set(ids)) == len(ids)
+    assert snapshot.pending[0].message.message_id
+
+    encoded = codec.encode(snapshot)
+    assert codec.needs_migration(encoded) is False
+    assert [item.message_id for item in codec.decode(encoded).messages] == ids
+    assert codec.decode(encoded).pending[0].message.message_id == snapshot.pending[0].message.message_id
+
+
+def test_local_repository_persists_migrated_message_ids_once(tmp_path) -> None:
+    async def check() -> None:
+        root = tmp_path / "sessions"
+        repository = LocalSessionRepository(root)
+        target = root / "legacy.json"
+        target.write_bytes(_LEGACY_V1_SNAPSHOT)
+
+        first = await repository.load("legacy")
+        assert first is not None
+        assert repository.codec.needs_migration(target.read_bytes()) is False
+
+        second = await repository.load("legacy")
+        assert second is not None
+        assert [item.message_id for item in first.messages] == [
+            item.message_id for item in second.messages
+        ]
+        assert first.pending[0].message.message_id == second.pending[0].message.message_id
+
+    asyncio.run(check())
+
+
+def test_in_memory_repository_persists_migrated_message_ids_once() -> None:
+    async def check() -> None:
+        repository = InMemorySessionRepository()
+        repository._records["legacy"] = _LEGACY_V1_SNAPSHOT
+
+        first = await repository.load("legacy")
+        assert first is not None
+        assert repository.codec.needs_migration(repository._records["legacy"]) is False
+        second = await repository.load("legacy")
+        assert second is not None
+        assert [item.message_id for item in first.messages] == [
+            item.message_id for item in second.messages
+        ]
+
+    asyncio.run(check())
+
+
+def test_migration_from_realistic_v1_payload_preserves_state_once(tmp_path) -> None:
+    """A genuine pre-message_id snapshot must migrate exactly once."""
+
+    async def check() -> None:
+        codec = JsonSessionSnapshotCodec()
+        messages = (
+            UserMessage("hello"),
+            AssistantMessage("hi"),
+            ToolResultMessage("call", "work", ToolResultStatus.SUCCESS, "ok"),
+        )
+        pending = (
+            PendingInput(InputReceipt("input", 1, "legacy"), UserMessage("later"), "steer"),
+        )
+        summary = ContextSummary(0, 1, canonical_message_digest(messages[:1]), "sum", 1)
+        original = SessionSnapshot(
+            SCHEMA_VERSION,
+            "legacy",
+            4,
+            1,
+            messages,
+            pending,
+            summary,
+            FrozenJsonObject({"a": 1}),
+        )
+
+        # Downgrade a real payload to the historical v1 shape.
+        current = json.loads(codec.encode(original).decode("utf-8"))
+        current["schema_version"] = 1
+        for record in current["messages"]:
+            record.pop("message_id")
+        current["pending"][0]["message"].pop("message_id")
+        legacy = json.dumps(
+            current, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+        root = tmp_path / "sessions"
+        repository = LocalSessionRepository(root)
+        (root / "legacy.json").write_bytes(legacy)
+
+        first = await repository.load("legacy")
+        assert first is not None
+        assert first.schema_version == SCHEMA_VERSION
+        assert [type(item) for item in first.messages] == [
+            UserMessage,
+            AssistantMessage,
+            ToolResultMessage,
+        ]
+        assert first.metadata == original.metadata
+        assert first.compaction is not None
+        assert first.compaction.source_digest == summary.source_digest
+        assert first.pending[0].kind == "steer"
+        assert first.pending[0].receipt.input_id == "input"
+
+        # The upgraded file is now current schema and re-loads identically.
+        on_disk = (root / "legacy.json").read_bytes()
+        assert codec.needs_migration(on_disk) is False
+        second = await repository.load("legacy")
+        assert second is not None
+        assert [item.message_id for item in second.messages] == [
+            item.message_id for item in first.messages
+        ]
+        assert (
+            second.pending[0].message.message_id
+            == first.pending[0].message.message_id
+        )
+
+    asyncio.run(check())
 
 
 def test_snapshot_codec_rejects_unsupported_schema_unknown_type_and_large_bytes() -> None:

@@ -14,6 +14,7 @@ from pathlib import Path
 from time import time
 from typing import TypeAlias, cast
 from urllib.parse import urlparse
+from uuid import uuid4
 
 _MIME = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
 
@@ -399,6 +400,19 @@ def _message_timestamp(value: float | None) -> float:
     return float(result)
 
 
+def _message_id(value: str | None) -> str:
+    """Return a stable canonical message identity.
+
+    ``None`` allocates a fresh identity; every canonical message owns exactly one
+    identity for its whole lifetime (creation -> persistence -> reload).
+    """
+    if value is None:
+        return uuid4().hex
+    if not isinstance(value, str) or not value:
+        raise ProtocolError("message_id must be a non-empty string.")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCall:
     id: str
@@ -420,8 +434,9 @@ class ToolResultStatus(Enum):
 class UserMessage:
     content: tuple[MessageContent, ...]
     timestamp: float = field(default_factory=time)
+    message_id: str = field(default_factory=lambda: uuid4().hex)
 
-    def __init__(self, content: Iterable[MessageContent] | str, *, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, timestamp: float | None = None) -> None:
+    def __init__(self, content: Iterable[MessageContent] | str, *, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, timestamp: float | None = None, message_id: str | None = None) -> None:
         normalized = normalize_content(content, limits)
         if not normalized or not any(
             not isinstance(item, TextContent) or item.text.strip() for item in normalized
@@ -429,6 +444,7 @@ class UserMessage:
             raise ProtocolError("UserMessage requires non-whitespace text or media.")
         object.__setattr__(self, "content", normalized)
         object.__setattr__(self, "timestamp", _message_timestamp(timestamp))
+        object.__setattr__(self, "message_id", _message_id(message_id))
 
     @property
     def role(self) -> str:
@@ -440,8 +456,9 @@ class AssistantMessage:
     content: tuple[MessageContent, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
     timestamp: float = field(default_factory=time)
+    message_id: str = field(default_factory=lambda: uuid4().hex)
 
-    def __init__(self, content: Iterable[MessageContent] | str = (), tool_calls: Iterable[ToolCall] = (), *, timestamp: float | None = None, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS) -> None:
+    def __init__(self, content: Iterable[MessageContent] | str = (), tool_calls: Iterable[ToolCall] = (), *, timestamp: float | None = None, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, message_id: str | None = None) -> None:
         normalized = normalize_content(content, limits)
         calls = tuple(tool_calls)
         if not all(isinstance(call, ToolCall) for call in calls):
@@ -451,6 +468,7 @@ class AssistantMessage:
         object.__setattr__(self, "content", normalized)
         object.__setattr__(self, "tool_calls", calls)
         object.__setattr__(self, "timestamp", _message_timestamp(timestamp))
+        object.__setattr__(self, "message_id", _message_id(message_id))
 
     @property
     def role(self) -> str:
@@ -465,8 +483,9 @@ class ToolResultMessage:
     content: tuple[MessageContent, ...] = ()
     error: object | None = None
     timestamp: float = field(default_factory=time)
+    message_id: str = field(default_factory=lambda: uuid4().hex)
 
-    def __init__(self, tool_call_id: str, tool_name: str, status: ToolResultStatus, content: Iterable[MessageContent] | str = (), error: object | None = None, *, timestamp: float | None = None, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS) -> None:
+    def __init__(self, tool_call_id: str, tool_name: str, status: ToolResultStatus, content: Iterable[MessageContent] | str = (), error: object | None = None, *, timestamp: float | None = None, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, message_id: str | None = None) -> None:
         if not isinstance(tool_call_id, str) or not tool_call_id or not isinstance(tool_name, str) or not tool_name:
             raise ProtocolError("Tool result must identify a call and tool.")
         if not isinstance(status, ToolResultStatus):
@@ -488,6 +507,7 @@ class ToolResultMessage:
         object.__setattr__(self, "content", normalize_content(content, limits))
         object.__setattr__(self, "error", error)
         object.__setattr__(self, "timestamp", _message_timestamp(timestamp))
+        object.__setattr__(self, "message_id", _message_id(message_id))
 
     @property
     def role(self) -> str:

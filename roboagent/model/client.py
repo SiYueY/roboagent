@@ -9,7 +9,7 @@ import logging
 import math
 import inspect
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Protocol
 from uuid import uuid4
@@ -347,8 +347,13 @@ async def collect_model_stream(
     context: "ModelContext",
     settings: ModelSettings | None = None,
     on_event: object | None = None,
+    message_id: str | None = None,
 ) -> ModelResponse:
-    """Collect and strictly validate one canonical model stream."""
+    """Collect and strictly validate one canonical model stream.
+
+    ``message_id`` lets the caller allocate the assistant identity before
+    streaming starts so runtime events and the committed message share it.
+    """
     if not isinstance(model.capabilities, ModelCapabilities):
         raise ModelCapabilityError(
             "invalid_model_capabilities", "Model capabilities are not canonical."
@@ -505,6 +510,12 @@ async def collect_model_stream(
         ):
             raise ModelCapabilityError(
                 "parallel_tool_calls_unsupported", "Model emitted parallel ToolCalls."
+            )
+        if message_id is not None and completed.message.message_id != message_id:
+            # Adopt the identity the caller allocated before streaming started.
+            completed = replace(
+                completed,
+                message=replace(completed.message, message_id=message_id),
             )
         return completed
     finally:

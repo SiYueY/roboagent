@@ -43,7 +43,8 @@ from roboagent.tool import ToolErrorInfo
 from .session import InputReceipt, PendingInput
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MIN_SUPPORTED_SCHEMA_VERSION = 1
 
 
 class SessionPersistenceError(RuntimeError):
@@ -104,6 +105,7 @@ class CanonicalMessageCodec:
     def encode(self, message: AgentMessage) -> dict[str, object]:
         data: dict[str, object] = {
             "type": f"{message.role}_message",
+            "message_id": message.message_id,
             "timestamp": message.timestamp,
             "content": [self._content(item) for item in message.content],
         }
@@ -135,18 +137,33 @@ class CanonicalMessageCodec:
             self._decode_content(item) for item in data["content"]
         )
         kind = data.get("type")
+        raw_message_id = data.get("message_id")
+        if raw_message_id is not None and (
+            not isinstance(raw_message_id, str) or not raw_message_id
+        ):
+            raise SessionCorruptedError("Invalid message_id.")
         try:
             if kind == "user_message":
-                return UserMessage(content, timestamp=float(timestamp))
+                return UserMessage(
+                    content, timestamp=float(timestamp), message_id=raw_message_id
+                )
             if kind == "assistant_message":
                 calls = tuple(self._decode_tool_call(item) for item in _list(data.get("tool_calls", [])))
-                return AssistantMessage(content, calls, timestamp=float(timestamp))
+                return AssistantMessage(
+                    content, calls, timestamp=float(timestamp), message_id=raw_message_id
+                )
             if kind == "tool_message":
                 status = ToolResultStatus(data["status"])
                 error_data = data.get("error")
                 error = None if error_data is None else ToolErrorInfo(**_dict(error_data))
                 return ToolResultMessage(
-                    data["tool_call_id"], data["tool_name"], status, content, error, timestamp=float(timestamp)
+                    data["tool_call_id"],
+                    data["tool_name"],
+                    status,
+                    content,
+                    error,
+                    timestamp=float(timestamp),
+                    message_id=raw_message_id,
                 )
         except (KeyError, TypeError, ValueError) as exc:
             raise SessionCorruptedError("Invalid message fields.") from exc
@@ -253,12 +270,42 @@ class JsonSessionSnapshotCodec:
         return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     def decode(self, data: bytes) -> SessionSnapshot:
+        snapshot, _ = self.decode_with_migration(data)
+        return snapshot
+
+    def raw_schema_version(self, data: bytes) -> int:
+        """Return the on-disk schema version without building a snapshot."""
+        try:
+            value = _dict(json.loads(data))
+        except Exception as exc:
+            raise SessionCorruptedError("Snapshot is not valid JSON.") from exc
+        version = value.get("schema_version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise SessionVersionUnsupportedError("Unsupported Session snapshot version.")
+        return version
+
+    def needs_migration(self, data: bytes) -> bool:
+        return self.raw_schema_version(data) < SCHEMA_VERSION
+
+    def decode_with_migration(self, data: bytes) -> tuple[SessionSnapshot, bool]:
+        """Decode a snapshot, upgrading older schema versions in memory.
+
+        The returned flag reports whether the payload was upgraded. Callers that
+        own durable storage must persist the upgraded snapshot so canonical
+        ``message_id`` values are allocated exactly once.
+        """
         try:
             raw = json.loads(data)
         except Exception as exc:
             raise SessionCorruptedError("Snapshot is not valid JSON.") from exc
         value = _dict(raw)
-        if value.get("schema_version") != SCHEMA_VERSION:
+        version = value.get("schema_version")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < MIN_SUPPORTED_SCHEMA_VERSION
+            or version > SCHEMA_VERSION
+        ):
             raise SessionVersionUnsupportedError("Unsupported Session snapshot version.")
         try:
             messages = tuple(self.messages.decode(item) for item in _list(value["messages"]))
@@ -268,14 +315,15 @@ class JsonSessionSnapshotCodec:
             metadata = _decode_json(value["metadata"])
             if not isinstance(metadata, FrozenJsonObject):
                 raise SessionCorruptedError("Session metadata must be a JSON object.")
-            return SessionSnapshot(
-                value["schema_version"], value["session_id"], value["revision"], value["last_pending_sequence"],
+            snapshot = SessionSnapshot(
+                SCHEMA_VERSION, value["session_id"], value["revision"], value["last_pending_sequence"],
                 messages, pending, compaction, metadata,
             )
         except SessionPersistenceError:
             raise
         except Exception as exc:
             raise SessionCorruptedError("Invalid Session snapshot.") from exc
+        return snapshot, version < SCHEMA_VERSION
 
     def _decode_pending(self, data: object) -> PendingInput:
         value = _dict(data)
@@ -300,9 +348,13 @@ class InMemorySessionRepository:
     async def load(self, session_id: str) -> SessionSnapshot | None:
         async with self._lock:
             data = self._records.get(session_id)
-        if data is None:
-            return None
-        snapshot = self.codec.decode(data)
+            if data is None:
+                return None
+            snapshot = self.codec.decode(data)
+            needs_migration = getattr(self.codec, "needs_migration", None)
+            if needs_migration is not None and needs_migration(data):
+                # Persist upgraded canonical message IDs exactly once.
+                self._records[session_id] = self.codec.encode(snapshot)
         _check_loaded_session_id(snapshot, session_id)
         return snapshot
 
@@ -351,11 +403,46 @@ class LocalSessionRepository:
             try:
                 if not target.exists():
                     return None
-                snapshot = self.codec.decode(target.read_bytes())
+                data = target.read_bytes()
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        needs_migration = getattr(self.codec, "needs_migration", None)
+        if needs_migration is None or not needs_migration(data):
+            snapshot = self.codec.decode(data)
+            _check_loaded_session_id(snapshot, session_id)
+            return snapshot
+        # Upgrading the on-disk schema requires a write; redo the read under an
+        # exclusive lock so the migrated IDs are persisted exactly once.
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                if not target.exists():
+                    return None
+                data = target.read_bytes()
+                snapshot = self.codec.decode(data)
                 _check_loaded_session_id(snapshot, session_id)
+                if needs_migration(data):
+                    self._write_atomic(target, self.codec.encode(snapshot))
                 return snapshot
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _write_atomic(self, target: Path, encoded: bytes) -> None:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{target.stem}.{os.getpid()}.", suffix=".tmp", dir=self.root
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            _fsync_directory(self.root)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
     def _save(self, snapshot: SessionSnapshot, expected_revision: int | None) -> int:
         target, lock_path = self._paths(snapshot.session_id)
@@ -365,21 +452,7 @@ class LocalSessionRepository:
             try:
                 current = None if not target.exists() else self.codec.decode(target.read_bytes()).revision
                 _check_cas(current, expected_revision, snapshot.revision)
-                descriptor, temporary = tempfile.mkstemp(
-                    prefix=f".{snapshot.session_id}.{os.getpid()}.", suffix=".tmp", dir=self.root
-                )
-                try:
-                    with os.fdopen(descriptor, "wb") as handle:
-                        handle.write(encoded)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    os.replace(temporary, target)
-                    _fsync_directory(self.root)
-                finally:
-                    try:
-                        os.unlink(temporary)
-                    except FileNotFoundError:
-                        pass
+                self._write_atomic(target, encoded)
                 return snapshot.revision
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
