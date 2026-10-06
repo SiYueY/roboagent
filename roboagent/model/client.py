@@ -541,10 +541,12 @@ class OpenAICompatibleModel:
     default_query: dict[str, Any] | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     media_resolver: MediaResolver | None = None
+    artifact_reader: object | None = None
+    preserve_reasoning_content: bool = False
     client: object | None = None
     capabilities: ModelCapabilities = field(
         default_factory=lambda: ModelCapabilities(
-            frozenset({Modality.TEXT, Modality.IMAGE}),
+            frozenset({Modality.TEXT, Modality.IMAGE, Modality.FILE}),
             frozenset({Modality.TEXT}),
             True,
             True,
@@ -572,7 +574,12 @@ class OpenAICompatibleModel:
                     default_headers=self.default_headers,
                     default_query=self.default_query,
                 )
-            messages, resources = await _messages(context, self.media_resolver)
+            messages, resources = await _messages(
+                context,
+                self.media_resolver,
+                artifact_reader=self.artifact_reader,
+                preserve_reasoning_content=self.preserve_reasoning_content,
+            )
             effective = ModelSettings(
                 temperature=settings.temperature
                 if settings and settings.temperature is not None
@@ -625,7 +632,11 @@ class OpenAICompatibleModel:
             if self.extra_body:
                 payload["extra_body"] = self.extra_body
             stream = await client.chat.completions.create(**payload)  # type: ignore[union-attr]
-            async for event in _stream_chunks(stream, self.model_name):
+            async for event in _stream_chunks(
+                stream,
+                self.model_name,
+                preserve_reasoning_content=self.preserve_reasoning_content,
+            ):
                 yield event
         except asyncio.CancelledError:
             raise
@@ -649,12 +660,18 @@ class OpenAICompatibleModel:
                 await client.close()  # type: ignore[union-attr]
 
 
-async def _stream_chunks(stream: object, model_name: str) -> AsyncIterator[ModelEvent]:
+async def _stream_chunks(
+    stream: object,
+    model_name: str,
+    *,
+    preserve_reasoning_content: bool = False,
+) -> AsyncIterator[ModelEvent]:
     sequence = 0
     response_id = uuid4().hex
     yield ResponseStarted(response_id, sequence)
     sequence += 1
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     calls: dict[int, dict[str, str]] = {}
     finish_reason = FinishReason.OTHER
     usage: Usage | None = None
@@ -676,6 +693,8 @@ async def _stream_chunks(stream: object, model_name: str) -> AsyncIterator[Model
             if reason is not None:
                 finish_reason = _finish_reason(reason)
             delta = choice.delta
+            if preserve_reasoning_content and getattr(delta, "reasoning_content", None):
+                reasoning_parts.append(delta.reasoning_content)
             if delta.content:
                 text_parts.append(delta.content)
                 yield TextDelta(sequence, delta.content)
@@ -742,8 +761,19 @@ async def _stream_chunks(stream: object, model_name: str) -> AsyncIterator[Model
         yield ToolCallCompleted(sequence, index, call)
         sequence += 1
     content = (TextContent("".join(text_parts)),) if text_parts else ()
+    if not content and not normalized:
+        raise ModelProtocolError(
+            "empty_model_response",
+            "Provider completed without text or a tool call.",
+        )
     response = ModelResponse(
-        AssistantMessage(content, tuple(normalized)), finish_reason, usage
+        AssistantMessage(
+            content,
+            tuple(normalized),
+            reasoning_content="".join(reasoning_parts) or None,
+        ),
+        finish_reason,
+        usage,
     )
     yield ResponseCompleted(sequence, response)
 
@@ -759,7 +789,11 @@ def _finish_reason(value: str) -> FinishReason:
 
 
 async def _messages(
-    context: "ModelContext", resolver: MediaResolver | None
+    context: "ModelContext",
+    resolver: MediaResolver | None,
+    *,
+    artifact_reader: object | None = None,
+    preserve_reasoning_content: bool = False,
 ) -> tuple[list[dict[str, Any]], list[ResolvedMedia]]:
     from roboagent.context import (
         MessageSegment,
@@ -800,7 +834,9 @@ async def _messages(
                     "invalid_model_context", "Unknown ModelContext segment."
                 )
             message = segment.message
-            content, owned = await _content(message.content, resolver)
+            content, owned = await _content(
+                message.content, resolver, artifact_reader=artifact_reader
+            )
             resources.extend(owned)
             if message.role == "tool":
                 encoded.append(
@@ -811,11 +847,10 @@ async def _messages(
                     }
                 )
             elif message.role == "assistant":
-                encoded.append(
-                    {
-                        "role": "assistant",
-                        "content": content or None,
-                        "tool_calls": [
+                assistant: dict[str, object] = {
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
                             {
                                 "id": call.id,
                                 "type": "function",
@@ -825,10 +860,12 @@ async def _messages(
                                 },
                             }
                             for call in message.tool_calls
-                        ]
-                        or None,
-                    }
-                )
+                    ]
+                    or None,
+                }
+                if preserve_reasoning_content and message.reasoning_content is not None:
+                    assistant["reasoning_content"] = message.reasoning_content
+                encoded.append(assistant)
             else:
                 encoded.append({"role": "user", "content": content})
     except BaseException:
@@ -839,7 +876,10 @@ async def _messages(
 
 
 async def _content(
-    items: tuple[object, ...], resolver: MediaResolver | None
+    items: tuple[object, ...],
+    resolver: MediaResolver | None,
+    *,
+    artifact_reader: object | None = None,
 ) -> tuple[object, list[ResolvedMedia]]:
     if all(isinstance(item, TextContent) for item in items):
         return text_of(items), []
@@ -854,6 +894,17 @@ async def _content(
                     {"type": "text", "text": canonical_json_dumps(item.value)}
                 )
             elif isinstance(item, ArtifactReferenceContent):
+                if item.media_type and item.media_type.startswith("image/") and artifact_reader is not None:
+                    data = await _read_artifact(item, artifact_reader)
+                    result.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{item.media_type};base64,{base64.b64encode(data).decode()}"
+                            },
+                        }
+                    )
+                    continue
                 details = [
                     f"Workspace artifact: {item.uri}",
                     f"Digest: {item.digest}",
@@ -915,6 +966,39 @@ async def _content(
             await resource.close()
         raise
     return result, resources
+
+
+async def _read_artifact(reference: ArtifactReferenceContent, reader: object) -> bytes:
+    """Read one bounded workspace artifact for a model image input."""
+    iter_bytes = getattr(reader, "iter_bytes", None)
+    if not callable(iter_bytes):
+        raise MediaResolutionError(
+            MediaResolutionErrorCode.ACCESS_DENIED,
+            "Artifact reader is not configured for model image input.",
+        )
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        async for chunk in iter_bytes(reference, chunk_size=64 * 1024):
+            if not isinstance(chunk, bytes):
+                raise TypeError("Artifact reader yielded non-bytes data.")
+            total += len(chunk)
+            if total > reference.size:
+                raise ValueError("Artifact reader exceeded the declared size.")
+            chunks.append(chunk)
+    except MediaResolutionError:
+        raise
+    except Exception as exc:
+        raise MediaResolutionError(
+            MediaResolutionErrorCode.FETCH_FAILED,
+            "Image artifact could not be read for the model.",
+        ) from exc
+    if total != reference.size:
+        raise MediaResolutionError(
+            MediaResolutionErrorCode.FETCH_FAILED,
+            "Image artifact size does not match its reference.",
+        )
+    return b"".join(chunks)
 
 
 class _NoCancellation:

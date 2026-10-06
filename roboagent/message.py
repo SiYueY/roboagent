@@ -202,6 +202,8 @@ def canonical_message_data(message: "AgentMessage") -> dict[str, object]:
         data["tool_calls"] = [
             {"id": call.id, "name": call.name, "arguments": thaw_json(call.arguments)} for call in message.tool_calls
         ]
+        if message.reasoning_content is not None:
+            data["reasoning_content"] = message.reasoning_content
     elif isinstance(message, ToolResultMessage):
         data.update(
             {
@@ -455,18 +457,22 @@ class UserMessage:
 class AssistantMessage:
     content: tuple[MessageContent, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
+    reasoning_content: str | None = None
     timestamp: float = field(default_factory=time)
     message_id: str = field(default_factory=lambda: uuid4().hex)
 
-    def __init__(self, content: Iterable[MessageContent] | str = (), tool_calls: Iterable[ToolCall] = (), *, timestamp: float | None = None, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, message_id: str | None = None) -> None:
+    def __init__(self, content: Iterable[MessageContent] | str = (), tool_calls: Iterable[ToolCall] = (), *, reasoning_content: str | None = None, timestamp: float | None = None, limits: MediaLimits = _DEFAULT_MEDIA_LIMITS, message_id: str | None = None) -> None:
         normalized = normalize_content(content, limits)
         calls = tuple(tool_calls)
         if not all(isinstance(call, ToolCall) for call in calls):
             raise ProtocolError("tool_calls must contain ToolCall values.")
         if len({call.id for call in calls}) != len(calls):
             raise ProtocolError("Duplicate ToolCall ID.")
+        if reasoning_content is not None and not isinstance(reasoning_content, str):
+            raise ProtocolError("reasoning_content must be str | None.")
         object.__setattr__(self, "content", normalized)
         object.__setattr__(self, "tool_calls", calls)
+        object.__setattr__(self, "reasoning_content", reasoning_content)
         object.__setattr__(self, "timestamp", _message_timestamp(timestamp))
         object.__setattr__(self, "message_id", _message_id(message_id))
 

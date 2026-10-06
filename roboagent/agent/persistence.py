@@ -114,6 +114,8 @@ class CanonicalMessageCodec:
                 {"id": call.id, "name": call.name, "arguments": _encode_json(call.arguments)}
                 for call in message.tool_calls
             ]
+            if message.reasoning_content is not None:
+                data["reasoning_content"] = message.reasoning_content
         elif isinstance(message, ToolResultMessage):
             data.update(
                 {
@@ -149,8 +151,15 @@ class CanonicalMessageCodec:
                 )
             if kind == "assistant_message":
                 calls = tuple(self._decode_tool_call(item) for item in _list(data.get("tool_calls", [])))
+                reasoning_content = data.get("reasoning_content")
+                if reasoning_content is not None and not isinstance(reasoning_content, str):
+                    raise SessionCorruptedError("Invalid assistant reasoning_content.")
                 return AssistantMessage(
-                    content, calls, timestamp=float(timestamp), message_id=raw_message_id
+                    content,
+                    calls,
+                    reasoning_content=reasoning_content,
+                    timestamp=float(timestamp),
+                    message_id=raw_message_id,
                 )
             if kind == "tool_message":
                 status = ToolResultStatus(data["status"])

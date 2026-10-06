@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -72,6 +73,8 @@ def create_deepseek_model(config: DeepSeekModelConfig, **overrides: Any) -> Open
     settings = merge_model_settings(base_settings, overrides)
     settings["model_name"] = settings.pop("model")
     settings["base_url"] = settings.pop("api_base", None) or "https://api.deepseek.com"
+    settings["api_key"] = settings.get("api_key") or os.getenv("DEEPSEEK_API_KEY")
+    settings["preserve_reasoning_content"] = True
     return OpenAICompatibleModel(**settings)
 
 

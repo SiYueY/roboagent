@@ -74,7 +74,7 @@ def test_snapshot_codec_round_trips_all_current_content_and_ordered_json() -> No
     )
     messages = (
         UserMessage((TextContent("hello"), JsonContent(FrozenJsonObject((("z", 1), ("a", 2)))), ImageContent(BytesSource(b"i"), "image/png"))),
-        AssistantMessage(tool_calls=(call,)),
+        AssistantMessage(tool_calls=(call,), reasoning_content="inspect object"),
         ToolResultMessage("call", "work", ToolResultStatus.SUCCESS, (artifact, AudioContent(BytesSource(b"a"), "audio/wav"))),
     )
     pending = (PendingInput(InputReceipt("input", 7, "session"), UserMessage("later"), "follow_up"),)

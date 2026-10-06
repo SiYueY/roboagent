@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
 from pydantic import TypeAdapter
 
@@ -46,6 +48,20 @@ class ProviderModelConfigTests(unittest.TestCase):
 
         self.assertIsInstance(parsed, DeepSeekModelConfig)
         self.assertEqual(parsed.params.model, "deepseek-chat")
+
+    def test_deepseek_model_reads_environment_key_and_preserves_reasoning(self) -> None:
+        parsed = self._adapter.validate_python(
+            {
+                "name": "deepseek-flash",
+                "provider": "deepseek",
+                "params": {"model": "deepseek-flash"},
+            }
+        )
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}, clear=False):
+            model = providers.create_deepseek_model(parsed)
+        self.assertEqual(model.api_key, "test-key")
+        self.assertEqual(model.base_url, "https://api.deepseek.com")
+        self.assertTrue(model.preserve_reasoning_content)
 
     def test_discriminator_parses_tongyi_variant(self) -> None:
         payload = {

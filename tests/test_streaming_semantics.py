@@ -8,11 +8,14 @@ import pytest
 
 from roboagent.context import MessageSegment, ModelContext
 from roboagent.message import (
+    ArtifactReferenceContent,
     AssistantMessage,
     BytesSource,
     FrozenJsonObject,
     ImageContent,
     ToolCall,
+    ToolResultMessage,
+    ToolResultStatus,
     UserMessage,
 )
 from roboagent.model import (
@@ -33,7 +36,7 @@ from roboagent.model import (
 )
 from roboagent.runtime import Modality
 from roboagent.tool import ToolDefinition
-from roboagent.model.client import _provider_error, _stream_chunks
+from roboagent.model.client import _messages, _provider_error, _stream_chunks
 
 
 @pytest.mark.parametrize(
@@ -269,5 +272,93 @@ def test_openai_adapter_assembles_fragmented_json_and_generates_stable_id() -> N
         assert [event.sequence for event in events] == list(range(len(events)))
         assert sum(isinstance(event, ResponseStarted) for event in events) == 1
         assert sum(isinstance(event, ResponseCompleted) for event in events) == 1
+
+    asyncio.run(check())
+
+
+def test_openai_adapter_preserves_deepseek_reasoning_across_tool_turns() -> None:
+    async def check() -> None:
+        def chunk(reasoning: str | None, content: str | None = None, *, finish_reason: str | None = None):
+            delta = SimpleNamespace(content=content, reasoning_content=reasoning, tool_calls=())
+            return SimpleNamespace(
+                id="provider-response",
+                usage=None,
+                choices=(SimpleNamespace(delta=delta, finish_reason=finish_reason),),
+            )
+
+        class Stream:
+            def __aiter__(self):
+                async def iterate():
+                    yield chunk("inspect ")
+                    yield chunk("state", "done", finish_reason="stop")
+
+                return iterate()
+
+        events = [
+            event
+            async for event in _stream_chunks(
+                Stream(), "deepseek-flash", preserve_reasoning_content=True
+            )
+        ]
+        completed = next(event for event in events if isinstance(event, ResponseCompleted))
+        assert completed.response.message.reasoning_content == "inspect state"
+
+        context = ModelContext(
+            None,
+            (MessageSegment(completed.response.message),),
+            (),
+        )
+        messages, _ = await _messages(context, None, preserve_reasoning_content=True)
+        assert messages[0]["reasoning_content"] == "inspect state"
+
+    asyncio.run(check())
+
+
+def test_openai_adapter_rejects_empty_terminal_response() -> None:
+    async def check() -> None:
+        class Stream:
+            def __aiter__(self):
+                async def iterate():
+                    delta = SimpleNamespace(content=None, reasoning_content=None, tool_calls=())
+                    yield SimpleNamespace(id="provider-response", usage=None,
+                                          choices=(SimpleNamespace(delta=delta, finish_reason="stop"),))
+                return iterate()
+
+        with pytest.raises(ModelProtocolError) as error:
+            _ = [event async for event in _stream_chunks(Stream(), "model")]
+        assert error.value.code == "empty_model_response"
+
+    asyncio.run(check())
+
+
+def test_openai_adapter_reads_image_artifact_as_vision_input() -> None:
+    async def check() -> None:
+        payload = b"image-bytes"
+        reference = ArtifactReferenceContent(
+            "workspace://blobs/sha256/" + "a" * 64,
+            "image/jpeg",
+            len(payload),
+            "sha256:" + "a" * 64,
+        )
+
+        class Reader:
+            async def iter_bytes(self, item, *, chunk_size):
+                assert item == reference
+                assert chunk_size > 0
+                yield payload
+
+        tool = ToolResultMessage(
+            "camera-call", "get_camera_image", ToolResultStatus.SUCCESS, (reference,)
+        )
+        call = ToolCall("camera-call", "get_camera_image", FrozenJsonObject())
+        context = ModelContext(
+            None,
+            (MessageSegment(AssistantMessage(tool_calls=(call,))), MessageSegment(tool)),
+            (),
+        )
+        messages, _ = await _messages(context, None, artifact_reader=Reader())
+        image = messages[1]["content"][0]
+        assert image["type"] == "image_url"
+        assert image["image_url"]["url"].endswith("aW1hZ2UtYnl0ZXM=")
 
     asyncio.run(check())
