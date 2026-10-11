@@ -23,9 +23,9 @@ if str(PROJECT_ROOT) not in sys.path:
 import gradio as gr
 
 from roboagent.agent import Agent, Session
-from roboagent.message import BytesSource, ImageContent, TextContent, UserMessage
+from roboagent.message import TextContent, UserMessage
 from roboagent.runtime import AgentEvent, RunStatus, modality
-from roboagent.vision import VisionContext, VisionFrame
+from roboagent.interaction.vision import VisionBuffer, VisionFrame, image_content_from_frame
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class BrowserConversation:
     title: str = DEFAULT_TITLE
     updated_at: float = field(default_factory=time)
     voice_token: str = ""
-    vision_context: VisionContext = field(default_factory=VisionContext)
+    vision_buffer: VisionBuffer = field(default_factory=VisionBuffer)
 
 
 @dataclass(slots=True)
@@ -208,10 +208,10 @@ async def chat(
     frame = _frame_from_data_url(camera_snapshot)
     display_text = text
     if frame is not None:
-        image = ImageContent(BytesSource(frame.data), media_type=frame.mime_type)
+        image = image_content_from_frame(frame)
         capabilities = conversation.session.agent.model.capabilities
         if modality(image) in capabilities.input_modalities:
-            conversation.vision_context.update(frame)
+            conversation.vision_buffer.push(frame)
             contents.append(image)
         else:
             display_text = f"{text}\n\n*当前模型不支持相机画面，已按文本发送。*"
@@ -326,17 +326,19 @@ def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
 
 def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
     """Build the browser-local multi-session chat page."""
-    initial_state = create_page_state(agent, speech_registry)
+    initial_state = create_page_state(agent)
     initial_conversation = active_conversation(initial_state)
     with gr.Blocks(
         title="RoboAgent",
         fill_height=True,
         fill_width=True,
     ) as demo:
-        page_state = gr.State(value=initial_state)
+        # Session owns locks and live runtime state; create it per browser
+        # rather than asking Gradio to deepcopy a Session/World binding.
+        page_state = gr.State(value=lambda: create_page_state(agent, speech_registry))
         # Keep the token component rendered (but CSS-hidden): ``visible=False``
         # removes it from Gradio's DOM before the browser can open WebSocket.
-        gr.Textbox(
+        voice_token = gr.Textbox(
             value=initial_conversation.voice_token,
             elem_id="voice-token",
             container=False,
@@ -446,6 +448,11 @@ def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
 
         chat_inputs: Sequence[gr.components.Component] = [textbox, chatbot, page_state, camera_snapshot]
         chat_outputs: Sequence[gr.components.Component] = [chatbot, page_state, textbox, session_list, title]
+        def initialize_page(state):
+            conversation = active_conversation(state)
+            return (*view_update(conversation, state), conversation.voice_token)
+
+        demo.load(initialize_page, inputs=page_state, outputs=[*chat_outputs, voice_token])
         snapshot_js = "(message, history, state, snapshot) => [message, history, state, window.roboagentChat?.captureCameraSnapshot() || '']"
         send_button.click(chat, inputs=chat_inputs, outputs=chat_outputs, js=snapshot_js)
         textbox.submit(chat, inputs=chat_inputs, outputs=chat_outputs, js=snapshot_js)

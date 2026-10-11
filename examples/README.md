@@ -11,3 +11,4 @@
 
 - [chat](chat/README.md)：使用 Gradio UI 的流式多轮浏览器聊天。
 - [coding](coding/README.md)：V1.3 进程隔离 CodingSession、Rich CLI 与集成评估。
+- [embodied](embodied/README.md)：CPU MuJoCo 的观察、动作与独立物理反馈闭环。

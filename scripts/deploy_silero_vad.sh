@@ -4,7 +4,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-readonly DEFAULT_DESTINATION="${PROJECT_ROOT}/roboagent/speech/audio/data/silero_vad.onnx"
+readonly DEFAULT_DESTINATION="${PROJECT_ROOT}/roboagent/interaction/speech/audio/data/silero_vad.onnx"
 readonly REPOSITORY_URL="https://raw.githubusercontent.com/snakers4/silero-vad"
 
 destination="${DEFAULT_DESTINATION}"

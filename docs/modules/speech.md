@@ -2,7 +2,7 @@
 
 ## 1. 目标与设计原则
 
-`roboagent/speech` 应定位为 RoboAgent 的统一实时语音运行时，而不是仅服务于当前 Gradio/Browser Chat 示例。
+`roboagent/interaction/speech` 应定位为 RoboAgent 的统一实时语音运行时，而不是仅服务于当前 Gradio/Browser Chat 示例。
 
 它需要同时支持：
 
@@ -427,7 +427,7 @@ process_render()
 目录调整为：
 
 ```text
-roboagent/speech/audio/
+roboagent/interaction/speech/audio/
 ├── processor.py
 ├── passthrough.py
 ├── rnnoise.py

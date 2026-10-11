@@ -319,6 +319,7 @@ def validate_model_context(
     capabilities: ModelCapabilities, context: "ModelContext"
 ) -> None:
     from roboagent.context import (
+        ContextDataSegment,
         MessageSegment,
         SummarySegment,
         WorkspaceReferenceSegment,
@@ -332,7 +333,7 @@ def validate_model_context(
                         "unsupported_input_modality",
                         "Model does not support an input modality.",
                     )
-        elif not isinstance(segment, (SummarySegment, WorkspaceReferenceSegment)):
+        elif not isinstance(segment, (SummarySegment, WorkspaceReferenceSegment, ContextDataSegment)):
             raise ModelProtocolError(
                 "invalid_model_context", "Unknown ModelContext segment."
             )
@@ -796,6 +797,7 @@ async def _messages(
     preserve_reasoning_content: bool = False,
 ) -> tuple[list[dict[str, Any]], list[ResolvedMedia]]:
     from roboagent.context import (
+        ContextDataSegment,
         MessageSegment,
         SummarySegment,
         WorkspaceReferenceSegment,
@@ -809,6 +811,11 @@ async def _messages(
     resources: list[ResolvedMedia] = []
     try:
         for segment in context.segments:
+            if isinstance(segment, ContextDataSegment):
+                from roboagent.context.world import _context_data_text
+
+                encoded.append({"role": "user", "content": _context_data_text(segment)})
+                continue
             if isinstance(segment, SummarySegment):
                 encoded.append(
                     {

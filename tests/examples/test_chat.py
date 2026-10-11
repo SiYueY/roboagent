@@ -314,10 +314,12 @@ class ChatExampleTests(unittest.TestCase):
 
         asyncio.run(check())
         assert model.request is not None
-        contents = model.request.messages[-1].content
+        from roboagent.context import MessageSegment
+
+        contents = next(segment.message.content for segment in reversed(model.request.segments) if isinstance(segment, MessageSegment))
         self.assertEqual(contents[0].text, "what is this?")
         self.assertEqual(contents[1].source.data, jpeg)
-        frame = self.app.active_conversation(state).vision_context.latest()
+        frame = self.app.active_conversation(state).vision_buffer.latest()
         self.assertEqual((frame.width, frame.height), (3, 2))
 
     def test_camera_snapshot_rejects_invalid_or_mismatched_input(self) -> None:

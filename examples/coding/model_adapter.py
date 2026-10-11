@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from roboagent.context import (
-    ConservativeTokenEstimator,
+    ContextDataSegment,
     MessageSegment,
     ModelContext,
     ModelContextSegment,
@@ -57,6 +57,9 @@ from .protocol import (
     validate_final_value,
 )
 
+_RESET_NOTICE = "Interpreter state has been reset. Previously created Python variables are no longer available."
+_PROTOCOL_CORRECTION = "Protocol correction: return plain final text or exactly one closed ```python block."
+
 _ACTION_REMINDER = (
     "\n\nProtocol reminder: continue until the user's task is complete. For another action, "
     "reply with exactly one closed Python Markdown code fence. 'Python action:' above is "
@@ -104,6 +107,18 @@ class CodingModelAdapter:
         if self._state is state:
             self._state = None
 
+    def project_model_input(self, context: ModelContext) -> ModelContext:
+        """Pure upper bound for ContextManager, including every retry envelope.
+
+        No window, reserve or pruning policy is chosen by this adapter. Reset
+        notice and one correction are bounded independently of mutable Run/worker
+        state, so preparation and all provider retries use the same budget bound.
+        """
+        projected = _append_user(_project_context(context), _RESET_NOTICE)
+        if self.max_protocol_retries:
+            projected = _append_user(projected, _PROTOCOL_CORRECTION)
+        return projected
+
     async def stream(
         self, context: ModelContext, settings: ModelSettings | None = None
     ) -> AsyncIterator[ModelEvent]:
@@ -118,24 +133,13 @@ class CodingModelAdapter:
                 yield event
             return
         projected = _project_context(context)
-        window = self.provider.capabilities.context_window
-        if (
-            window is not None
-            and ConservativeTokenEstimator().estimate(projected).input_tokens + 256
-            > window
-        ):
-            raise ModelProtocolError(
-                "coding_projection_budget_exceeded",
-                "Coding provider projection exceeds the context budget reserve.",
-            )
         reset_notice = bool(getattr(self.worker_client, "pending_reset_notice", False))
         if reset_notice:
             projected = _append_user(
                 projected,
-                "Interpreter state has been reset. Previously created Python variables are no longer available.",
+                _RESET_NOTICE,
             )
         total_usage: Usage | None = None
-        last_error: ModelProtocolError | None = None
         for attempt in range(self.max_protocol_retries + 1):
             if state.provider_calls_used >= state.max_provider_calls:
                 raise ModelProtocolError(
@@ -145,15 +149,14 @@ class CodingModelAdapter:
             state.provider_calls_used += 1
             attempt_context = projected
             if attempt:
-                attempt_context = _append_user(projected, _correction(last_error))
+                attempt_context = _append_user(projected, _PROTOCOL_CORRECTION)
             response = await collect_model_stream(
                 self.provider, attempt_context, settings
             )
             total_usage = _merge_usage(total_usage, response.usage)
             try:
                 normalized = _normalize_response(response)
-            except ModelProtocolError as exc:
-                last_error = exc
+            except ModelProtocolError:
                 if attempt == self.max_protocol_retries:
                     raise
                 continue
@@ -228,7 +231,7 @@ def _project_context(context: ModelContext) -> ModelContext:
     segments: list[ModelContextSegment] = []
     pending_python: str | None = None
     for segment in context.segments:
-        if isinstance(segment, SummarySegment):
+        if isinstance(segment, (SummarySegment, ContextDataSegment)):
             segments.append(segment)
             continue
         if isinstance(segment, WorkspaceReferenceSegment):
@@ -376,11 +379,6 @@ def _append_user(context: ModelContext, text: str) -> ModelContext:
         (),
         context.recent_tail_complete,
     )
-
-
-def _correction(error: ModelProtocolError | None) -> str:
-    code = "invalid_coding_response" if error is None else error.code
-    return f"Protocol correction ({code}): return plain final text or exactly one closed ```python block."
 
 
 def _merge_usage(left: Usage | None, right: Usage | None) -> Usage | None:

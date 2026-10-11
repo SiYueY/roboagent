@@ -69,3 +69,11 @@ side-effecting and retry-unsafe.
 
 See [examples/coding/README.md](examples/coding/README.md) for configuration,
 evaluation, attribution, and safety details.
+
+## Environment cognition and Interaction
+
+An optional Host-owned `World` supplies immutable current cognition to each Model
+Turn without changing Session transcripts. Query tools remain explicit. Direct
+media uses `roboagent.interaction.vision` and `roboagent.interaction.speech`.
+See [integration contracts](docs/embodied.md) and the
+[CPU MuJoCo example](examples/embodied/README.md).

@@ -58,7 +58,7 @@ uv run python examples/chat/app.py
 `No supported WebSocket library detected`，请重新执行上面的 `uv sync` 命令后再启动。
 
 默认 `audio.processor: rnnoise` 会在服务端执行降噪；`vad.provider: silero` 使用本地 ONNX
-模型。将 Silero 模型放在 `roboagent/speech/audio/data/silero_vad.onnx`，或在配置中设置
+模型。将 Silero 模型放在 `roboagent/interaction/speech/audio/data/silero_vad.onnx`，或在配置中设置
 `speech.vad.model_path`（也可使用 `ROBOAGENT_SILERO_VAD_MODEL`）。模型不可用时会记录明确警告，并
 优先使用 RNNoise 产生的人声概率、再退化到能量门限；在生产环境可设置 `speech.vad.required: true`
 禁止该退化。

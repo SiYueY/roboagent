@@ -15,6 +15,7 @@ from .budget import (
 )
 
 from .manager import (
+    ContextDataSegment,
     ContextError,
     ContextManager,
     ContextRequest,
@@ -36,6 +37,7 @@ from .manager import (
 )
 
 __all__ = [
+    "ContextDataSegment",
     "ContextError",
     "ContextManager",
     "ContextRequest",

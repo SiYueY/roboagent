@@ -293,8 +293,17 @@ def create_coding_session(
     registry = base_agent.tool_registry.snapshot()
     registry.register(execute_python)
     prompt = _coding_prompt(base_agent.prompt, specs)
+    projection = adapter.project_model_input
+    if base_agent.model_input_projection is not None:
+        provider_projection = base_agent.model_input_projection
+
+        def projection(context):
+            return provider_projection(adapter.project_model_input(context))
+
     derived = Agent(
         adapter,
+        world=base_agent.world,
+        model_input_projection=projection,
         tool_registry=registry,
         prompt=prompt,
         context_manager=base_agent.context_manager,

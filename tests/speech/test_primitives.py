@@ -4,19 +4,19 @@ import unittest
 from collections.abc import AsyncIterator, Sequence
 from importlib.util import find_spec
 
-from roboagent.speech.audio.buffer import AudioBuffer
-from roboagent.speech.audio.frame import AudioFrameAssembler
-from roboagent.speech.audio.passthrough import PassthroughAudioProcessor
-from roboagent.speech.audio.rnnoise import RNNoiseProcessor
-from roboagent.speech.audio.webrtc import WebRTCAudioProcessor
-from roboagent.speech.audio.vad import EnergyVAD, SileroVAD, VADState
-from roboagent.speech.config import DashScopeTTSConfig, SpeechConfig
-from roboagent.speech.event import SpeechStartedEvent
-from roboagent.speech.session import SpeechSession
-from roboagent.speech.text.segmenter import TextSegmenter
-from roboagent.speech.turn.detector import TurnDetector
-from roboagent.speech.turn.interruption import InterruptionDetector
-from roboagent.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
+from roboagent.interaction.speech.audio.buffer import AudioBuffer
+from roboagent.interaction.speech.audio.frame import AudioFrameAssembler
+from roboagent.interaction.speech.audio.passthrough import PassthroughAudioProcessor
+from roboagent.interaction.speech.audio.rnnoise import RNNoiseProcessor
+from roboagent.interaction.speech.audio.webrtc import WebRTCAudioProcessor
+from roboagent.interaction.speech.audio.vad import EnergyVAD, SileroVAD, VADState
+from roboagent.interaction.speech.config import DashScopeTTSConfig, SpeechConfig
+from roboagent.interaction.speech.event import SpeechStartedEvent
+from roboagent.interaction.speech.session import SpeechSession
+from roboagent.interaction.speech.text.segmenter import TextSegmenter
+from roboagent.interaction.speech.turn.detector import TurnDetector
+from roboagent.interaction.speech.turn.interruption import InterruptionDetector
+from roboagent.interaction.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
 
 
 class SpeechPrimitiveTests(unittest.TestCase):

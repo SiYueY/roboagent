@@ -7,8 +7,8 @@ import logging
 from roboagent.agent import Agent
 from roboagent.config import load_app_config
 from roboagent.model import create_model
-from roboagent.speech.errors import SpeechConfigurationError
-from roboagent.speech.factory import create_local_transport, create_speech_session
+from roboagent.interaction.speech.errors import SpeechConfigurationError
+from roboagent.interaction.speech.factory import create_local_transport, create_speech_session
 
 
 async def main() -> None:

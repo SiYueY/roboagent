@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from roboagent.context.manager import (
+    ContextDataSegment,
     CompactionUpdate,
     ContextError,
     ContextManager,
@@ -93,7 +94,11 @@ class ConservativeTokenEstimator:
         for tool in context.tools:
             characters += len(tool.name) + len(tool.description) + len(canonical_json_dumps(tool.input_schema))
         for segment in context.segments:
-            if isinstance(segment, SummarySegment):
+            if isinstance(segment, ContextDataSegment):
+                from .world import _context_data_text
+
+                characters += len(_context_data_text(segment))
+            elif isinstance(segment, SummarySegment):
                 characters += len(segment.text) + 32
             elif isinstance(segment, MessageSegment):
                 message = segment.message
@@ -211,50 +216,112 @@ class CompactingContextManager(ContextManager):
         self.summarizer_settings = summarizer_settings or ModelSettings()
         self.summarizer_estimator = summarizer_estimator or self.estimator
 
-    async def prepare(self, request: ContextRequest, cancellation: CancellationToken) -> PreparedContext:
+    async def prepare(
+        self, request: ContextRequest, cancellation: CancellationToken
+    ) -> PreparedContext:
         cancellation.raise_if_cancelled()
         snapshot = request.snapshot
         base = await self.renderer.render(snapshot.prompt, cancellation)
-        prompt = _compose_prompt(base, snapshot.skill_metadata)
+        prompt = _compose_prompt(
+            base, snapshot.skill_metadata, request.world_snapshot is not None
+        )
         groups = _message_groups(snapshot.transcript)
         boundaries = _group_boundaries(groups)
         old = request.current_compaction
-        valid = old is not None and self._valid_summary(old, snapshot.transcript, boundaries)
+        valid = old is not None and self._valid_summary(
+            old, snapshot.transcript, boundaries
+        )
         current = old if valid else None
-        clear_update = CompactionUpdate(None, old.source_digest) if old is not None and not valid else None
-        context = ModelContext(prompt, _project_segments(snapshot.transcript, current), snapshot.tool_definitions)
-        input_budget = _input_budget(self.budget, request.model_capabilities, request.model_settings, self.provider_default_reserve)
-        if self._estimate(context) <= input_budget:
+        clear_update = (
+            CompactionUpdate(None, old.source_digest)
+            if old is not None and not valid
+            else None
+        )
+        from .world import (
+            _bounded_world_entries,
+            _world_segment,
+            _protected_world_entries,
+        )
+
+        protected = _protected_world_entries(request)
+        entries = _bounded_world_entries(request, protected)
+        input_budget = _input_budget(
+            self.budget,
+            request.model_capabilities,
+            request.model_settings,
+            self.provider_default_reserve,
+        )
+        while True:
+            data_segments = _world_segment(request, entries)
+            context = ModelContext(
+                prompt,
+                (*data_segments, *_project_segments(snapshot.transcript, current)),
+                snapshot.tool_definitions,
+            )
+            if self._estimate(context, request) <= input_budget:
+                break
+            removable = next(
+                (
+                    index
+                    for index in range(len(entries) - 1, -1, -1)
+                    if (entries[index].subject.id, entries[index].predicate)
+                    not in protected
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            entries = entries[:removable] + entries[removable + 1 :]
+
+        if self._estimate(context, request) <= input_budget:
             return PreparedContext(context, Usage(0, 0, 0), clear_update)
 
-        static = ModelContext(prompt, (), snapshot.tool_definitions)
-        if self._estimate(static) > input_budget:
+        static = ModelContext(prompt, data_segments, snapshot.tool_definitions)
+        if self._estimate(static, request) > input_budget:
             raise ContextBudgetError("context_budget_exceeded", "static_overhead")
 
         tail_start = _minimum_tail_start(groups, self.policy.min_recent_turns)
         if tail_start == 0:
             raise ContextBudgetError("context_budget_exceeded", "minimum_retained_tail")
         for group in groups[tail_start:]:
-            group_context = ModelContext(prompt, tuple(MessageSegment(item) for item in group), snapshot.tool_definitions)
-            if self._estimate(group_context) > input_budget:
-                raise ContextBudgetError("context_budget_exceeded", "atomic_group_too_large")
+            group_context = ModelContext(
+                prompt,
+                (*data_segments, *(MessageSegment(item) for item in group)),
+                snapshot.tool_definitions,
+            )
+            if self._estimate(group_context, request) > input_budget:
+                raise ContextBudgetError(
+                    "context_budget_exceeded", "atomic_group_too_large"
+                )
 
         old_end = current.source_end_exclusive if current is not None else 0
-        candidate_ends = [boundary for boundary in boundaries if old_end < boundary <= sum(len(group) for group in groups[:tail_start])]
+        candidate_ends = [
+            boundary
+            for boundary in boundaries
+            if old_end < boundary <= sum(len(group) for group in groups[:tail_start])
+        ]
         target = max(1, int(input_budget * self.policy.target_ratio))
-        placeholder = current.text if current is not None else "Earlier conversation summary."
+        placeholder = (
+            current.text if current is not None else "Earlier conversation summary."
+        )
         end = None
         for boundary in candidate_ends:
             projected = ModelContext(
                 prompt,
-                (SummarySegment(placeholder), *(MessageSegment(item) for item in snapshot.transcript[boundary:])),
+                (
+                    *data_segments,
+                    SummarySegment(placeholder),
+                    *(MessageSegment(item) for item in snapshot.transcript[boundary:]),
+                ),
                 snapshot.tool_definitions,
             )
-            if self._estimate(projected) <= target:
+            if self._estimate(projected, request) <= target:
                 end = boundary
                 break
         if end is None:
-            raise ContextBudgetError("context_budget_exceeded", "summary_and_minimum_tail")
+            raise ContextBudgetError(
+                "context_budget_exceeded", "summary_and_minimum_tail"
+            )
 
         new_messages = snapshot.transcript[old_end:end]
         self._check_summarizer_input(current, new_messages)
@@ -267,9 +334,13 @@ class CompactingContextManager(ContextManager):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise ContextBudgetError("context_compaction_error", "summarizer_failure") from exc
+            raise ContextBudgetError(
+                "context_compaction_error", "summarizer_failure"
+            ) from exc
         if not isinstance(result, SummaryResult):
-            raise ContextBudgetError("context_compaction_error", "invalid_summary_result")
+            raise ContextBudgetError(
+                "context_compaction_error", "invalid_summary_result"
+            )
         cancellation.raise_if_cancelled()
         summary = ContextSummary(
             0,
@@ -279,15 +350,23 @@ class CompactingContextManager(ContextManager):
             self.summary_format_version,
             result.summarizer_id,
         )
-        projected = ModelContext(prompt, _project_segments(snapshot.transcript, summary), snapshot.tool_definitions)
-        if self._estimate(projected) > target:
-            raise ContextBudgetError("context_budget_exceeded", "summary_and_minimum_tail")
+        projected = ModelContext(
+            prompt,
+            (*data_segments, *_project_segments(snapshot.transcript, summary)),
+            snapshot.tool_definitions,
+        )
+        if self._estimate(projected, request) > target:
+            raise ContextBudgetError(
+                "context_budget_exceeded", "summary_and_minimum_tail"
+            )
         expected = old.source_digest if old is not None else None
-        return PreparedContext(projected, result.usage, CompactionUpdate(summary, expected))
+        return PreparedContext(
+            projected, result.usage, CompactionUpdate(summary, expected)
+        )
 
-    def _estimate(self, context: ModelContext) -> int:
+    def _estimate(self, context: ModelContext, request: ContextRequest) -> int:
         try:
-            estimate = self.estimator.estimate(context)
+            estimate = _estimate_model_input(self.estimator, request, context)
         except TokenEstimationError:
             raise
         except Exception as exc:
@@ -366,3 +445,31 @@ def _minimum_tail_start(groups: tuple[tuple[AgentMessage, ...], ...], turns: int
             if seen == turns:
                 return index
     return 0
+
+
+def _estimate_model_input(
+    estimator: TokenEstimator,
+    request: ContextRequest,
+    context: ModelContext,
+) -> TokenEstimate:
+    """Estimate canonical contracts and the full provider encoding envelope.
+
+    A Host's pure projection may conservatively include bounded adapter notices.
+    Keeping the larger estimate preserves system/Tool/Skill contract budgeting
+    even if a provider encoding replaces native Tool schemas with text.
+    """
+    estimate = estimator.estimate(context)
+    if not isinstance(estimate, TokenEstimate):
+        raise TokenEstimationError("invalid_estimate")
+    if request.model_input_projection is None:
+        return estimate
+    projected = request.model_input_projection(context)
+    if not isinstance(projected, ModelContext):
+        raise TokenEstimationError("invalid_model_input_projection")
+    provider_estimate = estimator.estimate(projected)
+    if not isinstance(provider_estimate, TokenEstimate):
+        raise TokenEstimationError("invalid_estimate")
+    return TokenEstimate(
+        max(estimate.input_tokens, provider_estimate.input_tokens),
+        False,  # Provider notices make this an upper bound, not exact usage.
+    )

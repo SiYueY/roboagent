@@ -165,10 +165,13 @@ async def _run_loop_impl(
             await session.consume_pending(run_context.run_id, run_context.cancellation)
         update_state(RunPhase.PREPARING_CONTEXT, turn)
         try:
+            transcript, current_compaction = await session.capture_context_state(
+                run_context.run_id
+            )
+            world_snapshot = (
+                await agent.world.snapshot() if agent.world is not None else None
+            )
             while True:
-                transcript, current_compaction = await session.capture_context_state(
-                    run_context.run_id
-                )
                 request = ContextRequest(
                     snapshot=ContextSnapshot(
                         session_id=session.session_id,
@@ -180,6 +183,8 @@ async def _run_loop_impl(
                     model_settings=config.model_settings or ModelSettings(),
                     model_capabilities=agent.model.capabilities,
                     current_compaction=current_compaction,
+                    world_snapshot=world_snapshot,
+                    model_input_projection=agent.model_input_projection,
                 )
                 prepared = await agent.context_manager.prepare(
                     request, run_context.cancellation
@@ -211,6 +216,9 @@ async def _run_loop_impl(
                         )
                     await events.emit("context.compaction_completed", **payload)  # type: ignore[arg-type]
                     break
+                transcript, current_compaction = await session.capture_context_state(
+                    run_context.run_id
+                )
             model_context = prepared.model_context
             if not isinstance(model_context, ModelContext):
                 raise TypeError("PreparedContext must contain ModelContext.")

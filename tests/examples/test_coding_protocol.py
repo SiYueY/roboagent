@@ -139,3 +139,20 @@ def test_artifact_handle_requires_canonical_digest_and_uri() -> None:
         ArtifactHandle("https://example.com/a", None, 1, "sha256:" + "a" * 64, None)
     with pytest.raises(ValueError):
         ArtifactHandle("workspace://files/a", None, 1, "missing", None)
+
+
+def test_explicit_world_tools_project_nested_structured_search_filters():
+    from roboagent.world import World, create_world_tools
+
+    tools = create_world_tools(World("world"))
+    specs = project_tools(tuple(tool.definition for tool in tools))
+    assert {spec.canonical_name for spec in specs} == {
+        "world_query",
+        "world_find_entities",
+    }
+    search = next(
+        spec for spec in specs if spec.canonical_name == "world_find_entities"
+    )
+    assert search.arguments(
+        (), {"filters": {"color": "red", "position": [1, 2, 3]}}
+    ) == {"filters": {"color": "red", "position": [1, 2, 3]}}

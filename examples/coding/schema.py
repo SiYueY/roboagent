@@ -182,7 +182,11 @@ def _supported_schema(value: object) -> bool:
         if "items" not in value or not _supported_schema(value["items"]):
             return False
     if non_null == "object" and not _supported_object(value):
-        return False
+        # A plain nested JSON mapping is the World search filter primitive.
+        # Top-level Tool arguments remain closed, and complex object schemas
+        # still require the existing explicit-properties subset.
+        if not _plain_json_mapping(value):
+            return False
     if "enum" in value:
         enum = value["enum"]
         if not isinstance(enum, list) or not all(
@@ -192,6 +196,15 @@ def _supported_schema(value: object) -> bool:
     if "default" in value and not _validate_value(value["default"], value):
         return False
     return True
+
+
+def _plain_json_mapping(schema: dict[str, object]) -> bool:
+    return (
+        schema.get("type") == "object"
+        and schema.get("additionalProperties", True) is True
+        and set(schema)
+        <= {"type", "additionalProperties", "description", "title", "default"}
+    )
 
 
 def _matches_type(value: object, types: list[object]) -> bool:
@@ -224,7 +237,7 @@ def _validate_value(value: object, schema: dict[str, object]) -> bool:
         return False
     if isinstance(value, list) and "items" in schema:
         return all(_validate_value(item, schema["items"]) for item in value)  # type: ignore[arg-type]
-    if isinstance(value, dict) and schema.get("type") == "object":
+    if isinstance(value, dict) and schema.get("type") == "object" and not _plain_json_mapping(schema):
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         if not isinstance(properties, dict) or not isinstance(required, list):

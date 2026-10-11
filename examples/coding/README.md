@@ -54,6 +54,19 @@ sandboxed, may access host resources outside the workspace, is statically
 side-effecting, and adds a `TRUSTED_EXECUTION` retry blocker as soon as user code
 starts.
 
+## World and context encoding
+
+`create_coding_session()` preserves the base Agent's World binding, context manager,
+policy and registered capabilities. Explicit `world_query` and `world_find_entities`
+Tools are callable through the same worker bridge; nested plain JSON mapping
+parameters support structured filters without opening top-level arguments.
+
+ContextManager validates the complete input budget using the coding encoding
+projection, including reset notice and bounded protocol retry text. The adapter
+retains its provider-call count limit, but does not choose a separate token budget.
+World ContextDataSegment stays before the transcript on every provider attempt and
+never enters Session persistence or compaction.
+
 ## Evaluation and provenance
 
 Deterministic CI tests cover repository understanding, edit/test workflows,

@@ -17,7 +17,7 @@ from roboagent.agent import Agent
 from roboagent.config import load_app_config
 from roboagent.context import PromptInput
 from roboagent.model import create_model
-from roboagent.speech import SpeechConfig
+from roboagent.interaction.speech import SpeechConfig
 from speech_server import ConversationRegistry, install_speech_route
 from ui import chat_launch_options, create_demo
 

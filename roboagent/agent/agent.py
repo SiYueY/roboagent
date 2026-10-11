@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Sequence
+from collections.abc import Callable
 
 from roboagent.agent.hooks import RunHook
 from roboagent.agent.types import RunConfig
-from roboagent.context import ContextManager, FullContextManager, PromptInput
+from roboagent.context import ContextManager, FullContextManager, ModelContext, PromptInput
 from roboagent.message import AgentMessage, MediaLimits
 from roboagent.model import Model
+from roboagent.world import World
 from roboagent.tool import (
     ApprovalProvider,
     ApprovalSettings,
@@ -36,6 +38,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class Agent:
     model: Model
+    world: World | None = None
+    model_input_projection: Callable[[ModelContext], ModelContext] | None = None
     tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     prompt: PromptInput | None = None
     context_manager: ContextManager = field(default_factory=FullContextManager)
@@ -51,6 +55,8 @@ class Agent:
         self,
         model: Model,
         *,
+        world: World | None = None,
+        model_input_projection: Callable[[ModelContext], ModelContext] | None = None,
         tool_registry: ToolRegistry | None = None,
         prompt: PromptInput | None = None,
         context_manager: ContextManager | None = None,
@@ -84,6 +90,12 @@ class Agent:
             raise TypeError("default_run_config must be RunConfig or None.")
         if media_limits is not None and not isinstance(media_limits, MediaLimits):
             raise TypeError("media_limits must be MediaLimits or None.")
+        if world is not None and not isinstance(world, World):
+            raise TypeError("world must be World or None.")
+        if model_input_projection is not None and not callable(model_input_projection):
+            raise TypeError("model_input_projection must be callable or None.")
+        object.__setattr__(self, "model_input_projection", model_input_projection)
+        object.__setattr__(self, "world", world)
         object.__setattr__(self, "model", model)
         object.__setattr__(
             self, "tool_registry", (tool_registry or ToolRegistry()).snapshot()._seal()

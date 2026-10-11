@@ -13,6 +13,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+embodied = [
+    "mujoco>=3.3,<4",
+]
 coding = [
     "rich>=13",
 ]
@@ -69,6 +72,10 @@ files = [
     "roboagent/message.py",
     "roboagent/context/manager.py",
     "roboagent/context/budget.py",
+    "roboagent/context/world.py",
+    "roboagent/world",
+    "roboagent/interaction/vision",
+    "examples/embodied",
     "roboagent/tool/tool.py",
     "roboagent/tool/workspace.py",
     "roboagent/tool/apply_patch.py",

@@ -305,3 +305,75 @@ def test_trusted_worker_crash_resets_and_run_recovers(tmp_path: Path) -> None:
             await coding.close()
 
     asyncio.run(check())
+
+
+def test_coding_factory_preserves_world_binding_and_context_authority(
+    tmp_path: Path,
+) -> None:
+    async def check():
+        from roboagent.context import ContextDataSegment
+        from roboagent.world import create_world_tools
+        from tests.world.test_world import world, observation, claim
+
+        w = world()
+        await w.observe(observation(), claims=[claim()])
+        provider = CodingProvider(["world inspected"])
+        base = Agent(
+            provider, world=w, tool_registry=ToolRegistry(create_world_tools(w))
+        )
+        coding = create_coding_session(
+            base, config=CodingConfig(observation_root=tmp_path)
+        )
+        try:
+            derived = coding.session.agent
+            assert derived.world is w
+            assert derived.context_manager is base.context_manager
+            assert derived.model_input_projection is not None
+            result = await coding.run("inspect world")
+            assert result.status is RunStatus.COMPLETED
+            segment = provider.contexts[0].segments[0]
+            assert isinstance(segment, ContextDataSegment)
+            assert segment.source_id == w.world_id
+        finally:
+            await coding.close()
+
+    asyncio.run(check())
+
+
+def test_coding_world_search_and_query_use_registered_read_only_tools(
+    tmp_path: Path,
+) -> None:
+    async def check():
+        from roboagent.world import create_world_tools
+        from tests.world.test_world import world, observation, claim
+
+        w = world()
+        await w.observe(observation(), claims=[claim()])
+        provider = CodingProvider(
+            [
+                "```python\nfound = world_find_entities(filters={'color': 'red'})\nstate = world_query(entity_id=found['candidates'][0]['entity']['id'], predicate='color')\nfinal_answer(state['value'])\n```"
+            ]
+        )
+        base = Agent(
+            provider, world=w, tool_registry=ToolRegistry(create_world_tools(w))
+        )
+        coding = create_coding_session(
+            base, config=CodingConfig(observation_root=tmp_path)
+        )
+        try:
+            result = await coding.run("find red entities and query color")
+            assert result.status is RunStatus.COMPLETED
+            assert result.output.content[0].text == "red"
+            assert (await w.snapshot()).revision == 1
+            assert {record.tool_name for record in result.execution_records} >= {
+                "world_find_entities",
+                "world_query",
+            }
+            assert all(
+                effect.effect_kind is ToolEffectKind.READ_ONLY
+                for effect in result.effects
+            )
+        finally:
+            await coding.close()
+
+    asyncio.run(check())

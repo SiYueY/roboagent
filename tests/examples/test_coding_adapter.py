@@ -183,22 +183,111 @@ def test_all_supported_segments_project_and_unknown_cannot_sneak_through() -> No
     asyncio.run(check())
 
 
-def test_projection_reserves_256_tokens() -> None:
+def test_context_manager_owns_coding_projection_and_retry_budget() -> None:
     async def check() -> None:
-        provider = ScriptedProvider([("unused", FinishReason.STOP)])
-        provider.capabilities = ModelCapabilities(
-            frozenset({Modality.TEXT}),
-            frozenset({Modality.TEXT}),
-            context_window=256,
+        from roboagent.context import (
+            CompactingContextManager,
+            ContextBudget,
+            ContextBudgetError,
+            ContextRequest,
+            ContextSnapshot,
         )
+        from roboagent.model import ModelSettings
+        from roboagent.runtime import RuntimeCancellation
+
+        provider = ScriptedProvider([("unused", FinishReason.STOP)])
+        provider.capabilities = ModelCapabilities(context_window=100)
         adapter = CodingModelAdapter(provider)
-        state = CodingRunState("run", 1)
+        request = ContextRequest(
+            ContextSnapshot("session", (UserMessage("go"),), None, ()),
+            ModelSettings(max_output_tokens=1),
+            adapter.capabilities,
+            None,
+            model_input_projection=adapter.project_model_input,
+        )
+        manager = CompactingContextManager(
+            budget=ContextBudget(100), provider_default_reserve=0
+        )
+        with pytest.raises(ContextBudgetError) as caught:
+            await manager.prepare(request, RuntimeCancellation())
+        assert caught.value.code == "context_budget_exceeded"
+        assert provider.calls == 0
+
+    asyncio.run(check())
+
+
+def test_context_budget_covers_reset_notice_and_every_protocol_retry() -> None:
+    async def check():
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from roboagent.context import (
+            ContextBudget,
+            ContextDataSegment,
+            ContextRequest,
+            ContextSnapshot,
+            FullContextManager,
+            ConservativeTokenEstimator,
+        )
+        from roboagent.model import ModelSettings
+        from roboagent.runtime import RuntimeCancellation
+        from roboagent.world import WorldSnapshot
+
+        provider = ScriptedProvider(
+            [("```python\n", FinishReason.STOP), ("done", FinishReason.STOP)]
+        )
+        provider.capabilities = ModelCapabilities(context_window=2048)
+        adapter = CodingModelAdapter(provider)
+        adapter.worker_client = SimpleNamespace(pending_reset_notice=True)
+        state = CodingRunState("run", 2)
         adapter.bind(state)
         try:
-            with pytest.raises(ModelProtocolError) as caught:
-                await collect_model_stream(adapter, ModelContext(None, (), ()))
-            assert caught.value.code == "coding_projection_budget_exceeded"
-            assert provider.calls == 0
+            request = ContextRequest(
+                ContextSnapshot("session", (UserMessage("inspect"),), None, ()),
+                ModelSettings(max_output_tokens=128),
+                adapter.capabilities,
+                None,
+                WorldSnapshot("w", 1, datetime.now(timezone.utc), ()),
+                adapter.project_model_input,
+            )
+            prepared = await FullContextManager(budget=ContextBudget(2048)).prepare(
+                request, RuntimeCancellation()
+            )
+            canonical = prepared.model_context
+            assert isinstance(canonical.segments[0], ContextDataSegment)
+            assert len(canonical.segments) == 2  # envelopes never enter transcript
+            upper_bound = (
+                ConservativeTokenEstimator()
+                .estimate(adapter.project_model_input(canonical))
+                .input_tokens
+            )
+            response = await collect_model_stream(
+                adapter, canonical, request.model_settings
+            )
+            assert (
+                response.message.content[0].text == "done"
+                and len(provider.contexts) == 2
+            )
+            for actual in provider.contexts:
+                estimate = ConservativeTokenEstimator().estimate(actual).input_tokens
+                assert estimate <= upper_bound <= 2048 - 128
+                assert actual.segments[0] is canonical.segments[0]
+            assert adapter.worker_client.pending_reset_notice is False
+            # Reserving exactly the bound succeeds; one token less is rejected
+            # by ContextManager before issuing any provider request.
+            from roboagent.context import ContextBudgetError
+
+            estimate = ConservativeTokenEstimator().estimate(canonical).input_tokens
+            limit = max(estimate, upper_bound) + 1
+            await FullContextManager(budget=ContextBudget(limit)).prepare(
+                replace(request, model_settings=ModelSettings(max_output_tokens=1)),
+                RuntimeCancellation(),
+            )
+            with pytest.raises(ContextBudgetError):
+                await FullContextManager(budget=ContextBudget(limit - 1)).prepare(
+                    replace(request, model_settings=ModelSettings(max_output_tokens=1)),
+                    RuntimeCancellation(),
+                )
         finally:
             adapter.unbind(state)
 

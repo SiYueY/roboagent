@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import unittest
 
-from roboagent.speech.config import SpeechConfig
-from roboagent.speech.factory import create_speech_session
-from roboagent.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
+from roboagent.interaction.speech.config import SpeechConfig
+from roboagent.interaction.speech.factory import create_speech_session
+from roboagent.interaction.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
 
 
 class _FakeASR:

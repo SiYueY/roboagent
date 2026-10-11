@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from roboagent.speech.transport.local import LocalSpeechTransport
-from roboagent.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
+from roboagent.interaction.speech.transport.local import LocalSpeechTransport
+from roboagent.interaction.speech.types import AudioChunk, DEFAULT_INPUT_FORMAT
 
 
 class _Input:

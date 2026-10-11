@@ -13,7 +13,7 @@ from roboagent.config.model_config import load_yaml_mapping, resolve_model_confi
 from roboagent.model.providers import ProviderModelConfig
 from roboagent.model.registry import ModelRegistry
 from roboagent.skill import SkillConfig, SkillManager
-from roboagent.speech.config import SpeechConfig
+from roboagent.interaction.speech.config import SpeechConfig
 
 
 class AppConfig(BaseModel):

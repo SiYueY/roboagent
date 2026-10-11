@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 import unittest
 
-from roboagent.speech._dashscope import get_field
+from roboagent.interaction.speech._dashscope import get_field
 
 
 class DashScopeHelperTests(unittest.TestCase):
