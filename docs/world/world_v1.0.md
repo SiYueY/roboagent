@@ -1,9 +1,11 @@
-# RoboAgent Embodied Integration Architecture
+# Legacy / Superseded: RoboAgent Embodied Integration Architecture
 
 **版本**：V2.4（实施契约合并版）\
 **日期**：2026-10-11\
 **适用仓库**：`SiYueY/roboagent`\
-**文档性质**：目标架构与实施契约；已合并原实施契约补丁，本文为 Initial Embodied Release 的完整、独立实施规范。接口与示例表达目标契约，不表示仓库当前已经全部实现或验收。
+**文档性质**：历史 embodied 设计记录，已被现行契约取代；不再是规范性 Core specification。
+
+本文正文保留原始设计语境，仅供历史参考，不通过“未明确修改的内容继续继承”赋予任何现行规范效力。通用 World 的独立规范是 [World V1.1](world_v1.1.md)；embodied reference application 的现行契约是 [Embodied reference application](../examples/embodied.md)。以下历史版本、原则、接口和实施阶段不表示当前实现或验收状态。
 
 **最高原则**：
 

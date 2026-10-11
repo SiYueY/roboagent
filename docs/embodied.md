@@ -3,8 +3,9 @@
 This is a reference application of RoboAgent primitives, not a Core specification.
 Embodied Reference Agent validates World/Runtime composition; it does not define Core APIs.
 The application contract is [Embodied reference application](examples/embodied.md);
-its generic cognition contract is [World V1.1](world/world_v1.1.md), inheriting
-[World V1.0](world/world_v1.0.md) where unchanged. Environment
+its independent generic cognition contract is [World V1.1](world/world_v1.1.md).
+[World V1.0](world/world_v1.0.md) is historical embodied design context, not a
+normative Core contract. Environment
 cognition belongs to World, conversation to Session, and execution/effects to the
 existing Run/Execution. Host adapters and observation/action Tools remain explicit.
 

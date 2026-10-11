@@ -346,7 +346,7 @@ def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
         )
         with gr.Row(elem_id="workspace", equal_height=False):
             with gr.Column(elem_id="sidebar", scale=0, min_width=260):
-                gr.Markdown("# RoboAgent\n轻量级机器人智能助手", elem_id="brand")
+                gr.Markdown("# RoboAgent Chat\n轻量级 AI Agent 助手", elem_id="brand")
                 new_button = gr.Button("＋ 新建对话", variant="secondary", size="sm", elem_id="new-chat")
                 session_list = gr.Radio(
                     choices=conversation_choices(initial_state),
@@ -420,7 +420,7 @@ def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:
                                 elem_id="send-button",
                             )
                     gr.Markdown(
-                        "帮我检查机器人的当前状态……",
+                        "帮我整理当前信息并给出建议……",
                         elem_id="voice-caption",
                         container=False,
                     )

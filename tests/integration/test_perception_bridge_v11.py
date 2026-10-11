@@ -145,7 +145,7 @@ def test_cloud_output_is_bound_to_original_capture_and_association():
         import json
         from examples.embodied.perception import CloudSemantics
         from roboagent.message import AssistantMessage
-        from tests.integration.test_embodied_loop import ScriptedModel
+        from tests.support.models import ScriptedModel
 
         response = {
             "source": "camera",

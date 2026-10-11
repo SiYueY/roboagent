@@ -190,7 +190,7 @@ def test_canonical_nested_attempt_blocks_later_direct_action():
         from roboagent import Agent
         from roboagent.message import AssistantMessage, UserMessage
         from roboagent.tool import Tool, ToolDefinition, ToolJsonContent
-        from tests.integration.test_embodied_loop import ScriptedModel
+        from tests.support.models import ScriptedModel
 
         table = Tabletop()
         await table.observe()

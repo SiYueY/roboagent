@@ -4,7 +4,7 @@ from roboagent import Agent
 from roboagent.message import AssistantMessage, ToolCall, UserMessage
 from roboagent.runtime import RunStatus
 from roboagent.tool import Tool, ToolDefinition, ToolJsonContent, ToolRegistry
-from tests.integration.test_embodied_loop import ScriptedModel
+from tests.support.models import ScriptedModel
 from tests.world.test_world import claim, observation, world
 
 

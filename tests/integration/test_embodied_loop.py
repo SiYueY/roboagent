@@ -6,15 +6,6 @@ import json
 from roboagent import Agent
 from roboagent.context import ContextDataSegment, FullContextManager
 from roboagent.message import AssistantMessage, FrozenJsonObject, ToolCall, UserMessage
-from roboagent.model import (
-    FinishReason,
-    ModelCapabilities,
-    ModelResponse,
-    ResponseCompleted,
-    ResponseStarted,
-    ToolCallCompleted,
-    ToolCallStarted,
-)
 from roboagent.runtime import RunStatus
 from roboagent.tool import (
     Tool,
@@ -24,33 +15,8 @@ from roboagent.tool import (
     ToolRegistry,
 )
 from roboagent.world import EntityRef, create_world_tools
+from tests.support.models import ScriptedModel
 from tests.world.test_world import claim, observation, world
-
-
-class ScriptedModel:
-    capabilities = ModelCapabilities(tool_calling=True)
-
-    def __init__(self, *messages):
-        self.messages = iter(messages)
-        self.contexts = []
-
-    async def stream(self, context, settings=None):
-        self.contexts.append(context)
-        message = next(self.messages)
-        yield ResponseStarted("test", 0)
-        sequence = 1
-        for index, call in enumerate(message.tool_calls):
-            yield ToolCallStarted(sequence, index, call.id, call.name)
-            sequence += 1
-            yield ToolCallCompleted(sequence, index, call)
-            sequence += 1
-        yield ResponseCompleted(
-            sequence,
-            ModelResponse(
-                message,
-                FinishReason.TOOL_CALL if message.tool_calls else FinishReason.STOP,
-            ),
-        )
 
 
 def values(context):

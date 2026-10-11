@@ -2,11 +2,11 @@
 
 **状态：Implementation Specification**
 
-**基线：[`world_v1.0.md`](world_v1.0.md)**
+**历史参考（非规范性）：[`world_v1.0.md`](world_v1.0.md)**
 
 **范围：Optional external-environment cognition / Context projection / causal source context**
 
-本文继承 V1.0 中未被明确修改的通用 World 契约；冲突时以本文为准。具体 embodied reference 契约已移到 [Embodied reference application](../examples/embodied.md)，不定义 RoboAgent Core API。
+本文是独立、完整的 Generic World specification，取代历史 `world_v1.0.md` 的 Core World 部分。历史文档仅保留设计背景，不是规范性 Core specification；本文不开放继承其中未覆盖的规则。当前通用规则在本文中明确列出。具体 embodied reference 契约见 [Embodied reference application](../examples/embodied.md)，不定义 RoboAgent Core API。
 
 # 1. 定位与 ownership
 
@@ -23,6 +23,124 @@ World 不启动 Run，不获取传感器或服务数据，不拥有 controller�
 `One Agent, One Runtime` 与 `Primitives, not Features` 同时适用于所有 reference application。Chat、Coding、Embodied、Web 等都是 primitives 的 consumer，不能以 reference implementation 的便利性定义 Core。
 
 以下内容不是 Core 不变量：每轮只允许一个 physical action、完整 state readiness、控制权、RGB-D/TF、抓放、动作后 evidence barrier。这些规则只约束明确选择该策略的 Host/reference application。
+
+## 1.1 生命周期、身份与授权
+
+World 可以由同一 Host 的多个 Agent/Session 显式共享，其 lifetime 独立于单次 Run。结束或取消 Run、清理 Session、发生 Tool failure，都不能自动清空 World 或修改 evidence。Agent 的 `world=None` 不创建隐式 World，也不注册任何 query/observation Tool。
+
+Host 认证 writer，并绑定允许的 `world_id`、source 与 scope。World 不是同进程 security boundary：source 字符串表示 provenance，不是 credential；它只检查 configured membership 和数据不变量，不新增 SourceManager、ACL、RBAC 或 authenticated service。
+
+```python
+World(
+    world_id: str,
+    *,
+    limits: WorldLimits | None = None,
+    clock_resolver: ClockResolver | None = None,
+    allowed_sources: Sequence[str] = (),
+    allowed_scopes: Sequence[str | None] = (None,),
+)
+```
+
+默认不允许任何 source 写入；默认只接受 scope=None。Entity identity 是 `(world_id, EntityRef.id)`，没有 reserved entity 名称。EntityRef、ClaimRef 和 source/scope identity 是非空字符串；结构化数据使用不可变值对象和 frozen JSON。
+
+## 1.2 Observation、Claim 与 Evidence
+
+Observation 是 evidence envelope，World 不解释任意 payload，也不解析领域数据。Claim 是 Host/Adapter 显式提交的 semantic cognition input；Observation source 与 Claim producer source 可以不同。
+
+| 类型 | 字段 / 语义 |
+|---|---|
+| `ObservationTime` | `clock_id: str`, `nanoseconds: int`；非负整数采样时间 |
+| `ObservationRef` | `source: str`, `id: str`；Observation identity |
+| `EntityRef` | `id: str`；World 内的实体 identity |
+| `ClaimRef` | `id: str`；World 内的 Claim identity |
+| `EvidenceRef` | `kind: Literal["observation", "claim"]`, `source: str | None`, `id: str` |
+| `Observation` | `ref`, `modality`, `observed_at`, `received_at`, `payload: JsonValue | ResourceRef`, `scope: str | None = None` |
+| `Claim` | `ref`, `subject`, `predicate`, `value: JsonValue | EntityRef`, `kind`, `source`, `scope`, `evidence_refs`, `asserted_at`, `valid_at: ObservationTime | None = None`, `valid_for_ns: int | None = None`, `supersedes: tuple[ClaimRef, ...] = ()` |
+
+`ClaimKind` 是 closed enum：MEASUREMENT、INTERPRETATION、INFERENCE、HYPOTHESIS、PRIOR、PREDICTION。前三类必须提供 evidence_refs；非 grounded hypotheses/priors/predictions 不能仅凭 source 名称或声明升级为 grounded KNOWN。完整 Grounding 与 Resolution 规则见 §2.4–2.7。
+
+Observation evidence 必须引用已提交或同一事务中提交的 `ObservationRef(source, id)`，source 不能为 None。Claim evidence 必须引用存在的 ClaimRef；source 若提供，必须匹配该 Claim producer。Evidence 与 correction 组成的依赖图必须无环，允许引用同批次中的 Claim。
+
+`value` 的 closed union 区分 EntityRef relation 和任意 JSON，即使 JSON 恰好长得像 EntityRef 也不视为 relation。JSON 输出使用 `value_kind="entity_ref"` 与 `value={"entity_ref": {"id": "account_1"}}`，或 `value_kind="json"` 保留该区别。
+
+## 1.3 时间、Clock 与 Freshness
+
+`observed_at` 是外部系统实际采样的时间；`received_at`、`asserted_at` 和 `captured_at` 是有时区的 datetime，供审计/采集记录使用，不能替代采样时间排序。`clock_id` 表示可比较的时间域实例；Host process/service restart 或 clock reset 必须分配新 identity。
+
+```python
+class ClockResolver(Protocol):
+    def now(self, clock_id: str) -> ObservationTime | None: ...
+```
+
+不同 clock domain 默认不可比较，World 不隐式建立映射。Host 必须提供一致的 resolver；每个 snapshot 对一个 domain 使用同一 evaluation time。resolver 不可用时相关时间有效性为 UNKNOWN；返回错误 domain 或执行失败报 `clock_unavailable`。未来的 `valid_at` 为 UNRESOLVED，即使没有 TTL 也不能当成 LIVE。
+
+`valid_for_ns` 是非负整数，配置 TTL 时必须有 `valid_at`；freshness 依据同一 domain 的 `valid_at + valid_for_ns`，不依据 receive order。None 表示不自动按 TTL 过期，不表示永久真实。World 不根据 predicate/source 名称硬编码 TTL。有效 clock 下，时间到期可以让 Snapshot 状态改变，而 canonical revision 不变。
+
+## 1.4 公共 API 与原子事务
+
+```python
+async def observe(observation: Observation, *, claims: Sequence[Claim] = ()) -> WorldReceipt: ...
+async def add_claims(claims: Sequence[Claim]) -> WorldReceipt: ...
+async def snapshot() -> WorldSnapshot: ...
+async def query(entity: EntityRef, predicate: str, *, scope: str | None = None) -> WorldAnswer: ...
+async def find_entities(
+    filters: Mapping[str, JsonValue | EntityRef], *, scope: str | None = None,
+    include_possible: bool = False, limit: int = 16,
+) -> EntitySearchResult: ...
+```
+
+`observe()` 原子提交 immutable Observation 与同步 Claim set；迟到的解释使用 `add_claims()`，必须保留原始采样时间和 provenance。World 不把 Observation payload 自动转换为 Claim。
+
+| 输入 | 事务结果 |
+|---|---|
+| 同 Observation identity、同内容、同同步 Claim set 重试 | 幂等成功，revision 不变 |
+| 同 Observation identity，不同内容或不同同步 Claim set | `observation_conflict` |
+| 同 ClaimRef、同内容重试 | 幂等成功 |
+| 同 ClaimRef、不同内容 | `claim_conflict` |
+| Evidence 缺失或 source 不匹配 | `evidence_not_found` |
+| 任意无效条目、循环依赖、source/scope 不允许或容量溢出 | 整批拒绝，不产生 partial commit，不改变 revision |
+
+`supersedes` 表示认知纠错，不表示正常状态流更新；必须引用已存在且同一 `(subject, predicate, scope)` 的 Claim。它不能跨 scope 修正或自行引用。
+
+`WorldReceipt` 包含 `world_id`、`revision`、`changed`、`observation_ref: ObservationRef | None` 和 `committed_claim_refs`。changed 只表示 canonical evidence/claim set 的提交变化，不证明外部世界发生变化。每个有变化的事务仅增加一次 revision，重复事务不增加。
+
+WorldError 提供稳定 code，不在错误消息中暴露 resource contents。公共错误包括 `invalid_observation`、`observation_conflict`、`invalid_claim`、`claim_conflict`、`evidence_not_found`、`source_not_allowed`、`scope_not_allowed`、`world_capacity_exceeded`、`clock_unavailable`。
+
+## 1.5 Snapshot、查询与显式 Tools
+
+WorldSnapshot 是完整、有界、immutable、internally consistent 的 current cognition view，字段为 `world_id`、`revision`、`captured_at`、`entries: tuple[WorldEntry, ...]`。没有 partial Snapshot 或 Snapshot.truncated；投影截断只在 Context 层发生。不能只按 revision 缓存 freshness。
+
+`WorldEntry` 包含 `subject`、`predicate`、`scope`、`status`、`value`、`candidates`、`supporting_claims`、`evidence_refs` 和 `valid_at`；entry identity、lookup 与候选规则见第 2 章。`WorldAnswer` 返回 world_id/revision 及同样的 status/value/candidates/provenance/time 字段。不存在的 key 返回 UNKNOWN、None 和空候选/支持集合。
+
+`WorldCandidate` 保留 `value`、`supporting_claims`、`evidence_refs`、`valid_at`。非 KNOWN entry/answer 的 value 必须为 None，候选不能只保留一个赢家而抹去 conflict/uncertainty。
+
+`create_world_tools(world)` 显式创建只读 `world_query` 和 `world_find_entities`，绑定一个已有 World，不认证或创建 writer、不采集新 evidence、不改变环境。Tool filters 使用带类型标签的数组，Python API 使用 mapping，详见 §2.13。Snapshot/World/Context 数据不能授予新的 Tool capability。
+
+## 1.6 容量与 Resource retention
+
+所有 WorldLimits 都是确定的正整数：
+
+| Limit | 默认值 |
+|---|---:|
+| max_entities | 1024 |
+| max_observations | 4096 |
+| max_claims | 8192 |
+| max_evidence_metadata | 8192 |
+| max_payload_bytes | 1,048,576 |
+| max_media_refs | 1024 |
+| max_search_results | 64 |
+
+当前 release 达到容量时拒绝写入，不自动 eviction/coalescing，也不引入 GC Framework。max_evidence_metadata 覆盖 retained Observations + Claims；max_payload_bytes 同时约束单条及 retained serialized data 的总量。`find_entities.limit` 必须在 1..max_search_results 以内。
+
+`ResourceRef` 的字段是 `uri`、`media_type: str | None`、`size: int | None`、`digest: str | None`、`available: bool = True`。大型 bytes 由 Host 存储和管理；World 只保留引用/metadata，不 fetch、open、decode、download 或 delete URI。媒体不可用仍可保留 identity/provenance，`available=False` 不代表证据图消失；Host 用新 evidence 报告后续变化。
+
+必须保留 Claim/evidence/correction chain 的 referential integrity。当前没有 World persistence、media store 或自动 retention service；这些边界不从历史文档继承额外实现要求。
+
+## 1.7 并发与操作边界
+
+同一 World 及其直接 writer/reader 必须运行在同一 asyncio event loop。World 用短时 lock 保护最终校验、atomic commit、revision update 和 Snapshot capture；锁内不能执行 Model request、外部网络 I/O、media processing 或大型 serialization。
+
+Snapshot 和 query 是 local、bounded、non-network 操作，无需独立 CancellationToken。World 更新不触发 Session.start/Run。Host 自行控制采样、队列、外部请求频率与并发；这些策略不属于 World Core。
 
 # 2. World V1.1 数据、Resolution 与 Entity Search
 
@@ -213,7 +331,7 @@ Resolution MUST 使用固定的五阶段流程：
 
 ### 2.4.2 Grounding classification
 
-保持 V1.0 规则。
+Grounding 按本节的 evidence-support 规则确定，不依赖 Claim 名称、producer 名称或历史文档。
 
 具有有效 observation / grounded claim support 的：
 
@@ -272,7 +390,7 @@ future valid_at cannot yet be resolved
 
 ### 2.4.4 同一状态流的自然变化
 
-TTL 表示 evidence 的 freshness 上限，不表示对象在整个 TTL 区间内保持原值。自然状态变化继续沿用 V1.0 §3.9：使用新 Claim + 新 `valid_at`，不使用表示认知纠错的 `supersedes`。
+TTL 表示 evidence 的 freshness 上限，不表示对象在整个 TTL 区间内保持原值。自然状态变化使用新 Claim + 新 `valid_at`，不使用表示认知纠错的 `supersedes`。
 
 在完成 temporal classification 后，MUST 先按以下字段划分状态流：
 
@@ -1036,7 +1154,11 @@ MUST reject
 
 # 3. Context projection
 
-每个 Model Turn 在构建 Context 时 capture 一个 immutable WorldSnapshot，ContextManager 只负责投影，不改变 Session transcript 或 World。
+每个 Model Turn 在构建 Context 时 capture 一个 immutable WorldSnapshot，通过 `ContextRequest.world_snapshot: WorldSnapshot | None` 传给 ContextManager，包括 compaction 重试。ContextManager 只负责投影，不改变 Session transcript 或 World。
+
+`ContextDataSegment` 的公共字段为 `source: str`、`source_id: str | None`、`revision: int | None`、`captured_at: datetime`、`text: str`、`truncated: bool = False`、`omitted_count: int = 0`。World projection 使用 source="world"、source_id=world_id 与 Snapshot revision/time。省略 entries 时必须显式报告 truncated/omitted_count，并且 `truncated == (omitted_count > 0)`；不能把删减后的投影伪装成完整 Snapshot。
+
+ContextDataSegment 必须属于 ModelContext 的 closed segment union。所有 ContextManager、预算估算、Model validation、provider 编码与 reference projection consumer 都必须处理它，不接受任意新 segment 类型。Model adapter 将其编码为明确标记的 untrusted observational data，不能当成 system instructions，也不能插进完整 Tool exchange 内。
 
 排序依据必须显式、领域无关：
 

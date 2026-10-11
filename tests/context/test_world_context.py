@@ -388,7 +388,7 @@ def test_world_query_entity_argument_is_an_explicit_reference():
 
 def test_model_input_projection_is_validated_and_minted_by_agent_configuration():
     from roboagent import Agent
-    from tests.integration.test_embodied_loop import ScriptedModel
+    from tests.support.models import ScriptedModel
 
     with pytest.raises(TypeError, match="model_input_projection"):
         Agent(ScriptedModel(), model_input_projection=3)
