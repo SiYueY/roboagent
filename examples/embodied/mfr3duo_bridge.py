@@ -35,6 +35,7 @@ from roboagent.world import (
     WorldEntryKey,
 )
 from .contracts import (
+    PhysicalPolicy,
     PoseTolerance,
     reject,
     revalidate_decision,
@@ -79,6 +80,7 @@ class Mfr3duoBridge:
         clock_resolver=None,
         pre_dispatch=None,
     ):
+        self.policy = PhysicalPolicy(frozenset(("pick_object", "place_object")))
         self.world, self.transport, self.robot_id = world, transport, robot_id
         self.source, self.scope, self.clock_id = source, scope, clock_id
         self.path = "/api/v1/robots/" + quote(robot_id, safe="")
@@ -189,6 +191,7 @@ class Mfr3duoBridge:
             PoseTolerance(),
             scope=self.scope,
             clock_resolver=self,
+            policy=self.policy,
         )
         # Do not queue another Model decision behind preflight or submission.
         if self._admission.locked() or self.pending is not None or self.uncertain:
@@ -215,6 +218,7 @@ class Mfr3duoBridge:
                 PoseTolerance(),
                 scope=self.scope,
                 clock_resolver=self,
+                policy=self.policy,
             )
             context.cancellation.raise_if_cancelled()
             payload = {"kind": kind, "object_id": arguments["target_entity"]}

@@ -5,10 +5,14 @@ from dataclasses import replace
 
 import pytest
 
-from examples.embodied.bridge import Mfr3duoBridge
+from examples.embodied.mfr3duo_bridge import Mfr3duoBridge
 from examples.embodied.contracts import decision_evidence
 from roboagent.message import ToolCall, freeze_json_object
-from roboagent.runtime import ExecutionBudgetConfig, RuntimeCancellation
+from roboagent.runtime import (
+    ExecutionBudgetConfig,
+    ExecutionScopeState,
+    RuntimeCancellation,
+)
 from roboagent.runtime.execution import RuntimeRunExecutionContext
 from roboagent.tool import ToolContext, ToolExecutionFailure, ToolExecutor, ToolRegistry
 from roboagent.world import EntityRef, WorldEntryKey, WorldStatus
@@ -94,7 +98,7 @@ async def setup(*, scope="a", preflight=None):
     return w, clock, source, transport, bridge, tools
 
 
-def context(snapshot, *, message="turn"):
+def context(snapshot, *, policy, message="turn"):
     root = RuntimeRunExecutionContext.create_root(
         root_run_id=message,
         cancellation=RuntimeCancellation(),
@@ -105,6 +109,8 @@ def context(snapshot, *, message="turn"):
         max_execution_records=64,
         max_record_evidence_bytes=8192,
     )
+    policy.bind_run(root)
+    policy.begin_turn(message, message)
     executor = ToolExecutor(registry=ToolRegistry())
     parent = root.tool_context(executor, "session")
     parent.bind_model_turn(message, snapshot)
@@ -136,14 +142,14 @@ def arguments(snapshot, *, place=False):
 def test_place_rejects_cross_scope_evidence_and_dispatches_exact_scoped_pose():
     async def check():
         _, _, source, transport, bridge, tools = await setup(scope="b")
-        root, ctx = context(source)
+        root, ctx = context(source, policy=bridge.policy)
         try:
             with pytest.raises(ToolExecutionFailure) as error:
                 await tools["place_object"].execute(arguments(source, place=True), ctx)
             assert error.value.error.code == "decision_scope_mismatch"
             assert not transport.submissions
             bridge.scope = "a"
-            root2, ctx2 = context(source, message="next")
+            root2, ctx2 = context(source, policy=bridge.policy, message="next")
             try:
                 await tools["place_object"].execute(arguments(source, place=True), ctx2)
                 assert transport.submissions[0]["pose"]["x"] == 0.1
@@ -165,8 +171,8 @@ def test_shared_bridge_admits_only_one_run_during_preflight():
             return True
 
         _, _, source, transport, bridge, tools = await setup(preflight=preflight)
-        root1, ctx1 = context(source, message="one")
-        root2, ctx2 = context(source, message="two")
+        root1, ctx1 = context(source, policy=bridge.policy, message="one")
+        root2, ctx2 = context(source, policy=bridge.policy, message="two")
         first = asyncio.create_task(
             tools["pick_object"].execute(arguments(source), ctx1)
         )
@@ -201,7 +207,7 @@ def test_dispatch_rechecks_pose_age_and_world_after_awaits(boundary, age):
             bridge.pre_dispatch = advance
         else:
             transport.info_hook = advance
-        root, ctx = context(source)
+        root, ctx = context(source, policy=bridge.policy)
         try:
             with pytest.raises(ToolExecutionFailure) as error:
                 await tools["pick_object"].execute(arguments(source), ctx)
@@ -233,7 +239,7 @@ def test_stop_waits_for_submission_receipt_before_clearing_pending():
             await release.wait()
 
         transport.submit_hook = submit
-        root, ctx = context(source)
+        root, ctx = context(source, policy=bridge.policy)
         task = asyncio.create_task(tools["pick_object"].execute(arguments(source), ctx))
         await entered.wait()
         stop = asyncio.create_task(bridge.stop())
@@ -301,7 +307,7 @@ def test_preflight_cancellation_releases_admission_without_submitting():
             return True
 
         _, _, source, transport, bridge, tools = await setup(preflight=preflight)
-        root, ctx = context(source)
+        root, ctx = context(source, policy=bridge.policy)
         task = asyncio.create_task(tools["pick_object"].execute(arguments(source), ctx))
         await entered.wait()
         task.cancel()
@@ -317,7 +323,7 @@ def test_preflight_cancellation_releases_admission_without_submitting():
 def test_run_finalization_during_preflight_blocks_dispatch():
     async def check():
         _, _, source, transport, bridge, tools = await setup()
-        root, ctx = context(source)
+        root, ctx = context(source, policy=bridge.policy)
 
         async def preflight(snapshot, arguments):
             await root.finalize()
@@ -328,5 +334,152 @@ def test_run_finalization_during_preflight_blocks_dispatch():
             await tools["pick_object"].execute(arguments(source), ctx)
         assert error.value.error.code == "fresh_decision_required"
         assert not transport.submissions and bridge.pending is None
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("end", ["release", "close_tool", "finalize"])
+def test_host_closed_model_turn_cannot_reacquire_action_slot(end) -> None:
+    async def check():
+        from tests.runtime.test_nested_execution import _tree
+        from examples.embodied.contracts import PhysicalPolicy
+
+        tree = _tree()
+        root = RuntimeRunExecutionContext(tree.root_scope)
+        policy = PhysicalPolicy(frozenset(("physical",)))
+        policy.bind_run(root)
+        policy.begin_turn("root", "turn")
+        parent = root.tool_context(object(), "session")
+        parent.bind_model_turn("turn", None)
+        child = parent.child_tool_context(
+            ToolCall("action", "physical"), object(), "session"
+        )
+        ctx = ToolContext("root", "session", child.cancellation, child, "turn")
+        assert policy.claim_turn_action(ctx) and policy.owns_turn_action(ctx)
+        if end == "release":
+            policy.begin_turn("root", "next")
+            assert tree.root_scope.state is ExecutionScopeState.OPEN
+        elif end == "close_tool":
+            await child.close_tool_scope()
+        else:
+            await root.finalize()
+        assert not policy.claim_turn_action(ctx) and not policy.owns_turn_action(ctx)
+        if end == "release":
+            # Rebinding a retained nested context must not reactivate its old turn.
+            child.bind_model_turn("turn", None)
+            assert not policy.claim_turn_action(ctx)
+            parent.bind_model_turn("next", None)
+            fresh = parent.child_tool_context(
+                ToolCall("fresh", "physical"), object(), "session"
+            )
+            fresh_ctx = ToolContext(
+                "root", "session", fresh.cancellation, fresh, "next"
+            )
+            assert policy.claim_turn_action(fresh_ctx)
+        await root.finalize()
+        assert not policy._turn_actions and not policy._runs
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("release_turn", [False, True])
+@pytest.mark.parametrize("close_tool", [False, True])
+def test_host_turn_action_is_invalidated_but_retained_until_settlement(
+    release_turn, close_tool
+) -> None:
+    async def check():
+        from tests.runtime.test_nested_execution import _tree
+        from examples.embodied.contracts import PhysicalPolicy
+
+        tree = _tree(settlement_timeout=1)
+        root = RuntimeRunExecutionContext(tree.root_scope)
+        policy = PhysicalPolicy(frozenset(("physical",)))
+        policy.bind_run(root)
+        policy.begin_turn("root", "turn")
+        parent = root.tool_context(object(), "session")
+        parent.bind_model_turn("turn", None)
+        child = parent.child_tool_context(
+            ToolCall("action", "physical"), object(), "session"
+        )
+        ctx = ToolContext("root", "session", child.cancellation, child, "turn")
+        assert policy.claim_turn_action(ctx)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Handler:
+            async def settle(self):
+                entered.set()
+                await release.wait()
+
+            async def force_settle(self):
+                raise AssertionError("Settlement must finish normally.")
+
+        async def invoke():
+            async with child.settlement_barrier(handler=Handler()):
+                pass
+
+        invocation = asyncio.create_task(invoke())
+        await entered.wait()
+        if release_turn:
+            policy.begin_turn("root", "next")
+            assert not policy.owns_turn_action(ctx)
+        closing = asyncio.create_task(
+            child.close_tool_scope() if close_tool else root.finalize()
+        )
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert release_turn or policy._turn_actions == {
+            ("root", "turn"): child.lineage.scope_id
+        }
+        assert not policy.claim_turn_action(ctx) and not policy.owns_turn_action(ctx)
+        release.set()
+        await invocation
+        await closing
+        if close_tool:
+            await root.finalize()
+        assert not policy._turn_actions and not policy._runs
+
+    asyncio.run(check())
+
+
+def test_physical_capable_wrapper_rejects_overlapping_nested_execution():
+    async def check():
+        from examples.embodied.contracts import PhysicalPolicy
+        from roboagent.runtime.execution import RuntimeRunExecutionContext
+        from tests.runtime.test_nested_execution import _tree
+        from roboagent.tool import ToolContext, ToolExecutor, ToolJsonContent
+        from tests.integration.test_decision_context_v11 import tool
+
+        started, release = asyncio.Event(), asyncio.Event()
+        results = []
+
+        async def leaf(args, context):
+            started.set()
+            await release.wait()
+            return ToolJsonContent("ok")
+
+        async def wrapper(args, context):
+            first = asyncio.create_task(
+                context.execution.execute_nested_tool("leaf", {})
+            )
+            await started.wait()
+            results.append(await context.execution.execute_nested_tool("leaf", {}))
+            release.set()
+            results.append(await first)
+            return ToolJsonContent("ok")
+
+        executor = ToolExecutor(
+            registry=ToolRegistry((tool("wrapper", wrapper), tool("leaf", leaf))),
+            policy=PhysicalPolicy(frozenset(), frozenset(("wrapper",))),
+        )
+        runtime = RuntimeRunExecutionContext(_tree().root_scope)
+        execution = runtime.tool_context(executor, "session")
+        context = ToolContext(
+            "root", "session", execution.cancellation, execution, "model"
+        )
+        await executor.execute((ToolCall("wrapper", "wrapper"),), context)
+        assert results[0].error.code == "rejected"
+        assert results[1].error is None
+        assert not executor.policy._nested_active
+        await runtime.finalize()
 
     asyncio.run(check())

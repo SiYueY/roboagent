@@ -100,16 +100,16 @@ def test_deterministic_relevance_explicit_entities_tools_and_no_nl_grounding():
         assert first == second
         projected = json.loads(first.segments[0].text)
         assert [item["subject"]["id"] for item in projected[:3]] == [
-            "self",
             "explicit",
             "tool",
+            "self",
         ]
         natural = (
             await manager.prepare(request(entries), RuntimeCancellation())
         ).model_context
         ids = [item["subject"]["id"] for item in json.loads(natural.segments[0].text)]
         assert ids[-1] == "natural_target"  # no secret grounding of natural text
-        assert projected[1]["status"] == "conflicted" and projected[1]["value"] is None
+        assert projected[0]["status"] == "conflicted" and projected[0]["value"] is None
 
     asyncio.run(check())
 
@@ -202,7 +202,13 @@ def test_budget_drops_world_first_and_summarizer_sees_only_conversation():
             UserMessage("latest"),
         )
         req = request(
-            [entry("low", value="z" * 500), entry("self", WorldStatus.STALE)], messages
+            [entry("low", value="z" * 500), entry("self", WorldStatus.STALE)],
+            messages,
+            (
+                ToolDefinition(
+                    "work", "Work", {"type": "object", "x-world-entities": ["self"]}
+                ),
+            ),
         )
         prepared = await manager.prepare(req, RuntimeCancellation())
         segment = prepared.model_context.segments[0]
@@ -223,11 +229,27 @@ def test_relevant_uncertainty_over_budget_is_rejected_not_erased():
         )
         with pytest.raises(ContextBudgetError):
             await manager.prepare(
-                request([entry("self", WorldStatus.STALE, "x" * 4000)]),
+                request(
+                    [entry("self", WorldStatus.STALE, "x" * 4000)],
+                    tools=(
+                        ToolDefinition(
+                            "work",
+                            "Work",
+                            {"type": "object", "x-world-entities": ["self"]},
+                        ),
+                    ),
+                ),
                 RuntimeCancellation(),
             )
         req = replace(
-            request([entry("self", WorldStatus.STALE, "x" * 4000)]),
+            request(
+                [entry("self", WorldStatus.STALE, "x" * 4000)],
+                tools=(
+                    ToolDefinition(
+                        "work", "Work", {"type": "object", "x-world-entities": ["self"]}
+                    ),
+                ),
+            ),
             model_capabilities=ModelCapabilities(context_window=700),
             model_settings=ModelSettings(max_output_tokens=1),
         )
@@ -430,3 +452,42 @@ def test_typed_filter_references_follow_schema_without_interpreting_literal_json
         )
     )
     assert _message_entities(message, definitions, "world") == {"basket"}
+
+
+@pytest.mark.parametrize("entity", ["self", "robot", "account", "document"])
+def test_entity_names_have_no_implicit_priority_or_uncertainty_protection(entity):
+    async def check():
+        from roboagent.context.world import _protected_world_entries
+
+        entries = [entry(entity, WorldStatus.UNKNOWN), entry("newer")]
+        req = request(entries)
+        prepared = await FullContextManager().prepare(req, RuntimeCancellation())
+        ids = [
+            item["subject"]["id"]
+            for item in json.loads(prepared.model_context.segments[0].text)
+        ]
+        assert ids == ["newer", entity]
+        assert not _protected_world_entries(req)
+        tool = ToolDefinition(
+            "work", "Work", {"type": "object", "x-world-entities": [entity]}
+        )
+        explicit = request(entries, tools=(tool,))
+        prepared = await FullContextManager().prepare(explicit, RuntimeCancellation())
+        assert (
+            json.loads(prepared.model_context.segments[0].text)[0]["subject"]["id"]
+            == entity
+        )
+        assert _protected_world_entries(explicit) == {entries[0].key}
+
+    asyncio.run(check())
+
+
+def test_world_runtime_instructions_describe_generic_external_effects():
+    from roboagent.context.manager import WORLD_INSTRUCTIONS
+
+    assert "external outcome" in WORLD_INSTRUCTIONS
+    assert "reconcile the relevant external state" in WORLD_INSTRUCTIONS
+    assert "external operation has stopped" in WORLD_INSTRUCTIONS
+    assert (
+        "robot" not in WORLD_INSTRUCTIONS and "physical goal" not in WORLD_INSTRUCTIONS
+    )

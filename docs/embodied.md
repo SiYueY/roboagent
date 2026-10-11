@@ -1,6 +1,9 @@
-# World and Interaction integration
+# Embodied reference integration
 
-Implementation follows [World V1.1](world/world_v1.1.md), inheriting
+This is a reference application of RoboAgent primitives, not a Core specification.
+Embodied Reference Agent validates World/Runtime composition; it does not define Core APIs.
+The application contract is [Embodied reference application](examples/embodied.md);
+its generic cognition contract is [World V1.1](world/world_v1.1.md), inheriting
 [World V1.0](world/world_v1.0.md) where unchanged. Environment
 cognition belongs to World, conversation to Session, and execution/effects to the
 existing Run/Execution. Host adapters and observation/action Tools remain explicit.
@@ -37,7 +40,7 @@ subject/predicate/scope/source/grounding/clock stream. Independent sources and
 equal-time contradictory samples remain candidates. Each scope has its own entry;
 queries use exact scope matching and never implicitly merge namespaces. An
 additional scope cannot hide an established conflict inside another scope. Hypotheses, priors, predictions,
-and inferences supported only by them cannot become physical KNOWN facts.
+and inferences supported only by them cannot become grounded KNOWN facts.
 
 World JSON results preserve relation values with `value_kind="entity_ref"` and
 `value={"entity_ref": {"id": "table_1"}}`; arbitrary JSON values have
@@ -70,7 +73,7 @@ Context projection defaults to 64 entries plus all relevant uncertain entries,
 then prunes low-priority entries to fit the full request. It preserves uncertainty
 status/value/candidates/provenance and reports omissions explicitly.
 
-V1 relevance uses `self`/`robot`, recent explicit entity references, Host Tool
+Relevance uses recent explicit entity references and Host Tool
 annotations, uncertain state, recent canonical updates and stable ties. Conversation
 references use `JsonContent({"entity_ref": {"id": "cube_7"}})`; a Tool can declare
 `"x-world-entities": ["cube_7"]` in its Host-authored input schema. World search
@@ -128,8 +131,9 @@ World V1.1 implementation follows four phases:
 - Phase 1: exact scope identities, immutable lookup, state-stream resolution,
   mixed candidates/provenance, typed filters, POSSIBLE search and Context consumers.
 - Phase 2: one source Snapshot/message_id per Model Turn, nested propagation,
-  fresh Child Agent capture, existing SERIAL execution and a Run/Execution slot.
-- Phase 3: actual MuJoCo contact, object motion, release, independent post-action
+  fresh Child Agent capture; these causal-context primitives remain generic.
+- Phase 3: Host-owned PhysicalPolicy slots, SERIAL wrappers and lifecycle cleanup;
+  actual MuJoCo contact, object motion, release, independent post-action
   samples, evidence completeness, changed-target refusal, cancellation and stability.
 - Phase 4: structured Model perception, capture-bound association, RGB-D/skew and
   historical TF, synchronous Observation Tools, and the roserver state/action/task
@@ -148,7 +152,7 @@ No planner, source registry, second Runtime or automatic sensor-triggered Run is
 
 ## Local verification result
 
-Final World V1.1 local run: **464 passed, 4 skipped**. Three skips are gated
+Final World V1.1 local run: **471 passed, 4 skipped**. Three skips are gated
 Tongyi provider tests; one is the cloud Model tabletop acceptance test
 (`ROBOAGENT_EMBODIED_LIVE=1`). Cloud tests require explicit configuration and
 credentials and are counted separately from deterministic / MuJoCo tests.

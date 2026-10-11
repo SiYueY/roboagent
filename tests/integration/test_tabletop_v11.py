@@ -19,9 +19,12 @@ from roboagent.tool import ToolContext, ToolExecutionFailure, ToolExecutor, Tool
 from roboagent.world import EntityRef, WorldEntryKey, WorldStatus
 
 
-def execution_context(snapshot, *, message="model-1"):
+def execution_context(snapshot, *, policy, message="model-1"):
+    from uuid import uuid4
+
+    run_id = uuid4().hex
     runtime = RuntimeRunExecutionContext.create_root(
-        root_run_id="run",
+        root_run_id=run_id,
         cancellation=RuntimeCancellation(),
         deadline=None,
         budget=ExecutionBudgetConfig(),
@@ -30,13 +33,15 @@ def execution_context(snapshot, *, message="model-1"):
         max_execution_records=64,
         max_record_evidence_bytes=8192,
     )
+    policy.bind_run(runtime)
+    policy.begin_turn(run_id, message)
     executor = ToolExecutor(registry=ToolRegistry())
     parent = runtime.tool_context(executor, "session")
     parent.bind_model_turn(message, snapshot)
     child = parent.child_tool_context(
         ToolCall("action", "pick_object"), executor, "session"
     )
-    return ToolContext("run", "session", child.cancellation, child, message, snapshot)
+    return ToolContext(run_id, "session", child.cancellation, child, message, snapshot)
 
 
 def arguments(snapshot):
@@ -52,6 +57,7 @@ def test_real_physics_pick_release_inside_and_stable():
     async def check():
         result, table = await main()
         assert result.status is RunStatus.COMPLETED
+        assert not table.policy._runs and not table.policy._turn_actions
         assert (
             result.output.content[0].text
             == "Placement verified from post-action evidence."
@@ -110,7 +116,7 @@ def test_invalid_source_decisions_fail_before_physics(fault, code):
                     for e in snapshot.entries
                 ),
             )
-        context = execution_context(snapshot)
+        context = execution_context(snapshot, policy=table.policy)
         before = table.data.time
         with pytest.raises(ToolExecutionFailure) as error:
             await table.action(args, context)
@@ -126,7 +132,7 @@ def test_failed_attempt_consumes_slot_and_same_fact_refresh_is_compatible():
         table = Tabletop()
         await table.observe()
         source = await table.world.snapshot()
-        context = execution_context(source)
+        context = execution_context(source, policy=table.policy)
         args = arguments(source)
         # A newer observation replaces ClaimRefs without changing the decision facts.
         await table.observe()
@@ -138,6 +144,7 @@ def test_failed_attempt_consumes_slot_and_same_fact_refresh_is_compatible():
             table.tolerance,
             scope="workspace",
             clock_resolver=table,
+            policy=table.policy,
         )
         with pytest.raises(ToolExecutionFailure) as error:
             await validate_decision(
@@ -148,6 +155,7 @@ def test_failed_attempt_consumes_slot_and_same_fact_refresh_is_compatible():
                 table.tolerance,
                 scope="workspace",
                 clock_resolver=table,
+                policy=table.policy,
             )
         assert error.value.error.code == "fresh_decision_required"
 
@@ -167,7 +175,9 @@ def test_direct_execution_and_new_observation_refs_are_rejected():
         await table.observe()
         newer = await table.world.snapshot()
         with pytest.raises(ToolExecutionFailure) as error:
-            await table.action(arguments(newer), execution_context(source))
+            await table.action(
+                arguments(newer), execution_context(source, policy=table.policy)
+            )
         assert error.value.error.code == "decision_evidence_invalid"
 
     asyncio.run(check())
@@ -213,13 +223,15 @@ def test_canonical_nested_attempt_blocks_later_direct_action():
             AssistantMessage("done"),
         )
         model.capabilities = replace(model.capabilities, parallel_tool_calls=True)
+        table.policy = PhysicalPolicy(
+            frozenset(("pick_object", "place_object")), frozenset(("wrapper",))
+        )
         agent = Agent(
             model,
             world=table.world,
             tool_registry=ToolRegistry((*table.tools(), wrapper_tool)),
-            tool_policy=PhysicalPolicy(
-                frozenset(("pick_object", "place_object")), frozenset(("wrapper",))
-            ),
+            tool_policy=table.policy,
+            hooks=(table.policy,),
         )
         before = table.data.time
         session = agent.new_session()
@@ -269,7 +281,9 @@ def test_controller_completion_does_not_prove_grasp_success():
             table.model.geom(name).friction[:] = 0
         await table.observe()
         source = await table.world.snapshot()
-        result = await table.action(arguments(source), execution_context(source))
+        result = await table.action(
+            arguments(source), execution_context(source, policy=table.policy)
+        )
         assert result.value["status"] == "completed"
         assert result.value["physical_verified"] is False
         await table.observe(verification=True)
@@ -287,7 +301,7 @@ def test_cancellation_preserves_world_and_stops_the_active_task():
         table = Tabletop()
         await table.observe()
         source = await table.world.snapshot()
-        context = execution_context(source)
+        context = execution_context(source, policy=table.policy)
         action = asyncio.create_task(table.action(arguments(source), context))
         await asyncio.sleep(0)
         assert table.active_task is not None
@@ -303,7 +317,7 @@ def test_cancellation_preserves_world_and_stops_the_active_task():
 
 def test_bridge_ack_loss_records_unknown_and_blocks_automatic_retry():
     async def check():
-        from examples.embodied.bridge import Mfr3duoBridge
+        from examples.embodied.mfr3duo_bridge import Mfr3duoBridge
         from roboagent.tool import ToolEffectUnknown
 
         table = Tabletop()
@@ -337,13 +351,14 @@ def test_bridge_ack_loss_records_unknown_and_blocks_automatic_retry():
 
         with pytest.raises(ToolEffectUnknown):
             await pick.execute(
-                freeze_json_object(arguments(source)), execution_context(source)
+                freeze_json_object(arguments(source)),
+                execution_context(source, policy=bridge.policy),
             )
         assert bridge.pending is not None and bridge.uncertain
         with pytest.raises(ToolExecutionFailure) as error:
             await pick.execute(
                 freeze_json_object(arguments(source)),
-                execution_context(source, message="new-turn"),
+                execution_context(source, policy=bridge.policy, message="new-turn"),
             )
         assert error.value.error.code == "physical_task_unresolved"
         assert transport.posts == 1
@@ -354,7 +369,6 @@ def test_bridge_ack_loss_records_unknown_and_blocks_automatic_retry():
 def test_ambiguous_red_targets_never_dispatch_a_physical_action():
     async def check():
         from examples.embodied.reference import TabletopModel
-        from examples.embodied.contracts import PhysicalPolicy
         from roboagent import Agent
         from roboagent.message import UserMessage
         from roboagent.world import create_world_tools
@@ -369,7 +383,8 @@ def test_ambiguous_red_targets_never_dispatch_a_physical_action():
             tool_registry=ToolRegistry(
                 (*create_world_tools(table.world), *table.tools())
             ),
-            tool_policy=PhysicalPolicy(frozenset(("pick_object", "place_object"))),
+            tool_policy=table.policy,
+            hooks=(table.policy,),
         )
         session = agent.new_session()
         try:

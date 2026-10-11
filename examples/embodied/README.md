@@ -1,5 +1,7 @@
 # Embodied reference composition
 
+This is a reference application of RoboAgent primitives, not a Core specification.
+
 Run from the **roboagent repository root**:
 
 ```bash
@@ -24,7 +26,10 @@ uv run --extra embodied python -m examples.embodied.app --cloud
 
 `contracts.py` validates selection/readiness evidence against the immutable source
 snapshot and current World. Physical policy uses existing SERIAL execution;
-nested wrappers need explicit authorization and share the Run/Execution turn slot.
+nested wrappers need explicit authorization and share a Host-owned `PhysicalPolicy`
+turn slot. Register the same policy instance as `tool_policy` and in `hooks`; the
+Host Tools must use it for decision validation. Run hooks/resources clean policy
+state after canonical settlement; Core has no per-turn action limit.
 The original one-axis carriage remains available as
 `python -m examples.embodied.mujoco` for its existing regressions.
 
@@ -38,7 +43,7 @@ Host integrations are explicit:
   only when local geometry/tracking establishes the full world-frame object pose
   (object origin and orientation) from that exact capture. A surface point plus
   orientation does not establish an object pose.
-- `bridge.py`: `Mfr3duoBridge` uses roserver `/api/v1/robots/...` state, operations
+- `mfr3duo_bridge.py`: `Mfr3duoBridge` uses roserver `/api/v1/robots/...` state, operations
   and stop endpoints. Manipulation Tools are registered only when the server advertises
   manipulation and the deployment supplies a trusted `pre_dispatch` callback for
   live geometry, readiness, resource ownership and collision checks. The current
@@ -54,5 +59,6 @@ Hardware capture, calibration, historical TF and a trusted complete pose must be
 supplied by the deployment. Level 3/4 require actual sensor/robot evidence; passing
 adapter tests cannot establish those levels. No sensor stream starts Agent Runs.
 
-See [World V1.1](../../docs/world/world_v1.1.md) and
+See the [generic World V1.1](../../docs/world/world_v1.1.md),
+[embodied application contract](../../docs/examples/embodied.md), and
 [World integration](../../docs/embodied.md) for ownership and acceptance contracts.

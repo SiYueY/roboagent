@@ -7,10 +7,24 @@ from dataclasses import dataclass
 import math
 from typing import NoReturn
 
-from roboagent.message import canonical_json_digest
-from roboagent.runtime.execution import RuntimeToolExecutionContext
+from roboagent.message import ToolCall, canonical_json_digest
+from roboagent.model import ModelResponse
+from roboagent.agent import (
+    HookDecision,
+    ModelHookContext,
+    RunEndHookContext,
+    RunHookContext,
+    ToolHookContext,
+)
+from roboagent.runtime.execution import (
+    ExecutionScopeState,
+    RuntimeRunExecutionContext,
+    RuntimeToolExecutionContext,
+)
 from roboagent.tool import (
+    Tool,
     ToolContext,
+    ToolExecutionResult,
     ToolDecision,
     ToolErrorInfo,
     ToolExecutionFailure,
@@ -31,33 +45,166 @@ def reject(code: str) -> NoReturn:
     raise ToolExecutionFailure(ToolErrorInfo(code, code))
 
 
+class _RunPolicyResource:
+    """Host policy state cleaned by the canonical Run resource lifecycle."""
+
+    def __init__(self, policy: PhysicalPolicy, execution: RuntimeRunExecutionContext):
+        self.policy = policy
+        self.execution = execution
+        self.message_id: str | None = None
+
+    async def close(self) -> None:
+        run_id = self.execution.lineage.execution_run_id
+        self.policy._runs.pop(run_id, None)
+        self.policy._clear_turns(run_id)
+
+    async def force_close(self) -> None:
+        await self.close()
+
+
+class _NestedCallResource:
+    def __init__(self, policy: PhysicalPolicy, parent_id: str, scope_id: str):
+        self.policy, self.parent_id, self.scope_id = policy, parent_id, scope_id
+
+    async def close(self) -> None:
+        if self.policy._nested_active.get(self.parent_id) == self.scope_id:
+            self.policy._nested_active.pop(self.parent_id)
+
+    async def force_close(self) -> None:
+        await self.close()
+
+
 class PhysicalPolicy:
-    """Explicit Host bindings; the generic executor retains all scheduling ownership."""
+    """Embodied-only rules composed from Policy, hooks and ExecutionResource.
+
+    Register the same instance as Agent.tool_policy and an Agent hook. Physical
+    Tools use this instance for validation; no action state belongs to Core.
+    """
 
     def __init__(
         self, physical: frozenset[str], wrappers: frozenset[str] = frozenset()
     ):
-        self.physical = frozenset(physical)
-        self.wrappers = frozenset(wrappers)
+        self.physical, self.wrappers = frozenset(physical), frozenset(wrappers)
         if self.physical & self.wrappers:
             raise ValueError(
                 "Physical actions and wrappers must have distinct classifications."
             )
+        self._runs: dict[str, _RunPolicyResource] = {}
+        self._turn_actions: dict[tuple[str, str], str] = {}
+        self._nested_active: dict[str, str] = {}
 
-    async def evaluate(self, call, tool, context):
-        if call.name not in self.physical | self.wrappers:
-            return ToolDecision.ALLOW
-        if tool is None or tool.execution_mode is not ToolExecutionMode.SERIAL:
-            return ToolPolicyDecision(ToolDecision.REJECT, "physical_serial_required")
+    def _clear_turns(self, run_id: str) -> None:
+        for key in tuple(self._turn_actions):
+            if key[0] == run_id:
+                self._turn_actions.pop(key)
+
+    def bind_run(self, execution: RuntimeRunExecutionContext) -> None:
+        """Bind trusted Host execution; on_run_start does this for Agent Runs."""
+        run_id = execution.lineage.execution_run_id
+        if run_id in self._runs:
+            raise ValueError("Physical policy already owns this Run.")
+        state = _RunPolicyResource(self, execution)
+        execution.tool_context(self, "physical-policy").register_resource(state)
+        self._runs[run_id] = state
+
+    def begin_turn(self, run_id: str, message_id: str) -> None:
+        state = self._runs[run_id]
+        self._clear_turns(run_id)
+        state.message_id = message_id
+
+    async def on_run_start(self, context: RunHookContext) -> None:
+        execution = context.run_context.execution
+        if not isinstance(execution, RuntimeRunExecutionContext):
+            raise TypeError("Physical policy requires canonical execution.")
+        self.bind_run(execution)
+
+    async def before_model(self, context: ModelHookContext) -> HookDecision:
+        self._runs[context.run_context.run_id].message_id = None
+        return HookDecision.CONTINUE
+
+    async def after_model(
+        self, context: ModelHookContext, response: ModelResponse
+    ) -> None:
+        self.begin_turn(context.run_context.run_id, response.message.message_id)
+
+    async def before_tool(
+        self, context: ToolHookContext, call: ToolCall
+    ) -> HookDecision:
+        return HookDecision.CONTINUE
+
+    async def after_tool(
+        self, context: ToolHookContext, result: ToolExecutionResult
+    ) -> None:
+        pass
+
+    async def on_run_end(self, context: RunEndHookContext) -> None:
+        self._runs.pop(context.run_context.run_id, None)
+        self._clear_turns(context.run_context.run_id)
+
+    def _active(self, context: ToolContext) -> bool:
+        state = self._runs.get(context.run_id)
         execution = context.execution
-        if not isinstance(execution, RuntimeToolExecutionContext):
-            return ToolPolicyDecision(ToolDecision.REJECT, "decision_context_missing")
-        if any(name not in self.wrappers for name in execution.ancestor_tool_names):
-            return ToolPolicyDecision(
-                ToolDecision.REJECT, "physical_wrapper_not_authorized"
-            )
-        if call.name in self.wrappers:
-            execution.require_serial_nested()
+        return (
+            state is not None
+            and isinstance(execution, RuntimeToolExecutionContext)
+            and state.execution.scope_state is ExecutionScopeState.OPEN
+            and execution.scope_state is ExecutionScopeState.OPEN
+            and not context.cancellation.cancelled
+            and context.message_id is not None
+            and state.message_id == context.message_id
+        )
+
+    def claim_turn_action(self, context: ToolContext) -> bool:
+        if not self._active(context):
+            return False
+        assert context.message_id is not None and context.execution is not None
+        key = (context.run_id, context.message_id)
+        if key in self._turn_actions:
+            return False
+        self._turn_actions[key] = context.execution.lineage.scope_id
+        return True
+
+    def owns_turn_action(self, context: ToolContext) -> bool:
+        if not self._active(context):
+            return False
+        assert context.message_id is not None and context.execution is not None
+        return (
+            self._turn_actions.get((context.run_id, context.message_id))
+            == context.execution.lineage.scope_id
+        )
+
+    async def evaluate(
+        self, call: ToolCall, tool: Tool | None, context: ToolContext
+    ) -> ToolDecision | ToolPolicyDecision:
+        execution = context.execution
+        if call.name in self.physical | self.wrappers:
+            if tool is None or tool.execution_mode is not ToolExecutionMode.SERIAL:
+                return ToolPolicyDecision(
+                    ToolDecision.REJECT, "physical_serial_required"
+                )
+            if not isinstance(execution, RuntimeToolExecutionContext):
+                return ToolPolicyDecision(
+                    ToolDecision.REJECT, "decision_context_missing"
+                )
+            if any(name not in self.wrappers for name in execution.ancestor_tool_names):
+                return ToolPolicyDecision(
+                    ToolDecision.REJECT, "physical_wrapper_not_authorized"
+                )
+        # SERIAL constrains batches. Host-authored wrappers must also await their
+        # nested calls: policy admission rejects overlap without another scheduler.
+        if isinstance(execution, RuntimeToolExecutionContext) and (
+            execution.ancestor_tool_names
+            and execution.ancestor_tool_names[-1] in self.wrappers
+        ):
+            parent_id = execution.lineage.parent_scope_id
+            assert parent_id is not None
+            if parent_id in self._nested_active:
+                return ToolPolicyDecision(
+                    ToolDecision.REJECT, "concurrent_nested_execution"
+                )
+            scope_id = execution.lineage.scope_id
+            execution.register_resource(_NestedCallResource(self, parent_id, scope_id))
+            self._nested_active[parent_id] = scope_id
         return ToolDecision.ALLOW
 
 
@@ -117,6 +264,7 @@ async def validate_decision(
     *,
     scope: str | None,
     clock_resolver: ClockResolver,
+    policy: PhysicalPolicy,
 ) -> WorldSnapshot:
     """Reject before dispatch; never change the Agent's target or refresh its source."""
     execution = context.execution
@@ -125,7 +273,7 @@ async def validate_decision(
         or context.message_id is None
     ):
         reject("decision_context_missing")
-    if not execution.claim_turn_action():
+    if not policy.claim_turn_action(context):
         reject("fresh_decision_required")
     return await revalidate_decision(
         world,
@@ -135,6 +283,7 @@ async def validate_decision(
         tolerance,
         scope=scope,
         clock_resolver=clock_resolver,
+        policy=policy,
     )
 
 
@@ -147,6 +296,7 @@ async def revalidate_decision(
     *,
     scope: str | None,
     clock_resolver: ClockResolver,
+    policy: PhysicalPolicy,
 ) -> WorldSnapshot:
     """Recheck the consumed decision immediately before Host dispatch.
 
@@ -154,10 +304,9 @@ async def revalidate_decision(
     preflight work; it never turns refreshed evidence into a new Model decision.
     """
     execution = context.execution
-    if (
-        not isinstance(execution, RuntimeToolExecutionContext)
-        or not execution.owns_turn_action()
-    ):
+    if not isinstance(
+        execution, RuntimeToolExecutionContext
+    ) or not policy.owns_turn_action(context):
         reject("fresh_decision_required")
     source = context.decision_world_snapshot
     if source is None:
@@ -245,7 +394,7 @@ async def revalidate_decision(
             age = now.nanoseconds - after.valid_at.nanoseconds
             if not 0 <= age <= tolerance.maximum_age_ns:
                 reject("pose_stale")
-    if not execution.owns_turn_action():
+    if not policy.owns_turn_action(context):
         reject("fresh_decision_required")
     return current
 

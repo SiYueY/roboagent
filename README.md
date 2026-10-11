@@ -1,7 +1,8 @@
 # RoboAgent 1.3
 
-RoboAgent is a provider-neutral Python runtime for multimodal, tool-calling
-agents. Version 1.3 extends the same canonical Runtime with nested execution,
+RoboAgent is a minimal, composable, explicit, extensible, provider-neutral Agent
+Harness for building multimodal, tool-using agents. Version 1.3 extends the same
+canonical Runtime with nested execution,
 Agent-as-Tool, a transactional `apply_patch` builtin, and a process-isolated
 coding reference harness. It does not introduce a second Agent, Session, Run,
 Loop, Model, Tool, policy, approval, event, or effect runtime.
@@ -20,12 +21,12 @@ config = load_app_config()
 model = create_model(registry=config.to_model_registry())
 agent = Agent(
     model,
-    tool_registry=ToolRegistry(robot_tools),
-    prompt=PromptInput("Operate safely."),
+    tool_registry=ToolRegistry(tools),
+    prompt=PromptInput("Follow the user's request."),
 )
 session = agent.new_session()
 
-run = session.start(UserMessage("Report the current pose."))
+run = session.start(UserMessage("Inspect the available information and summarize it."))
 async for event in run.subscribe():
     handle(event.type, event.payload)
 result = await run.result()
@@ -75,8 +76,13 @@ evaluation, attribution, and safety details.
 An optional Host-owned `World` supplies immutable current cognition to each Model
 Turn without changing Session transcripts. Query tools remain explicit. Direct
 media uses `roboagent.interaction.vision` and `roboagent.interaction.speech`.
-See [integration contracts](docs/embodied.md) and the
-[CPU MuJoCo tabletop example](examples/embodied/README.md).
-World V1.1 adds exact scopes, typed entity search, Model Turn source-snapshot
-propagation and decision-bound physical validation; see the
-[implementation contract](docs/world/world_v1.1.md).
+World V1.1 adds exact scopes, typed entity search and Model Turn source-snapshot
+propagation; see the [generic World contract](docs/world/world_v1.1.md).
+
+## Reference applications
+
+[Chat](examples/chat/README.md), [Coding](examples/coding/README.md), and
+[Embodied](examples/embodied/README.md) are consumers of the same primitives.
+The [embodied reference integration](docs/embodied.md) uses a CPU MuJoCo tabletop
+and explicit sensor/backend adapters. Its physical action policy and verification
+rules belong to the reference application, not the generic Core.

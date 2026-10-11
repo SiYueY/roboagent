@@ -85,6 +85,7 @@ class MuJoCoAdapter:
     def __init__(self) -> None:
         import mujoco
 
+        self.policy = PhysicalPolicy(frozenset(("drive_carriage",)))
         self._mujoco = mujoco
         self.model = mujoco.MjModel.from_xml_string(SCENE)
         self.data = mujoco.MjData(self.model)
@@ -205,6 +206,7 @@ class MuJoCoAdapter:
                 PoseTolerance(position=0.001, maximum_age_ns=5_000_000_000),
                 scope="scene",
                 clock_resolver=self,
+                policy=self.policy,
             )
             answer = current.lookup(
                 WorldEntryKey(EntityRef("carriage"), "pose", "scene")
@@ -517,7 +519,8 @@ async def main() -> None:
         DemoModel(),
         world=adapter.world,
         tool_registry=ToolRegistry(adapter.tools()),
-        tool_policy=PhysicalPolicy(frozenset(("drive_carriage",))),
+        tool_policy=adapter.policy,
+        hooks=(adapter.policy,),
     )
     session = agent.new_session()
     try:

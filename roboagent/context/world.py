@@ -129,15 +129,7 @@ def _ordered_world_entries(
 
     def rank(entry: WorldEntry) -> tuple[int, int, int, int, str, str]:
         entity = entry.subject.id
-        category = (
-            0
-            if entity in ("self", "robot")
-            else 1
-            if entity in mentioned
-            else 2
-            if entity in dependencies
-            else 4
-        )
+        category = 0 if entity in mentioned else 1 if entity in dependencies else 2
         uncertain = entry.status in (
             WorldStatus.UNKNOWN,
             WorldStatus.STALE,
@@ -146,7 +138,7 @@ def _ordered_world_entries(
         return (
             category,
             -mentioned.get(entity, -1),
-            0 if uncertain and category < 4 else 1,
+            0 if uncertain and category < 2 else 1,
             -recent[id(entry)],
             entity,
             entry.predicate,
@@ -156,7 +148,7 @@ def _ordered_world_entries(
 
 
 def _protected_world_entries(request: ContextRequest) -> set[WorldEntryKey]:
-    entities = {"self", "robot"}
+    entities: set[str] = set()
     for message in request.snapshot.transcript:
         entities.update(
             _message_entities(
@@ -217,7 +209,7 @@ def _prepare_world_context(
     """Apply the same whole-input checks to full/window managers when bounded.
 
     Text-only composition without an explicit budget preserves its behavior.
-    Embodied composition defaults to 8192 total tokens if the model window is
+    World-backed composition defaults to 8192 total tokens if the model window is
     unknown. Selection keeps 64 entries plus all relevant uncertain entries.
     """
     from .budget import (

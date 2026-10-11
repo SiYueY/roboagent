@@ -491,9 +491,6 @@ async def _run_loop_impl(
         except ToolBatchAborted as exc:
             effects.extend(exc.effects)
             raise _RunFailure(exc.reason, tuple(effects), output, usage, turn) from exc
-        finally:
-            assert run_context.execution is not None
-            run_context.execution.release_model_turn(message_id)
         try:
             run_context.cancellation.raise_if_cancelled()
         except asyncio.CancelledError:

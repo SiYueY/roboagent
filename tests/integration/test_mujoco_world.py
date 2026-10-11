@@ -46,7 +46,11 @@ def test_real_cpu_physics_ack_observation_verification_and_pause():
         ).entries == first.entries  # sim clock paused
         model = DemoModel()
         session = Agent(
-            model, world=adapter.world, tool_registry=ToolRegistry(adapter.tools())
+            model,
+            world=adapter.world,
+            tool_registry=ToolRegistry(adapter.tools()),
+            tool_policy=adapter.policy,
+            hooks=(adapter.policy,),
         ).new_session()
         result = await session.run(UserMessage("move and verify"))
         assert result.status is RunStatus.COMPLETED
@@ -84,7 +88,7 @@ def test_preexecution_target_dependency_validation_and_unrelated_revision():
         await adapter.observe()
         tools = {tool.definition.name: tool for tool in adapter.tools()}
         source = await adapter.world.snapshot()
-        context = execution_context(source)
+        context = execution_context(source, policy=adapter.policy)
         adapter.data.qpos[0] = 0.1
         adapter.data.time += adapter.model.opt.timestep
         adapter._mujoco.mj_forward(adapter.model, adapter.data)
@@ -106,7 +110,7 @@ def test_preexecution_target_dependency_validation_and_unrelated_revision():
             )
         )
         source = await adapter.world.snapshot()
-        context = execution_context(source, message="new-turn")
+        context = execution_context(source, policy=adapter.policy, message="new-turn")
         ack = await tools["drive_carriage"].execute(
             drive_arguments(source, 0.1), context
         )
@@ -122,7 +126,11 @@ def test_run_cancellation_preserves_cognition_and_requires_stop_verification():
         original = await adapter.world.snapshot()
         model = DemoModel()
         session = Agent(
-            model, world=adapter.world, tool_registry=ToolRegistry(adapter.tools())
+            model,
+            world=adapter.world,
+            tool_registry=ToolRegistry(adapter.tools()),
+            tool_policy=adapter.policy,
+            hooks=(adapter.policy,),
         ).new_session()
         run = session.start(UserMessage("drive"))
         while float(adapter.data.time) == 0:
@@ -186,7 +194,11 @@ def test_semantic_target_mismatch_never_starts_motion():
         await adapter.observe()
         model = DemoModel()
         session = Agent(
-            model, world=adapter.world, tool_registry=ToolRegistry(adapter.tools())
+            model,
+            world=adapter.world,
+            tool_registry=ToolRegistry(adapter.tools()),
+            tool_policy=adapter.policy,
+            hooks=(adapter.policy,),
         ).new_session()
         try:
             result = await session.run(UserMessage("move the red carriage"))
@@ -212,7 +224,7 @@ def test_preexecution_refreshes_geometry_instead_of_trusting_cached_xpos():
         with pytest.raises(ToolExecutionFailure) as error:
             await drive.execute(
                 drive_arguments(source, 0),
-                execution_context(source),
+                execution_context(source, policy=adapter.policy),
             )
         assert error.value.error.code == "target_moved"
         assert adapter.data.ctrl[0] == 0

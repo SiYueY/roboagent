@@ -27,7 +27,6 @@ from roboagent.model import (
 )
 from roboagent.tool import ToolRegistry
 from roboagent.world import create_world_tools
-from .contracts import PhysicalPolicy
 from .tabletop import Tabletop
 
 
@@ -258,7 +257,8 @@ If a Tool fails, inspect or observe and make a new decision; never claim success
         world=table.world,
         prompt=prompt,
         tool_registry=ToolRegistry((*create_world_tools(table.world), *table.tools())),
-        tool_policy=PhysicalPolicy(frozenset(("pick_object", "place_object"))),
+        tool_policy=table.policy,
+        hooks=(table.policy,),
     )
     session = agent.new_session()
     try:

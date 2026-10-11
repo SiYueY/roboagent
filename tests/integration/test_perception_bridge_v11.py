@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from examples.embodied.bridge import Mfr3duoBridge
+from examples.embodied.mfr3duo_bridge import Mfr3duoBridge
 from examples.embodied.perception import Detection, RGBDAdapter, RGBDSample
 from roboagent.world import (
     EntityRef,

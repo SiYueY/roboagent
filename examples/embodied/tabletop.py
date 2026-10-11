@@ -22,6 +22,7 @@ from roboagent.world import (
     World,
 )
 from .contracts import (
+    PhysicalPolicy,
     PoseTolerance,
     reject,
     validate_decision,
@@ -114,6 +115,7 @@ class Tabletop:
         import mujoco
 
         self.config = config or TabletopConfig()
+        self.policy = PhysicalPolicy(frozenset(("pick_object", "place_object")))
 
         self.mj = mujoco
         self.model = mujoco.MjModel.from_xml_string(SCENE)
@@ -381,6 +383,7 @@ class Tabletop:
             self.tolerance,
             scope="workspace",
             clock_resolver=self,
+            policy=self.policy,
         )
         if self.active_task is not None:
             reject("physical_task_active")

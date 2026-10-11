@@ -126,12 +126,13 @@ class RunExecutionContext(Protocol):
     def deadline(self) -> float | None: ...
     @property
     def budget(self) -> ExecutionBudgetView: ...
+    @property
+    def scope_state(self) -> ExecutionScopeState: ...
     def tool_context(
         self, executor: object, session_id: str
     ) -> ToolExecutionContext: ...
     def contribute_usage(self, usage: UsageContribution) -> None: ...
     def mark_tool_calls_committed(self, call_ids: tuple[str, ...]) -> None: ...
-    def release_model_turn(self, message_id: str) -> None: ...
 
 
 class ToolExecutionContext(RunExecutionContext, Protocol):
@@ -191,8 +192,6 @@ class ExecutionTree:
         self.record_sequences = _SequenceAllocator()
         self.child_runs_used = 0
         self.nested_tools_used = 0
-        self.turn_actions: dict[tuple[str, str], str] = {}
-        self.model_turns: dict[str, str] = {}
         self._contributions: dict[ContributionId, ExecutionContribution] = {}
         self._usage_state: UsageKnowledge | None = None
         self._usage: Usage | None = None
@@ -777,6 +776,11 @@ class RuntimeRunExecutionContext:
     def budget(self) -> ExecutionBudgetView:
         return self._scope.budget
 
+    @property
+    def scope_state(self) -> ExecutionScopeState:
+        """Expose the existing execution lifecycle to resource-owning Hosts."""
+        return self._scope.state
+
     def tool_context(
         self, executor: object, session_id: str
     ) -> RuntimeToolExecutionContext:
@@ -793,19 +797,6 @@ class RuntimeRunExecutionContext:
 
     def next_event_sequence(self) -> int:
         return self._scope._tree.event_sequences.next()
-
-    def release_model_turn(self, message_id: str) -> None:
-        tree = self._scope._tree
-        run_id = self.lineage.execution_run_id
-        if tree.model_turns.get(run_id) == message_id:
-            tree.model_turns.pop(run_id)
-        # Invalidate bindings immediately, but retain consumed slots until any
-        # deferred settlement has finished. Finalization clears remaining slots.
-        if not any(
-            scope.settlement_active and scope.lineage.execution_run_id == run_id
-            for scope in tree.scopes.values()
-        ):
-            tree.turn_actions.pop((run_id, message_id), None)
 
     async def finalize(self) -> ExecutionSummary:
         tree = self._scope._tree
@@ -824,13 +815,6 @@ class RuntimeRunExecutionContext:
             cleanup_errors = tree.cleanup_errors_for_scope(self._scope)
             records = tree.records_for_scope(self._scope)
             retry_blockers = tree.blockers_for_scope(self._scope)
-        for key in tuple(tree.turn_actions):
-            if is_root or key[0] == self.lineage.execution_run_id:
-                tree.turn_actions.pop(key)
-        if is_root:
-            tree.model_turns.clear()
-        else:
-            tree.model_turns.pop(self.lineage.execution_run_id, None)
         cleanup_affects_status = any(
             tree.scopes[item.scope_id].lineage.agent_depth == self.lineage.agent_depth
             for item in cleanup_errors
@@ -856,8 +840,6 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
         self._session_id = session_id
         self.message_id: str | None = None
         self.decision_world_snapshot: WorldSnapshot | None = None
-        self._nested_active = False
-        self._serial_nested = False
 
     def bind_model_turn(
         self, message_id: str | None, snapshot: WorldSnapshot | None
@@ -865,48 +847,6 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
         self._scope._require_open("bind model turn")
         self.message_id = message_id
         self.decision_world_snapshot = snapshot
-        if self.lineage.tool_call_id is None and message_id is not None:
-            self._scope._tree.model_turns[self.lineage.execution_run_id] = message_id
-
-    def require_serial_nested(self) -> None:
-        """Hosts may narrow wrapper execution without creating another scheduler."""
-        self._serial_nested = True
-
-    def _model_turn_active(self) -> bool:
-        if self.message_id is None or self.lineage.tool_call_id is None:
-            return False
-        scope: ExecutionScope | None = self._scope
-        while scope is not None:
-            if scope.state is not ExecutionScopeState.OPEN:
-                return False
-            parent_id = scope.lineage.parent_scope_id
-            scope = self._scope._tree.scopes.get(parent_id) if parent_id else None
-        return (
-            self._scope._tree.model_turns.get(self.lineage.execution_run_id)
-            == self.message_id
-        )
-
-    def owns_turn_action(self) -> bool:
-        """Whether this live Tool still owns its consumed Model-turn boundary."""
-        if not self._model_turn_active() or self.message_id is None:
-            return False
-        return (
-            self._scope._tree.turn_actions.get(
-                (self.lineage.execution_run_id, self.message_id)
-            )
-            == self.lineage.tool_call_id
-        )
-
-    def claim_turn_action(self) -> bool:
-        """Consume one action boundary; Hosts determine which Tools use it."""
-        if not self._model_turn_active():
-            return False
-        assert self.message_id is not None and self.lineage.tool_call_id is not None
-        key = (self.lineage.execution_run_id, self.message_id)
-        if key in self._scope._tree.turn_actions:
-            return False
-        self._scope._tree.turn_actions[key] = self.lineage.tool_call_id
-        return True
 
     @property
     def ancestor_tool_names(self) -> tuple[str, ...]:
@@ -961,16 +901,6 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
                     "nested_execution_unavailable", "Nested execution is unavailable."
                 ),
             )
-        if self._serial_nested and self._nested_active:
-            return ToolExecutionResult(
-                call.id,
-                name,
-                error=ToolErrorInfo(
-                    "concurrent_nested_execution",
-                    "This wrapper requires sequential nested calls.",
-                ),
-            )
-        self._nested_active = True
         try:
             return await context_factory(call, self, self._session_id)
         except ToolBatchAborted as exc:
@@ -981,8 +911,6 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
                     exc.reason.code, exc.reason.message, exc.reason.retryable
                 ),
             )
-        finally:
-            self._nested_active = False
 
     async def run_child_agent(
         self, agent, task: str, *, session_factory=None, run_config=None
@@ -1033,7 +961,7 @@ class RuntimeToolExecutionContext(RuntimeRunExecutionContext):
         return self._scope.settlement_active
 
     async def close_tool_scope(self) -> None:
-        if self._scope._terminal_recorded:
+        if self._scope.state is ExecutionScopeState.FROZEN:
             return
         await self._scope._tree.close_scope(self._scope)
 
