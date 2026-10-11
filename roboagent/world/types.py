@@ -12,10 +12,8 @@ from enum import Enum
 from typing import Literal, Protocol
 
 from roboagent.message import (
-    FrozenJsonObject,
     JsonValue,
     freeze_json,
-    freeze_json_object,
 )
 
 
@@ -220,6 +218,20 @@ class WorldCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class WorldEntryKey:
+    subject: EntityRef
+    predicate: str
+    scope: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subject, EntityRef):
+            raise WorldError("invalid_claim")
+        _text(self.predicate, "invalid_claim")
+        if self.scope is not None:
+            _text(self.scope, "invalid_claim")
+
+
+@dataclass(frozen=True, slots=True)
 class WorldEntry:
     subject: EntityRef
     predicate: str
@@ -230,10 +242,17 @@ class WorldEntry:
     evidence_refs: tuple[EvidenceRef, ...]
     valid_at: ObservationTime | None
 
+    scope: str | None = None
+
+    @property
+    def key(self) -> WorldEntryKey:
+        return WorldEntryKey(self.subject, self.predicate, self.scope)
+
     def __post_init__(self) -> None:
         if not isinstance(self.subject, EntityRef):
             raise WorldError("invalid_claim")
         _text(self.predicate, "invalid_claim")
+        self.key
         _cognition(self)
 
 
@@ -253,17 +272,51 @@ class WorldAnswer:
         _cognition(self)
 
 
+class EntityMatchStatus(str, Enum):
+    CONFIRMED = "confirmed"
+    POSSIBLE = "possible"
+
+
 @dataclass(frozen=True, slots=True)
 class EntityCandidate:
     entity: EntityRef
-    matched: FrozenJsonObject
+    scope: str | None
+    status: EntityMatchStatus
+    matched: tuple[str, ...]
+    uncertain: tuple[str, ...]
+    missing: tuple[str, ...]
     supporting_claims: tuple[ClaimRef, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.entity, EntityRef):
+        if not isinstance(self.entity, EntityRef) or not isinstance(
+            self.status, EntityMatchStatus
+        ):
             raise WorldError("invalid_claim")
-        object.__setattr__(self, "matched", freeze_json_object(self.matched))
+        if self.scope is not None:
+            _text(self.scope, "invalid_claim")
+        for name in ("matched", "uncertain", "missing"):
+            values = tuple(getattr(self, name))
+            for value in values:
+                _text(value, "invalid_claim")
+            object.__setattr__(self, name, tuple(sorted(set(values))))
         _tuple_field(self, "supporting_claims", ClaimRef)
+        object.__setattr__(
+            self,
+            "supporting_claims",
+            tuple(sorted(set(self.supporting_claims), key=lambda ref: ref.id)),
+        )
+        partitions = (set(self.matched), set(self.uncertain), set(self.missing))
+        if any(
+            partitions[i] & partitions[j] for i in range(3) for j in range(i + 1, 3)
+        ):
+            raise WorldError("invalid_claim")
+        if self.status is EntityMatchStatus.CONFIRMED:
+            if not self.matched or self.uncertain or self.missing:
+                raise WorldError("invalid_claim")
+        elif not (self.matched or self.uncertain) or not (
+            self.uncertain or self.missing
+        ):
+            raise WorldError("invalid_claim")
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,11 +325,17 @@ class EntitySearchResult:
     revision: int
     candidates: tuple[EntityCandidate, ...]
     truncated: bool
+    total_candidates: int
 
     def __post_init__(self) -> None:
         _identity(self.world_id, self.revision)
         _tuple_field(self, "candidates", EntityCandidate)
-        if type(self.truncated) is not bool:
+        if (
+            type(self.truncated) is not bool
+            or type(self.total_candidates) is not int
+            or self.total_candidates < len(self.candidates)
+            or self.truncated != (self.total_candidates > len(self.candidates))
+        ):
             raise WorldError("invalid_claim")
 
 
@@ -291,6 +350,14 @@ class WorldSnapshot:
         _identity(self.world_id, self.revision)
         _time(self.captured_at, "invalid_claim")
         _tuple_field(self, "entries", WorldEntry)
+
+        if len({entry.key for entry in self.entries}) != len(self.entries):
+            raise WorldError("invalid_claim")
+
+    def lookup(self, key: WorldEntryKey) -> WorldEntry | None:
+        if not isinstance(key, WorldEntryKey):
+            raise WorldError("invalid_claim")
+        return next((entry for entry in self.entries if entry.key == key), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,8 +419,5 @@ def _cognition(owner: WorldCandidate | WorldEntry | WorldAnswer) -> None:
         _tuple_field(owner, "candidates", WorldCandidate)
         if not isinstance(owner.status, WorldStatus):
             raise WorldError("invalid_claim")
-        if (
-            owner.status in (WorldStatus.UNKNOWN, WorldStatus.CONFLICTED)
-            and owner.value is not None
-        ):
+        if owner.status is not WorldStatus.KNOWN and owner.value is not None:
             raise WorldError("invalid_claim")

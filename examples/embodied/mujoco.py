@@ -51,6 +51,7 @@ from roboagent.world import (
     ObservationTime,
     World,
     WorldStatus,
+    WorldEntryKey,
     WorldReceipt,
     create_world_tools,
 )
@@ -67,6 +68,15 @@ SCENE = """<mujoco>
   <actuator><position joint="slide" kp="100" ctrlrange="-0.5 0.5"
                       ctrllimited="true" forcerange="-10 10" forcelimited="true"/></actuator>
 </mujoco>"""
+
+
+from .contracts import (
+    decision_evidence_schema,
+    PhysicalPolicy,
+    PoseTolerance,
+    pose_compatible,
+    validate_decision,
+)
 
 
 class MuJoCoAdapter:
@@ -86,6 +96,7 @@ class MuJoCoAdapter:
             allowed_scopes=("scene",),
         )
         self._sequence = 0
+        self._completion_barrier: ObservationTime | None = None
         self._body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "carriage"
         )
@@ -105,8 +116,11 @@ class MuJoCoAdapter:
         self._mujoco.mj_resetData(self.model, self.data)
         self._mujoco.mj_forward(self.model, self.data)
         self.clock_id = "mujoco:" + uuid4().hex
+        self._completion_barrier = None
 
     async def observe(self) -> WorldReceipt:
+        if self._completion_barrier is not None:
+            self._mujoco.mj_step(self.model, self.data)
         self._mujoco.mj_forward(self.model, self.data)
         sampled = self.now(self.clock_id)
         assert sampled is not None
@@ -115,7 +129,8 @@ class MuJoCoAdapter:
         ref = ObservationRef("mujoco/state", str(self._sequence))
         # Copy out of mutable MuJoCo arrays before constructing immutable data.
         pose = {
-            "frame": "world",
+            "frame_id": "world",
+            "quaternion": [float(v) for v in self.data.body("carriage").xquat],
             "xyz": [float(v) for v in self.data.body("carriage").xpos],
         }
         rgba = [float(value) for value in self.model.geom_rgba[self._geom_id]]
@@ -178,9 +193,26 @@ class MuJoCoAdapter:
         async def drive(arguments, context):
             target = arguments["target_x"]
             expected = arguments["expected_x"]
-            answer = await self.world.query(EntityRef("carriage"), "pose")
-            if answer.status is not WorldStatus.KNOWN or not isinstance(
-                answer.value, FrozenJsonObject
+            if arguments["target_entity"] != "carriage":
+                raise ToolExecutionFailure(
+                    ToolErrorInfo("unknown_target", "Unknown carriage.")
+                )
+            current = await validate_decision(
+                self.world,
+                context,
+                arguments,
+                {"target_pose": ("carriage", "pose")},
+                PoseTolerance(position=0.001, maximum_age_ns=5_000_000_000),
+                scope="scene",
+                clock_resolver=self,
+            )
+            answer = current.lookup(
+                WorldEntryKey(EntityRef("carriage"), "pose", "scene")
+            )
+            if (
+                answer is None
+                or answer.status is not WorldStatus.KNOWN
+                or not isinstance(answer.value, FrozenJsonObject)
             ):
                 raise ToolExecutionFailure(
                     ToolErrorInfo(
@@ -221,7 +253,7 @@ class MuJoCoAdapter:
             # Revalidate the dependency, not the global revision. Geometry comes
             # from the sampled simulator state, never invented language XYZ.
             if (
-                pose.get("frame") != "world"
+                pose.get("frame_id") != "world"
                 or abs(xyz[0] - expected) > 0.001
                 or any(
                     abs(current - observed) > 0.001
@@ -230,6 +262,29 @@ class MuJoCoAdapter:
             ):
                 raise ToolExecutionFailure(
                     ToolErrorInfo("target_moved", "Target pose changed; observe again.")
+                )
+            live_pose = {
+                "frame_id": "world",
+                "xyz": list(current_xyz),
+                "quaternion": [
+                    float(value) for value in self.data.body("carriage").xquat
+                ],
+            }
+            color = current.lookup(
+                WorldEntryKey(EntityRef("carriage"), "color", "scene")
+            )
+            if not pose_compatible(pose, live_pose, PoseTolerance(position=0.001)):
+                raise ToolExecutionFailure(
+                    ToolErrorInfo("target_moved", "Target geometry changed.")
+                )
+            live_color = _color_from_rgba(
+                [float(value) for value in self.model.geom_rgba[self._geom_id]]
+            )
+            if color is None or color.value != live_color:
+                raise ToolExecutionFailure(
+                    ToolErrorInfo(
+                        "semantic_target_changed", "Target appearance changed."
+                    )
                 )
             if not math.isfinite(target) or not -0.4 <= target <= 0.4:
                 raise ToolExecutionFailure(
@@ -250,6 +305,7 @@ class MuJoCoAdapter:
                 # Host stops issuing motion on cancellation; this is not a
                 # claim that Run cancellation has verified physical standstill.
                 self.data.ctrl[0] = self.data.qpos[0]
+            self._completion_barrier = self.now(self.clock_id)
             return ToolJsonContent(
                 freeze_json(
                     {
@@ -274,6 +330,7 @@ class MuJoCoAdapter:
                     ),
                 ),
                 observe,
+                effect_kind=ToolEffectKind.SIDE_EFFECTING,
             ),
             Tool(
                 ToolDefinition(
@@ -289,8 +346,19 @@ class MuJoCoAdapter:
                                     "maximum": 0.4,
                                 },
                                 "expected_x": {"type": "number"},
+                                "target_entity": {
+                                    "type": "string",
+                                    "enum": ["carriage"],
+                                    "x-world-entity-ref": True,
+                                },
+                                "decision_evidence": decision_evidence_schema(),
                             },
-                            "required": ["target_x", "expected_x"],
+                            "required": [
+                                "target_x",
+                                "expected_x",
+                                "target_entity",
+                                "decision_evidence",
+                            ],
                             "additionalProperties": False,
                             "x-world-entities": ["carriage"],
                         }
@@ -369,13 +437,46 @@ class DemoModel:
                 "The fresh red carriage target is unavailable; no motion was requested."
             )
         elif len(self.contexts) == 1:
+            assert color is not None
             message = AssistantMessage(
                 tool_calls=(
                     ToolCall(
                         "drive",
                         "drive_carriage",
                         FrozenJsonObject(
-                            {"expected_x": pose["value"]["xyz"][0], "target_x": 0.2}
+                            {
+                                "expected_x": pose["value"]["xyz"][0],
+                                "target_x": 0.2,
+                                "target_entity": "carriage",
+                                "decision_evidence": {
+                                    "selection": {
+                                        "scope": "scene",
+                                        "filters": [
+                                            {
+                                                "predicate": "color",
+                                                "value_kind": "json",
+                                                "value": "red",
+                                            }
+                                        ],
+                                        "claim_refs": [
+                                            ref["id"]
+                                            for ref in color["supporting_claims"]
+                                        ],
+                                    },
+                                    "readiness": [
+                                        {
+                                            "role": "target_pose",
+                                            "subject": "carriage",
+                                            "predicate": "pose",
+                                            "scope": "scene",
+                                            "claim_refs": [
+                                                ref["id"]
+                                                for ref in pose["supporting_claims"]
+                                            ],
+                                        }
+                                    ],
+                                },
+                            }
                         ),
                     ),
                 )
@@ -413,7 +514,10 @@ async def main() -> None:
     adapter = MuJoCoAdapter()
     await adapter.observe()  # World ingestion does not require a Session or Run.
     agent = Agent(
-        DemoModel(), world=adapter.world, tool_registry=ToolRegistry(adapter.tools())
+        DemoModel(),
+        world=adapter.world,
+        tool_registry=ToolRegistry(adapter.tools()),
+        tool_policy=PhysicalPolicy(frozenset(("drive_carriage",))),
     )
     session = agent.new_session()
     try:

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from roboagent.world import WorldSnapshot
+
 import inspect
 import re
 from collections.abc import Awaitable, Callable
@@ -165,6 +170,7 @@ class ToolContext:
     cancellation: CancellationToken
     execution: ToolExecutionContext | None = None
     message_id: str | None = None
+    decision_world_snapshot: WorldSnapshot | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -183,6 +189,11 @@ class ToolContext:
             for name in ("cancelled", "raise_if_cancelled", "wait_cancelled")
         ):
             raise TypeError("ToolContext requires a CancellationToken.")
+        if self.decision_world_snapshot is not None:
+            from roboagent.world.types import WorldSnapshot
+
+            if not isinstance(self.decision_world_snapshot, WorldSnapshot):
+                raise TypeError("ToolContext requires a WorldSnapshot or None.")
         if self.execution is not None:
             if self.run_id != self.execution.lineage.execution_run_id:
                 raise ValueError("ToolContext.run_id must match execution lineage.")

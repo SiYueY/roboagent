@@ -173,6 +173,10 @@ class ToolExecutor:
                 RunError("max_calls_per_turn", "Tool call limit exceeded.")
             )
         context.cancellation.raise_if_cancelled()
+        if isinstance(context.execution, RuntimeToolExecutionContext):
+            context.execution.bind_model_turn(
+                context.message_id, context.decision_world_snapshot
+            )
         contexts = self._call_contexts(calls, context)
         tools = tuple(self.registry.get(call.name) for call in calls)
         concurrent = bool(calls) and all(
@@ -1184,6 +1188,8 @@ class ToolExecutor:
                 context.session_id,
                 child.cancellation,
                 child,
+                context.message_id,
+                context.decision_world_snapshot,
             )
             for child in (
                 execution.child_tool_context(call, self, context.session_id)
@@ -1210,6 +1216,8 @@ class ToolExecutor:
             session_id,
             cast(CancellationToken, parent_execution.cancellation),
             parent_execution,
+            parent_execution.message_id,
+            parent_execution.decision_world_snapshot,
         )
         batch = await self.execute((call,), parent)
         return batch.results[0]
@@ -1301,8 +1309,7 @@ class ToolExecutor:
             )
             if (
                 value.effect_id is not None
-                and value.effect_id.scope_id
-                != context.execution.lineage.scope_id
+                and value.effect_id.scope_id != context.execution.lineage.scope_id
             ):
                 raise ToolContractError(
                     "Composite Tool returned an effect owned by another scope."
@@ -1327,9 +1334,7 @@ class ToolExecutor:
             return
         if not all(hasattr(record, "status") for record in records):
             raise ToolContractError("Composite Tool returned invalid records.")
-        context.execution.contribute_composite(
-            tuple(effects), tuple(records)
-        )
+        context.execution.contribute_composite(tuple(effects), tuple(records))
 
     def _contribute_cancelled(
         self,

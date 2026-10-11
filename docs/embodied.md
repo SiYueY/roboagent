@@ -1,6 +1,7 @@
 # World and Interaction integration
 
-Implementation follows the consolidated specification in `design.md`. Environment
+Implementation follows [World V1.1](world/world_v1.1.md), inheriting
+[World V1.0](world/world_v1.0.md) where unchanged. Environment
 cognition belongs to World, conversation to Session, and execution/effects to the
 existing Run/Execution. Host adapters and observation/action Tools remain explicit.
 
@@ -31,10 +32,11 @@ Retrying the same transaction is idempotent. Changed evidence or claim identitie
 missing evidence, cyclic evidence/correction chains, unauthorized membership and
 capacity overflow reject the entire transaction without changing revision.
 Delayed perception uses `add_claims()`. Old sampled results cannot win through
-receive/assertion order. Times are compared only within a scope and clock domain;
-incomparable live contradictions remain candidates. Different scopes produce
-alternatives rather than a fabricated conflict. An additional scope cannot hide
-an established conflict inside another scope. Hypotheses, priors, predictions,
+receive/assertion order. State evolution selects the latest resolved sample only within the same
+subject/predicate/scope/source/grounding/clock stream. Independent sources and
+equal-time contradictory samples remain candidates. Each scope has its own entry;
+queries use exact scope matching and never implicitly merge namespaces. An
+additional scope cannot hide an established conflict inside another scope. Hypotheses, priors, predictions,
 and inferences supported only by them cannot become physical KNOWN facts.
 
 World JSON results preserve relation values with `value_kind="entity_ref"` and
@@ -99,8 +101,8 @@ The coding factory preserves the base Agent's World and ContextManager, composes
 its provider encoding projection, and includes bounded reset and fixed protocol
 correction messages before budget validation. The adapter chooses no separate token
 window/reserve and performs no token pruning. Every retry keeps the same World data.
-Nested plain JSON mapping parameters support explicit `world_find_entities` filters
-in the coding worker; top-level arguments remain closed and all calls still pass
+Tagged JSON filter arrays support explicit `world_find_entities` filters
+in the coding worker; EntityRef filters remain distinct from ordinary JSON, top-level arguments remain closed and all calls still pass
 through canonical policy, approval and nested execution.
 
 `ContextDataSegment` belongs to the closed ModelContext union. Providers encode it
@@ -121,45 +123,46 @@ by a Host adapter. Speech retains its ASR/Agent/TTS and streaming lifecycle.
 
 ## Validation boundaries
 
-- Phase 0: existing code/interfaces inspected and baseline tests executed.
-- Phase 1: immutable data contracts, atomicity, idempotency, source/scope membership,
-  clock/TTL, late results, conflict/correction, structured search and capacity tests.
-- Phase 2: relevance, complete budget, provider/coding union consumers, protected
-  uncertainty, transcript separation and fixed-snapshot retry tests.
-- Phase 3: breaking imports, bounded frame lookup/conversion, actual Gradio image
-  composition and deterministic ASR → canonical Agent → TTS regression.
-- Phase 4: fake observation/action/feedback using canonical Agent/Tool; query creates
-  no evidence, async acceptance does not claim commit, ACK does not write facts.
-- Phase 5: CPU MuJoCo carriage composition: semantic attributes sampled from
-  simulator geometry/rgba metadata, semantic target refusal, refreshed geometry,
-  changed-target refusal, unrelated-revision acceptance, motion, independent
-  evidence, verification, pause/reset and cancellation. No physical robot or live
-  cloud perception acceptance is inferred from these tests.
-- Phase 6: concurrent atomic writes, bounded capacity rejection, immutable snapshots,
-  evidence DAGs, unavailable media metadata, prompt-policy separation, shared
-  sessions, nested World binding and permissions, UNKNOWN effects and cancellation.
+World V1.1 implementation follows four phases:
 
-The tests are in `tests/world`, `tests/context/test_world_context.py`,
-`tests/interaction`, `tests/integration/test_embodied_loop.py` and
-`tests/integration/test_mujoco_world.py`, alongside the existing regressions.
-Cloud VLM/ASR/TTS, RGB-D/TF and a production mfr3duo bridge remain Host integrations
-and require their own live acceptance. This release adds no planner, scene graph,
-source registry, secondary Runtime, robot safety controller or automatic trigger.
+- Phase 1: exact scope identities, immutable lookup, state-stream resolution,
+  mixed candidates/provenance, typed filters, POSSIBLE search and Context consumers.
+- Phase 2: one source Snapshot/message_id per Model Turn, nested propagation,
+  fresh Child Agent capture, existing SERIAL execution and a Run/Execution slot.
+- Phase 3: actual MuJoCo contact, object motion, release, independent post-action
+  samples, evidence completeness, changed-target refusal, cancellation and stability.
+- Phase 4: structured Model perception, capture-bound association, RGB-D/skew and
+  historical TF, synchronous Observation Tools, and the roserver state/action/task
+  bridge with explicit live preflight. These adapter tests use controlled fixtures.
+
+Existing Interaction, coding, speech and provider regressions remain part of the
+full suite. Tests live in `tests/world`, `tests/context`, `tests/runtime` and
+`tests/integration`, including `test_decision_context_v11.py`,
+`test_tabletop_v11.py` and `test_perception_bridge_v11.py`.
+
+Local deterministic and real MuJoCo evidence establish Levels 0–1. Live Model
+acceptance uses `ROBOAGENT_EMBODIED_LIVE=1` and the configured Model registry.
+Real cameras, calibration, clock mapping, object association, historical TF and
+robot preflight require deployment evidence; fixtures do not establish Levels 3–4.
+No planner, source registry, second Runtime or automatic sensor-triggered Run is added.
 
 ## Local verification result
 
-Final local run: **397 passed, 3 skipped**. The skips are explicitly gated live
-Tongyi provider tests (`ROBOAGENT_LIVE_PROVIDER_TEST=1` and `DASHSCOPE_API_KEY`).
-The migrated Gradio image tests, deterministic speech roundtrip, both optional
-RNNoise/WebRTC DSP tests and CPU MuJoCo tests ran. The local environment included
-coding, Gradio, embodied, speech and speech-webrtc extras.
-The existing `audioop` deprecation warning remains on Python 3.12.
+Final World V1.1 local run: **464 passed, 4 skipped**. Three skips are gated
+Tongyi provider tests; one is the cloud Model tabletop acceptance test
+(`ROBOAGENT_EMBODIED_LIVE=1`). Cloud tests require explicit configuration and
+credentials and are counted separately from deterministic / MuJoCo tests.
+The existing Python 3.12 `audioop` deprecation warning remains.
 
-`ruff check roboagent tests examples`, configured `mypy` (51 source files), Python
-compilation, dependency lock validation and `git diff --check` pass. CI installs
-coding, Gradio and embodied extras so the new simulation/image regressions run.
+`ruff check roboagent tests examples`, configured `mypy` (56 source files), Python
+compilation, offline dependency lock validation and `git diff --check` pass.
+The default `python -m examples.embodied.app` completed actuator-driven pick/place
+and independently verified inside, release and stability. This is Level 0–1
+acceptance; live Model/VLM, real sensor/TF/bridge and physical hardware Level 2–4
+acceptance was not performed in this run.
 
-A local CPU measurement with 512 distinct entities/claims and 512 observations
-committed in 125.80 ms total; 20 full snapshots had a 4.83 ms median and 5.24 ms
-maximum. These are measurements of this bounded fixture on the local host, not a
-real-time latency guarantee or a robot/cloud throughput benchmark.
+The real bridge intentionally requires a trusted live preflight callback before
+registering manipulation. Missing full object pose, timestamps or trustworthy TF must
+leave action readiness unavailable. Clock epoch restart does not silently retire
+incomparable old evidence. No fallback guesses or fake successful manipulation
+are introduced to bypass these limits.

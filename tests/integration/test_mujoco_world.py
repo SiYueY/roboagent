@@ -9,9 +9,30 @@ from examples.embodied.mujoco import DemoModel, MuJoCoAdapter
 from roboagent import Agent
 from roboagent.context import ContextDataSegment
 from roboagent.message import FrozenJsonObject, UserMessage
-from roboagent.runtime import RunStatus, RuntimeCancellation
-from roboagent.tool import ToolContext, ToolExecutionFailure, ToolRegistry
+from roboagent.runtime import RunStatus
+from roboagent.tool import ToolExecutionFailure, ToolRegistry
 from roboagent.world import EntityRef, WorldStatus
+
+
+from tests.integration.test_tabletop_v11 import execution_context
+from examples.embodied.contracts import decision_evidence
+
+
+def drive_arguments(snapshot, expected_x):
+    return FrozenJsonObject(
+        {
+            "expected_x": expected_x,
+            "target_x": 0.2,
+            "target_entity": "carriage",
+            "decision_evidence": decision_evidence(
+                snapshot,
+                "carriage",
+                predicates=("color",),
+                roles=(("target_pose", "carriage", "pose"),),
+                scope="scene",
+            ),
+        }
+    )
 
 
 def test_real_cpu_physics_ack_observation_verification_and_pause():
@@ -50,8 +71,8 @@ def test_real_cpu_physics_ack_observation_verification_and_pause():
         assert adapter.clock_id != old_clock and adapter.now(old_clock) is None
         await adapter.observe()
         assert (
-            await adapter.world.query(EntityRef("carriage"), "pose")
-        ).status is WorldStatus.KNOWN
+            await adapter.world.query(EntityRef("carriage"), "pose", scope="scene")
+        ).status is WorldStatus.UNKNOWN  # Old epoch evidence is not silently retired.
         await session.close()
 
     asyncio.run(check())
@@ -62,14 +83,13 @@ def test_preexecution_target_dependency_validation_and_unrelated_revision():
         adapter = MuJoCoAdapter()
         await adapter.observe()
         tools = {tool.definition.name: tool for tool in adapter.tools()}
-        context = ToolContext("run", "session", RuntimeCancellation())
+        source = await adapter.world.snapshot()
+        context = execution_context(source)
         adapter.data.qpos[0] = 0.1
         adapter.data.time += adapter.model.opt.timestep
         adapter._mujoco.mj_forward(adapter.model, adapter.data)
         with pytest.raises(ToolExecutionFailure) as error:
-            await tools["drive_carriage"].execute(
-                FrozenJsonObject({"expected_x": 0, "target_x": 0.2}), context
-            )
+            await tools["drive_carriage"].execute(drive_arguments(source, 0), context)
         assert error.value.error.code == "target_moved"
         assert adapter.data.ctrl[0] == 0
         await adapter.observe()
@@ -85,8 +105,10 @@ def test_preexecution_target_dependency_validation_and_unrelated_revision():
                 scope="scene",
             )
         )
+        source = await adapter.world.snapshot()
+        context = execution_context(source, message="new-turn")
         ack = await tools["drive_carriage"].execute(
-            FrozenJsonObject({"expected_x": 0.1, "target_x": 0.2}), context
+            drive_arguments(source, 0.1), context
         )
         assert ack.value["physical_goal_verified"] is False
 
@@ -125,19 +147,25 @@ def test_semantic_attributes_follow_sampled_simulator_metadata():
         adapter.model.geom_rgba[adapter._geom_id] = [0, 0, 1, 1]
         await adapter.observe()
         assert (
-            await adapter.world.query(EntityRef("carriage"), "color")
+            await adapter.world.query(EntityRef("carriage"), "color", scope="scene")
         ).value == "blue"
         assert (
-            await adapter.world.query(EntityRef("carriage"), "category")
+            await adapter.world.query(EntityRef("carriage"), "category", scope="scene")
         ).value == "box"
-        assert not (await adapter.world.find_entities({"color": "red"})).candidates
+        assert not (
+            await adapter.world.find_entities({"color": "red"}, scope="scene")
+        ).candidates
         assert (
-            await adapter.world.find_entities({"color": "blue", "category": "box"})
+            await adapter.world.find_entities(
+                {"color": "blue", "category": "box"}, scope="scene"
+            )
         ).candidates
         adapter.data.time += adapter.model.opt.timestep
         adapter.model.geom_rgba[adapter._geom_id] = [0.25, 0.25, 0.25, 1]
         await adapter.observe()
-        color = (await adapter.world.query(EntityRef("carriage"), "color")).value
+        color = (
+            await adapter.world.query(EntityRef("carriage"), "color", scope="scene")
+        ).value
         assert color == {"rgba": [0.25, 0.25, 0.25, 1.0]}
         adapter.data.time += adapter.model.opt.timestep
         adapter.model.geom_type[adapter._geom_id] = (
@@ -145,7 +173,7 @@ def test_semantic_attributes_follow_sampled_simulator_metadata():
         )
         await adapter.observe()
         assert (
-            await adapter.world.query(EntityRef("carriage"), "category")
+            await adapter.world.query(EntityRef("carriage"), "category", scope="scene")
         ).value == "sphere"
 
     asyncio.run(check())
@@ -176,14 +204,15 @@ def test_preexecution_refreshes_geometry_instead_of_trusting_cached_xpos():
     async def check():
         adapter = MuJoCoAdapter()
         await adapter.observe()
+        source = await adapter.world.snapshot()
         adapter.data.qpos[0] = 0.1  # cached xpos still refers to the old state
         drive = next(
             tool for tool in adapter.tools() if tool.definition.name == "drive_carriage"
         )
         with pytest.raises(ToolExecutionFailure) as error:
             await drive.execute(
-                FrozenJsonObject({"expected_x": 0, "target_x": 0.2}),
-                ToolContext("run", "session", RuntimeCancellation()),
+                drive_arguments(source, 0),
+                execution_context(source),
             )
         assert error.value.error.code == "target_moved"
         assert adapter.data.ctrl[0] == 0

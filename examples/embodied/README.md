@@ -1,36 +1,58 @@
 # Embodied reference composition
 
-Run real MuJoCo physics on CPU using the existing Agent, Session, Run and Tool:
-
-Run the commands below from the **`roboagent` repository root**, where
-`pyproject.toml` defines the `embodied` extra. If your terminal is in the sibling
-`roserver` repository, first run `cd ../roboagent`.
+Run from the **roboagent repository root**:
 
 ```bash
 uv sync --extra embodied
 uv run --extra embodied python -m examples.embodied.app
 ```
 
-The constrained carriage has sampled semantic attributes and a world-frame
-position. Geometry type and RGBA are read from actual simulator metadata and
-included in the observation evidence; they are not fixed semantic claims. Simple
-palette colors map deterministically to names, while other colors retain measured
-RGBA. A fresh red target is required before the deterministic Model requests motion. `drive_carriage` revalidates the target pose against both current World
-cognition and live simulator geometry, refreshing derived positions immediately
-before the command, then drives a limited actuator. Its
-controller completion does not write World state. `observe_state` independently
-samples the new position and commits evidence before returning; the next Model
-Turn verifies the result. The example uses a deterministic Model so it requires
-no API credentials. Replace it with a configured RoboAgent Model for language
-reasoning; keep Host source binding, tools and physical validation explicit.
+This CPU MuJoCo tabletop contains two cubes, a basket and a servo-driven gantry
+with two fingers. Pick/place uses actuator control and physical contact; object
+poses and holding state are never assigned to simulate success. An explicit
+observation commits geometry, contacts and velocities to World. Placement requires
+post-action evidence of inside, release and stability across two distinct samples.
+The default deterministic Model verifies Levels 0–1; it does not establish natural
+language grounding or real robot integration.
 
-The adapter uses a simulation clock domain with a new identity on reset. Paused
-physics does not expire claims because host wall time advances. Run cancellation
-stops issuing actuator commands and preserves World cognition; it does not
-verify physical standstill. This small scene demonstrates one bounded axis, not
-robot grasping, ROS TF, RGB-D localization, collision planning, or an mfr3duo driver.
+For Level 2, configure the existing `config.yaml` Model registry and provider
+credentials, then run:
 
-MuJoCo arrays are copied into immutable evidence using the
-[official Python API](https://mujoco.readthedocs.io/en/stable/python.html).
-The adapter owns the simulator; `World` never loads models or accesses devices.
-See [World integration](../../docs/embodied.md) for contracts and validation.
+```bash
+uv run --extra embodied python -m examples.embodied.app --cloud
+```
+
+`contracts.py` validates selection/readiness evidence against the immutable source
+snapshot and current World. Physical policy uses existing SERIAL execution;
+nested wrappers need explicit authorization and share the Run/Execution turn slot.
+The original one-axis carriage remains available as
+`python -m examples.embodied.mujoco` for its existing regressions.
+
+Host integrations are explicit:
+
+- `perception.py`: `CloudSemantics` invokes the existing Model interface and validates
+  JSON against the original ObservationRef. Host association maps local detections
+  to stable EntityRefs. `RGBDAdapter` validates capture skew, depth and historical TF
+  before atomic World commit. A depth centroid establishes position, not orientation;
+  it does not invent a complete manipulation pose. Supply `pose_from_sample`
+  only when local geometry/tracking establishes the full world-frame object pose
+  (object origin and orientation) from that exact capture. A surface point plus
+  orientation does not establish an object pose.
+- `bridge.py`: `Mfr3duoBridge` uses roserver `/api/v1/robots/...` state, operations
+  and stop endpoints. Manipulation Tools are registered only when the server advertises
+  manipulation and the deployment supplies a trusted `pre_dispatch` callback for
+  live geometry, readiness, resource ownership and collision checks. The current
+  roserver pose polling response lacks sampling timestamps, so it cannot replace
+  that callback. Place rejects roll/pitch that the server yaw-only pose API cannot
+  represent. Accepted operations remain pending until terminal confirmation;
+  confirmed success/cancellation clears the pending task using the actual operation
+  identity and terminal record. Failed or uncertain termination requires confirmed
+  stop. Submission, status and stop share Host admission; evidence and pose age
+  are rechecked after awaited preflight work immediately before dispatch. Ordinary state polling is not physical verification evidence.
+
+Hardware capture, calibration, historical TF and a trusted complete pose must be
+supplied by the deployment. Level 3/4 require actual sensor/robot evidence; passing
+adapter tests cannot establish those levels. No sensor stream starts Agent Runs.
+
+See [World V1.1](../../docs/world/world_v1.1.md) and
+[World integration](../../docs/embodied.md) for ownership and acceptance contracts.

@@ -154,5 +154,5 @@ def test_explicit_world_tools_project_nested_structured_search_filters():
         spec for spec in specs if spec.canonical_name == "world_find_entities"
     )
     assert search.arguments(
-        (), {"filters": {"color": "red", "position": [1, 2, 3]}}
-    ) == {"filters": {"color": "red", "position": [1, 2, 3]}}
+        (), {"filters": [{"predicate": "color", "value_kind": "json", "value": "red"}]}
+    ) == {"filters": [{"predicate": "color", "value_kind": "json", "value": "red"}]}

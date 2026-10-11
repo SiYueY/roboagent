@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import shlex
 from pathlib import Path
 
 from examples.coding.evaluation import (
@@ -104,12 +106,13 @@ def test_bug_fix_runs_failing_test_patches_and_retests(tmp_path: Path) -> None:
             "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
         )
         patch = "*** Begin Patch\n*** Update File: calc.py\n@@\n def add(a, b):\n-    return a - b\n+    return a + b  # fixed\n*** End Patch\n"
+        test_command = shlex.quote(sys.executable) + " -m pytest -q test_calc.py"
         code = (
-            "before = shell(command='python -m pytest -q test_calc.py')\n"
+            f"before = shell(command={test_command!r})\n"
             "print('SHELL_EXIT=' + str(before['exit_code']))\n"
             "source = read_file(path='calc.py')\n"
             f"changed = apply_patch(patch={patch!r})\n"
-            "after = shell(command='python -m pytest -q test_calc.py')\n"
+            f"after = shell(command={test_command!r})\n"
             "print('SHELL_EXIT=' + str(after['exit_code']))\n"
             "final_answer({'fixed': after['exit_code'] == 0, 'inspected': 'a - b' in source})\n"
         )

@@ -166,7 +166,20 @@ def _supported_object(schema: dict[str, object]) -> bool:
 
 
 def _supported_schema(value: object) -> bool:
-    if not isinstance(value, dict) or _FORBIDDEN_SCHEMA & value.keys():
+    if not isinstance(value, dict):
+        return False
+    if not value:
+        return (
+            True  # Unrestricted JSON payload; canonical Tool validation still applies.
+        )
+    if set(value) == {"const"}:
+        return (
+            isinstance(value["const"], (str, int, float, bool))
+            or value["const"] is None
+        )
+    if set(value) == {"oneOf"}:
+        return _supported_tagged_union(value["oneOf"])
+    if _FORBIDDEN_SCHEMA & value.keys():
         return False
     schema_type = value.get("type")
     types = schema_type if isinstance(schema_type, list) else [schema_type]
@@ -196,6 +209,24 @@ def _supported_schema(value: object) -> bool:
     if "default" in value and not _validate_value(value["default"], value):
         return False
     return True
+
+
+def _supported_tagged_union(branches: object) -> bool:
+    """Finite closed objects with a shared, uniquely valued discriminator."""
+    if not isinstance(branches, list) or len(branches) < 2:
+        return False
+    if not all(
+        isinstance(branch, dict) and _supported_object(branch) for branch in branches
+    ):
+        return False
+    discriminators = set.intersection(
+        *(set(branch.get("required", ())) for branch in branches)
+    )
+    for name in discriminators:
+        tags = [branch["properties"][name].get("const") for branch in branches]
+        if all(isinstance(tag, str) for tag in tags) and len(set(tags)) == len(tags):
+            return True
+    return False
 
 
 def _plain_json_mapping(schema: dict[str, object]) -> bool:
@@ -230,6 +261,20 @@ def _matches_type(value: object, types: list[object]) -> bool:
 
 
 def _validate_value(value: object, schema: dict[str, object]) -> bool:
+    if not schema:
+        try:
+            json.dumps(value, allow_nan=False)
+            return True
+        except (TypeError, ValueError):
+            return False
+    if "const" in schema:
+        return type(value) is type(schema["const"]) and value == schema["const"]
+    if "oneOf" in schema:
+        branches = schema["oneOf"]
+        return (
+            isinstance(branches, list)
+            and sum(_validate_value(value, branch) for branch in branches) == 1
+        )
     types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
     if not _matches_type(value, types):
         return False
@@ -237,7 +282,11 @@ def _validate_value(value: object, schema: dict[str, object]) -> bool:
         return False
     if isinstance(value, list) and "items" in schema:
         return all(_validate_value(item, schema["items"]) for item in value)  # type: ignore[arg-type]
-    if isinstance(value, dict) and schema.get("type") == "object" and not _plain_json_mapping(schema):
+    if (
+        isinstance(value, dict)
+        and schema.get("type") == "object"
+        and not _plain_json_mapping(schema)
+    ):
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         if not isinstance(properties, dict) or not isinstance(required, list):

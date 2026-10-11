@@ -34,7 +34,11 @@ from roboagent.model import (
     collect_model_stream,
 )
 from roboagent.runtime.event import RunEventEmitter
-from roboagent.runtime.execution import ExecutionLineage, UsageContribution, UsageKnowledge
+from roboagent.runtime.execution import (
+    ExecutionLineage,
+    UsageContribution,
+    UsageKnowledge,
+)
 from roboagent.runtime.types import RunContext, RunError, RunPhase, ToolCallSummary
 from roboagent.tool import (
     ToolBatchAborted,
@@ -157,9 +161,7 @@ async def _run_loop_impl(
         # Model lifecycle events must be attributed to the owning execution scope
         # so nested (child) Runs stay distinguishable from the root Run.
         model_lineage = (
-            run_context.execution.lineage
-            if run_context.execution is not None
-            else None
+            run_context.execution.lineage if run_context.execution is not None else None
         )
         if turn > 1:
             await session.consume_pending(run_context.run_id, run_context.cancellation)
@@ -250,12 +252,18 @@ async def _run_loop_impl(
             decisions = await invoke_hooks("before_model", hook_context)
         except _RunFailure as exc:
             await events.emit(
-                "model.failed", turn=turn, error_code="hook_error", lineage=model_lineage
+                "model.failed",
+                turn=turn,
+                error_code="hook_error",
+                lineage=model_lineage,
             )
             raise _RunFailure(exc.error, tuple(effects), output, usage, turn) from exc
         if any(not isinstance(decision, HookDecision) for decision in decisions):
             await events.emit(
-                "model.failed", turn=turn, error_code="hook_error", lineage=model_lineage
+                "model.failed",
+                turn=turn,
+                error_code="hook_error",
+                lineage=model_lineage,
             )
             raise _RunFailure(
                 RunError(
@@ -268,7 +276,10 @@ async def _run_loop_impl(
             )
         if any(decision is HookDecision.FAIL_RUN for decision in decisions):
             await events.emit(
-                "model.failed", turn=turn, error_code="hook_error", lineage=model_lineage
+                "model.failed",
+                turn=turn,
+                error_code="hook_error",
+                lineage=model_lineage,
             )
             raise _RunFailure(
                 RunError("hook_error", "before_model hook failed the Run."),
@@ -355,7 +366,10 @@ async def _run_loop_impl(
                 ),
             )
             await events.emit(
-                "model.cancelled", turn=turn, message_id=message_id, lineage=model_lineage
+                "model.cancelled",
+                turn=turn,
+                message_id=message_id,
+                lineage=model_lineage,
             )
             raise
         except ModelError as exc:
@@ -468,6 +482,7 @@ async def _run_loop_impl(
                         tool_executor, run_context.session_id
                     ),
                     message_id,
+                    world_snapshot,
                 ),
             )
         except ToolBatchCancelled as exc:
@@ -476,6 +491,9 @@ async def _run_loop_impl(
         except ToolBatchAborted as exc:
             effects.extend(exc.effects)
             raise _RunFailure(exc.reason, tuple(effects), output, usage, turn) from exc
+        finally:
+            assert run_context.execution is not None
+            run_context.execution.release_model_turn(message_id)
         try:
             run_context.cancellation.raise_if_cancelled()
         except asyncio.CancelledError:

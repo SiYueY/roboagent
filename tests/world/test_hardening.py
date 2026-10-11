@@ -19,7 +19,7 @@ from roboagent.world import (
     WorldSnapshot,
     WorldStatus,
 )
-from tests.world.test_world import NOW, claim, observation, world
+from tests.world.test_world import NOW, Clock, claim, observation, world
 
 
 def test_concurrent_transactions_snapshot_consistency_and_capacity_backpressure():
@@ -82,7 +82,9 @@ def test_old_different_source_results_do_not_replace_newer_sample_time():
         w = world()
         await w.observe(observation(), claims=[claim(time=20)])
         await w.add_claims([claim("cloud_old", "blue", source="other", time=10)])
-        assert (await w.query(EntityRef("cube"), "color")).value == "red"
+        assert (
+            await w.query(EntityRef("cube"), "color")
+        ).status is WorldStatus.CONFLICTED
         await w.add_claims([claim("same", "blue", source="other", time=20)])
         assert (
             await w.query(EntityRef("cube"), "color")
@@ -209,16 +211,15 @@ def test_unrelated_scope_does_not_mask_live_conflict():
                 claim("a2", "blue", scope="a", source="other"),
             ],
         )
-        before = await w.query(EntityRef("cube"), "color")
+        before = await w.query(EntityRef("cube"), "color", scope="a")
         assert before.status is WorldStatus.CONFLICTED
         await w.add_claims([claim("b", "green", scope="b")])
-        after = await w.query(EntityRef("cube"), "color")
+        after = await w.query(EntityRef("cube"), "color", scope="a")
         assert after.status is WorldStatus.CONFLICTED
         assert after.value is None
         assert {candidate.value for candidate in after.candidates} == {
             "red",
             "blue",
-            "green",
         }
 
     asyncio.run(check())
@@ -270,8 +271,12 @@ def test_future_valid_at_is_not_current_even_without_automatic_ttl():
 
 def test_world_ids_isolate_same_entity_and_evidence_names():
     async def check():
-        first = World("first", allowed_sources=("sensor", "adapter"))
-        second = World("second", allowed_sources=("sensor", "adapter"))
+        first = World(
+            "first", allowed_sources=("sensor", "adapter"), clock_resolver=Clock()
+        )
+        second = World(
+            "second", allowed_sources=("sensor", "adapter"), clock_resolver=Clock()
+        )
         await first.observe(observation(), claims=[claim(value="red")])
         with pytest.raises(WorldError, match="evidence_not_found"):
             await second.add_claims([claim(value="blue")])

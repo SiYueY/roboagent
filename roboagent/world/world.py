@@ -15,7 +15,7 @@ from roboagent.message import (
     JsonValue,
     canonical_json_dumps,
     canonical_json_digest,
-    freeze_json_object,
+    freeze_json,
 )
 from ._codec import world_data
 from .types import (
@@ -24,6 +24,7 @@ from .types import (
     ClaimRef,
     ClockResolver,
     EntityCandidate,
+    EntityMatchStatus,
     EntityRef,
     EntitySearchResult,
     Observation,
@@ -33,6 +34,7 @@ from .types import (
     WorldAnswer,
     WorldCandidate,
     WorldEntry,
+    WorldEntryKey,
     WorldError,
     WorldLimits,
     WorldReceipt,
@@ -311,22 +313,23 @@ class World:
                 times[clock_id] = now
         superseded = {ref for claim in claims for ref in claim.supersedes}
         grounded = _grounded_claims(claims, superseded)
-        groups: dict[tuple[EntityRef, str], list[Claim]] = defaultdict(list)
+        groups: dict[tuple[EntityRef, str, str | None], list[Claim]] = defaultdict(list)
         for claim in claims:
-            groups[claim.subject, claim.predicate].append(claim)
+            groups[claim.subject, claim.predicate, claim.scope].append(claim)
         updated = {
-            (claim.subject, claim.predicate): index
+            (claim.subject, claim.predicate, claim.scope): index
             for index, claim in enumerate(claims)
         }
         entries = tuple(
             _resolve(
                 subject,
                 predicate,
+                scope,
                 [claim for claim in group if claim.ref not in superseded],
                 times,
                 grounded,
             )
-            for (subject, predicate), group in sorted(
+            for (subject, predicate, scope), group in sorted(
                 groups.items(),
                 key=lambda item: (updated[item[0]], item[0][0].id, item[0][1]),
             )
@@ -335,7 +338,9 @@ class World:
             self.world_id, revision, datetime.now(timezone.utc), entries
         )
 
-    async def query(self, entity: EntityRef, predicate: str) -> WorldAnswer:
+    async def query(
+        self, entity: EntityRef, predicate: str, *, scope: str | None = None
+    ) -> WorldAnswer:
         if (
             not isinstance(entity, EntityRef)
             or not isinstance(predicate, str)
@@ -343,14 +348,7 @@ class World:
         ):
             raise WorldError("invalid_claim")
         snapshot = await self.snapshot()
-        entry = next(
-            (
-                item
-                for item in snapshot.entries
-                if item.subject == entity and item.predicate == predicate
-            ),
-            None,
-        )
+        entry = snapshot.lookup(WorldEntryKey(entity, predicate, scope))
         if entry is None:
             return WorldAnswer(
                 self.world_id,
@@ -374,45 +372,100 @@ class World:
         )
 
     async def find_entities(
-        self, filters: Mapping[str, JsonValue], *, limit: int = 16
+        self,
+        filters: Mapping[str, JsonValue | EntityRef],
+        *,
+        scope: str | None = None,
+        include_possible: bool = False,
+        limit: int = 16,
     ) -> EntitySearchResult:
+        if type(limit) is not int or not 1 <= limit <= self.limits.max_search_results:
+            raise WorldError("invalid_claim")
         if (
-            type(limit) is not int
-            or limit < 1
-            or limit > self.limits.max_search_results
+            not isinstance(filters, Mapping)
+            or not filters
+            or type(include_possible) is not bool
         ):
             raise WorldError("invalid_claim")
-        if not isinstance(filters, Mapping):
+        if scope is not None and (not isinstance(scope, str) or not scope.strip()):
             raise WorldError("invalid_claim")
+        frozen = {}
         try:
-            frozen = freeze_json_object(filters)
+            for predicate, value in filters.items():
+                WorldEntryKey(EntityRef("filter"), predicate, scope)
+                frozen[predicate] = (
+                    value if isinstance(value, EntityRef) else freeze_json(value)
+                )
         except (TypeError, ValueError, RecursionError) as exc:
             raise WorldError("invalid_claim") from exc
         snapshot = await self.snapshot()
         entities: dict[EntityRef, dict[str, WorldEntry]] = defaultdict(dict)
-        for entry in snapshot.entries:
-            entities[entry.subject][entry.predicate] = entry
-        candidates = []
-        for entity, attributes in sorted(entities.items(), key=lambda item: item[0].id):
-            if all(
-                key in attributes
-                and attributes[key].status is WorldStatus.KNOWN
-                and _value_key(attributes[key].value) == _value_key(value)
-                for key, value in frozen.items()
-            ):
-                refs = tuple(
-                    dict.fromkeys(
-                        ref
-                        for key in frozen
-                        for ref in attributes[key].supporting_claims
-                    )
+        for snapshot_entry in snapshot.entries:
+            if snapshot_entry.scope == scope:
+                entities[snapshot_entry.subject][snapshot_entry.predicate] = (
+                    snapshot_entry
                 )
-                candidates.append(EntityCandidate(entity, frozen, refs))
+        candidates = []
+        for entity, attributes in entities.items():
+            matched: list[str] = []
+            uncertain: list[str] = []
+            missing: list[str] = []
+            refs: set[ClaimRef] = set()
+            excluded = False
+            for predicate, value in sorted(frozen.items()):
+                entry = attributes.get(predicate)
+                if entry is None or (
+                    entry.status is WorldStatus.UNKNOWN and not entry.candidates
+                ):
+                    missing.append(predicate)
+                elif entry.status is WorldStatus.KNOWN:
+                    if _value_key(entry.value) != _value_key(value):
+                        excluded = True
+                        break
+                    matched.append(predicate)
+                    refs.update(entry.supporting_claims)
+                else:
+                    supports = [
+                        item
+                        for item in entry.candidates
+                        if _value_key(item.value) == _value_key(value)
+                    ]
+                    if not supports:
+                        excluded = True
+                        break
+                    uncertain.append(predicate)
+                    refs.update(
+                        ref for item in supports for ref in item.supporting_claims
+                    )
+            if excluded or not (matched or uncertain):
+                continue
+            status = (
+                EntityMatchStatus.POSSIBLE
+                if uncertain or missing
+                else EntityMatchStatus.CONFIRMED
+            )
+            if status is EntityMatchStatus.POSSIBLE and not include_possible:
+                continue
+            candidates.append(
+                EntityCandidate(
+                    entity,
+                    scope,
+                    status,
+                    tuple(matched),
+                    tuple(uncertain),
+                    tuple(missing),
+                    tuple(sorted(refs, key=lambda ref: ref.id)),
+                )
+            )
+        candidates.sort(
+            key=lambda item: (item.status is EntityMatchStatus.POSSIBLE, item.entity.id)
+        )
         return EntitySearchResult(
             self.world_id,
             snapshot.revision,
             tuple(candidates[:limit]),
             len(candidates) > limit,
+            len(candidates),
         )
 
 
@@ -467,76 +520,109 @@ def _grounded_claims(
     return supported
 
 
+def _temporal_class(claim: Claim, times: Mapping[str, ObservationTime | None]) -> str:
+    now = times.get(claim.valid_at.clock_id) if claim.valid_at is not None else None
+    if (
+        claim.valid_at is not None
+        and now is not None
+        and now.nanoseconds < claim.valid_at.nanoseconds
+    ):
+        return "unresolved"
+    if claim.valid_at is not None and now is None:
+        return "unresolved"
+    if claim.valid_for_ns is None:
+        return "live"
+    if now is None:
+        return "unresolved"
+    assert claim.valid_at is not None
+    return (
+        "expired"
+        if now.nanoseconds >= claim.valid_at.nanoseconds + claim.valid_for_ns
+        else "live"
+    )
+
+
 def _resolve(
     subject: EntityRef,
     predicate: str,
+    scope: str | None,
     claims: list[Claim],
     times: Mapping[str, ObservationTime | None],
     grounded: set[ClaimRef],
 ) -> WorldEntry:
-    eligible = [claim for claim in claims if claim.ref in grounded]
-    # Only compare time inside one scope and clock domain. An old
-    # cloud interpretation cannot win merely because it arrived last.
-    latest: dict[tuple[str | None, str], int] = {}
-    for claim in eligible:
-        if claim.valid_at is not None:
-            key = (claim.scope, claim.valid_at.clock_id)
-            latest[key] = max(latest.get(key, -1), claim.valid_at.nanoseconds)
+    classified = [(claim, _temporal_class(claim, times)) for claim in claims]
+    heads: dict[tuple[str, bool, str], int] = {}
+    for claim, temporal in classified:
+        if claim.valid_at is not None and temporal != "unresolved":
+            key = (claim.source, claim.ref in grounded, claim.valid_at.clock_id)
+            heads[key] = max(heads.get(key, -1), claim.valid_at.nanoseconds)
     selected = [
-        claim
-        for claim in eligible
+        (claim, temporal)
+        for claim, temporal in classified
         if claim.valid_at is None
-        or claim.valid_at.nanoseconds == latest[claim.scope, claim.valid_at.clock_id]
+        or temporal == "unresolved"
+        or claim.valid_at.nanoseconds
+        == heads[claim.source, claim.ref in grounded, claim.valid_at.clock_id]
     ]
-    live, expired, uncertain = [], [], []
-    for claim in selected:
-        now = times.get(claim.valid_at.clock_id) if claim.valid_at is not None else None
-        if (
-            claim.valid_at is not None
-            and now is not None
-            and now.nanoseconds < claim.valid_at.nanoseconds
-        ):
-            uncertain.append(claim)
-        elif claim.valid_for_ns is None:
-            live.append(claim)
+    live = [
+        claim
+        for claim, temporal in selected
+        if claim.ref in grounded and temporal == "live"
+    ]
+    expired = [
+        claim
+        for claim, temporal in selected
+        if claim.ref in grounded and temporal == "expired"
+    ]
+    unresolved = [
+        claim
+        for claim, temporal in selected
+        if claim.ref in grounded and temporal == "unresolved"
+    ]
+    ungrounded = [claim for claim, _ in selected if claim.ref not in grounded]
+    live_values = {_value_key(claim.value) for claim in live}
+    value = None
+    if len(live_values) > 1:
+        status, basis = WorldStatus.CONFLICTED, live + unresolved
+    elif live:
+        if any(_value_key(claim.value) not in live_values for claim in unresolved):
+            status, basis = WorldStatus.UNKNOWN, live + unresolved
         else:
-            assert claim.valid_at is not None
-            if now is None:
-                uncertain.append(claim)
-            elif now.nanoseconds >= claim.valid_at.nanoseconds + claim.valid_for_ns:
-                expired.append(claim)
-            else:
-                live.append(claim)
-    basis = live or expired or uncertain or claims
-    candidates = tuple(
-        WorldCandidate(claim.value, (claim.ref,), claim.evidence_refs, claim.valid_at)
-        for claim in sorted(basis, key=lambda claim: claim.ref.id)
-    )
-    values = {_value_key(claim.value) for claim in basis}
-    # Different scopes are alternatives, not evidence of a contradiction.
-    if not eligible or (not live and uncertain):
-        status = WorldStatus.UNKNOWN
-    elif len(values) > 1:
-        scope_values: dict[str | None, set[str]] = defaultdict(set)
-        for claim in live:
-            scope_values[claim.scope].add(_value_key(claim.value))
-        # A claim in another scope cannot erase a conflict already established
-        # inside one scope. Cross-scope alternatives alone remain UNKNOWN.
-        conflicted = any(len(items) > 1 for items in scope_values.values())
-        status = WorldStatus.CONFLICTED if conflicted else WorldStatus.UNKNOWN
+            status, basis, value = WorldStatus.KNOWN, live, live[0].value
+    elif unresolved:
+        status, basis = WorldStatus.UNKNOWN, expired + unresolved + ungrounded
+    elif expired:
+        status, basis = WorldStatus.STALE, expired
     else:
-        status = WorldStatus.KNOWN if live else WorldStatus.STALE
-    certain = status in (WorldStatus.KNOWN, WorldStatus.STALE)
-    refs = tuple(claim.ref for claim in basis)
-    evidence = tuple(dict.fromkeys(e for claim in basis for e in claim.evidence_refs))
-    valid_times = {claim.valid_at for claim in basis}
+        status, basis = WorldStatus.UNKNOWN, ungrounded
+    groups: dict[str, list[Claim]] = defaultdict(list)
+    for claim in basis:
+        groups[_value_key(claim.value)].append(claim)
+    candidates = []
+    for _, supports in sorted(groups.items()):
+        refs, evidence, valid_at = _provenance(supports)
+        candidates.append(WorldCandidate(supports[0].value, refs, evidence, valid_at))
+    refs, evidence, valid_at = _provenance(basis)
     return WorldEntry(
         subject,
         predicate,
         status,
-        basis[0].value if certain else None,
-        () if certain else candidates,
+        value,
+        tuple(candidates),
         refs,
         evidence,
-        next(iter(valid_times)) if len(valid_times) == 1 else None,
+        valid_at,
+        scope,
     )
+
+
+def _provenance(claims: list[Claim]):
+    refs = tuple(sorted({claim.ref for claim in claims}, key=lambda ref: ref.id))
+    evidence = tuple(
+        sorted(
+            {item for claim in claims for item in claim.evidence_refs},
+            key=lambda item: (item.kind, item.source or "", item.id),
+        )
+    )
+    times = {claim.valid_at for claim in claims}
+    return refs, evidence, next(iter(times)) if len(times) == 1 else None

@@ -20,6 +20,8 @@ from .types import (
     WorldLimits,
     WorldReceipt,
     WorldSnapshot,
+    WorldEntryKey,
+    EntityMatchStatus,
     WorldStatus,
 )
 from .world import World
@@ -47,5 +49,7 @@ __all__ = [
     "WorldLimits",
     "WorldReceipt",
     "WorldSnapshot",
+    "WorldEntryKey",
+    "EntityMatchStatus",
     "WorldStatus",
 ]

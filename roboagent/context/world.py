@@ -12,7 +12,7 @@ from roboagent.message import (
     JsonContent,
     canonical_json_dumps,
 )
-from roboagent.world import WorldEntry, WorldStatus
+from roboagent.world import WorldEntry, WorldEntryKey, WorldStatus
 from roboagent.tool import ToolDefinition
 from roboagent.world._codec import world_data
 from .manager import ContextDataSegment, ContextRequest, ModelContext
@@ -71,22 +71,45 @@ def _message_entities(
         for call in message.tool_calls:
             result.update(_entity_refs(call.arguments, world_id))
             definition = next((tool for tool in tools if tool.name == call.name), None)
-            properties = (
-                definition.input_schema.get("properties") if definition else None
-            )
-            if isinstance(properties, Mapping):
-                for name, schema in properties.items():
-                    if (
-                        isinstance(schema, Mapping)
-                        and schema.get("x-world-entity-ref") is True
-                    ):
-                        entity_id = call.arguments.get(name)
-                        if isinstance(entity_id, str):
-                            result.add(entity_id)
+            if definition is not None:
+                result.update(_schema_entities(call.arguments, definition.input_schema))
     return result
 
 
-def _ordered_world_entries(request: ContextRequest) -> tuple[WorldEntry, ...]:
+def _schema_entities(value: object, schema: object) -> set[str]:
+    """Follow Host-authored annotations, including discriminated filter arrays."""
+    if not isinstance(schema, Mapping):
+        return set()
+    if schema.get("x-world-entity-ref") is True and isinstance(value, str):
+        return {value}
+    if isinstance(value, (tuple, list)):
+        return set().union(
+            *(_schema_entities(item, schema.get("items")) for item in value)
+        )
+    if not isinstance(value, Mapping):
+        return set()
+    result: set[str] = set()
+    properties = schema.get("properties", {})
+    if isinstance(properties, Mapping):
+        for name, child_schema in properties.items():
+            result.update(_schema_entities(value.get(name), child_schema))
+    for branch in schema.get("oneOf", ()):
+        if not isinstance(branch, Mapping):
+            continue
+        branch_properties = branch.get("properties", {})
+        if isinstance(branch_properties, Mapping) and all(
+            not isinstance(child, Mapping)
+            or "const" not in child
+            or value.get(name) == child["const"]
+            for name, child in branch_properties.items()
+        ):
+            result.update(_schema_entities(value, branch))
+    return result
+
+
+def _ordered_world_entries(
+    request: ContextRequest,
+) -> tuple[WorldEntry, ...]:
     snapshot = request.world_snapshot
     if snapshot is None:
         return ()
@@ -132,7 +155,7 @@ def _ordered_world_entries(request: ContextRequest) -> tuple[WorldEntry, ...]:
     return tuple(sorted(snapshot.entries, key=rank))
 
 
-def _protected_world_entries(request: ContextRequest) -> set[tuple[str, str]]:
+def _protected_world_entries(request: ContextRequest) -> set[WorldEntryKey]:
     entities = {"self", "robot"}
     for message in request.snapshot.transcript:
         entities.update(
@@ -149,19 +172,19 @@ def _protected_world_entries(request: ContextRequest) -> set[tuple[str, str]]:
         if isinstance(refs, (tuple, list)):
             entities.update(ref for ref in refs if isinstance(ref, str))
     return {
-        (entry.subject.id, entry.predicate)
+        entry.key
         for entry in _ordered_world_entries(request)
         if entry.subject.id in entities and entry.status is not WorldStatus.KNOWN
     }
 
 
 def _bounded_world_entries(
-    request: ContextRequest, protected: set[tuple[str, str]]
+    request: ContextRequest, protected: set[WorldEntryKey]
 ) -> tuple[WorldEntry, ...]:
     return tuple(
         entry
         for index, entry in enumerate(_ordered_world_entries(request))
-        if index < 64 or (entry.subject.id, entry.predicate) in protected
+        if index < 64 or entry.key in protected
     )
 
 
@@ -244,8 +267,7 @@ def _prepare_world_context(
             (
                 index
                 for index in range(len(entries) - 1, -1, -1)
-                if (entries[index].subject.id, entries[index].predicate)
-                not in protected
+                if entries[index].key not in protected
             ),
             None,
         )

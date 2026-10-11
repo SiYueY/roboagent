@@ -22,7 +22,9 @@ def create_world_tools(world: World) -> tuple[Tool, ...]:
         context.cancellation.raise_if_cancelled()
         try:
             result = await world.query(
-                EntityRef(arguments["entity_id"]), arguments["predicate"]
+                EntityRef(arguments["entity_id"]),
+                arguments["predicate"],
+                scope=arguments.get("scope"),
             )
         except WorldError as exc:
             raise ToolExecutionFailure(ToolErrorInfo(exc.code, exc.code)) from exc
@@ -32,7 +34,9 @@ def create_world_tools(world: World) -> tuple[Tool, ...]:
         context.cancellation.raise_if_cancelled()
         try:
             result = await world.find_entities(
-                arguments["filters"],
+                _decode_filters(arguments["filters"]),
+                scope=arguments.get("scope"),
+                include_possible=arguments.get("include_possible", False),
                 limit=arguments.get("limit", min(16, world.limits.max_search_results)),
             )
         except WorldError as exc:
@@ -54,6 +58,7 @@ def create_world_tools(world: World) -> tuple[Tool, ...]:
                                 "x-world-entity-ref": True,
                             },
                             "predicate": {"type": "string", "minLength": 1},
+                            "scope": {"type": ["string", "null"], "minLength": 1},
                         },
                         "required": ["entity_id", "predicate"],
                         "additionalProperties": False,
@@ -71,7 +76,54 @@ def create_world_tools(world: World) -> tuple[Tool, ...]:
                     {
                         "type": "object",
                         "properties": {
-                            "filters": {"type": "object"},
+                            "filters": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "oneOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "predicate": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                },
+                                                "value_kind": {"const": "json"},
+                                                "value": {},
+                                            },
+                                            "required": [
+                                                "predicate",
+                                                "value_kind",
+                                                "value",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "predicate": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                },
+                                                "value_kind": {"const": "entity_ref"},
+                                                "entity_id": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "x-world-entity-ref": True,
+                                                },
+                                            },
+                                            "required": [
+                                                "predicate",
+                                                "value_kind",
+                                                "entity_id",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
+                                    ]
+                                },
+                            },
+                            "scope": {"type": ["string", "null"], "minLength": 1},
+                            "include_possible": {"type": "boolean"},
                             "limit": {
                                 "type": "integer",
                                 "minimum": 1,
@@ -87,3 +139,17 @@ def create_world_tools(world: World) -> tuple[Tool, ...]:
             effect_kind=ToolEffectKind.READ_ONLY,
         ),
     )
+
+
+def _decode_filters(filters):
+    result = {}
+    for item in filters:
+        predicate = item["predicate"]
+        if predicate in result:
+            raise WorldError("duplicate_search_predicate")
+        result[predicate] = (
+            EntityRef(item["entity_id"])
+            if item["value_kind"] == "entity_ref"
+            else item["value"]
+        )
+    return result

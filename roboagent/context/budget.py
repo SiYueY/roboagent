@@ -264,7 +264,7 @@ class CompactingContextManager(ContextManager):
                 (
                     index
                     for index in range(len(entries) - 1, -1, -1)
-                    if (entries[index].subject.id, entries[index].predicate)
+                    if entries[index].key
                     not in protected
                 ),
                 None,

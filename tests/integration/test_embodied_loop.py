@@ -70,7 +70,17 @@ def test_observation_action_ack_independent_feedback_next_turn_and_persistence()
             AssistantMessage(
                 tool_calls=(
                     ToolCall(
-                        "search", "world_find_entities", {"filters": {"color": "red"}}
+                        "search",
+                        "world_find_entities",
+                        {
+                            "filters": [
+                                {
+                                    "predicate": "color",
+                                    "value_kind": "json",
+                                    "value": "red",
+                                }
+                            ]
+                        },
                     ),
                 )
             ),

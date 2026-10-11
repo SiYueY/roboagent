@@ -70,6 +70,10 @@ def claim(
 
 
 def world(**kwargs):
+    if "clock_resolver" not in kwargs:
+        clock = Clock()
+        clock.times = {"sim:1": 100, "device:1": 100}
+        kwargs["clock_resolver"] = clock
     return World(
         "test",
         allowed_sources=("sensor", "adapter", "other"),
@@ -152,7 +156,8 @@ def test_late_claim_conflict_scope_correction_search():
         await w.add_claims(
             [claim("scope1", "orange", scope="a"), claim("scope2", "green", scope="b")]
         )
-        assert (await w.query(EntityRef("cube"), "color")).status is WorldStatus.UNKNOWN
+        assert (await w.query(EntityRef("cube"), "color")).status is WorldStatus.KNOWN
+        assert (await w.query(EntityRef("cube"), "color", scope="a")).value == "orange"
         assert (
             await w.query(EntityRef("missing"), "color")
         ).status is WorldStatus.UNKNOWN

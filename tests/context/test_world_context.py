@@ -34,7 +34,14 @@ from roboagent.model import ModelCapabilities, ModelSettings
 from roboagent.model.client import _messages, validate_model_context
 from roboagent.runtime import RuntimeCancellation
 from roboagent.tool import ToolDefinition
-from roboagent.world import EntityRef, WorldEntry, WorldSnapshot, WorldStatus
+from roboagent.world import (
+    EntityRef,
+    EntityMatchStatus,
+    WorldCandidate,
+    WorldEntry,
+    WorldSnapshot,
+    WorldStatus,
+)
 
 NOW = datetime.now(timezone.utc)
 
@@ -44,8 +51,8 @@ def entry(entity, status=WorldStatus.KNOWN, value="red"):
         EntityRef(entity),
         "color",
         status,
-        value if status in (WorldStatus.KNOWN, WorldStatus.STALE) else None,
-        (),
+        value if status is WorldStatus.KNOWN else None,
+        () if status is WorldStatus.KNOWN else (WorldCandidate(value, (), (), None),),
         (),
         (),
         None,
@@ -275,10 +282,17 @@ def test_world_search_result_entities_are_relevant_and_uncertainty_is_protected(
             3,
             (
                 EntityCandidate(
-                    EntityRef("target"), FrozenJsonObject({"color": "red"}), ()
+                    EntityRef("target"),
+                    None,
+                    EntityMatchStatus.CONFIRMED,
+                    ("color",),
+                    (),
+                    (),
+                    (),
                 ),
             ),
             False,
+            1,
         )
         messages = (
             UserMessage("find red"),
@@ -383,3 +397,36 @@ def test_relation_refs_are_relevant_but_json_lookalikes_are_not():
     literal = WorldCandidate({"entity_ref": {"id": "target"}}, (), (), None)
     assert _entity_refs(world_data(relation), "world") == {"target"}
     assert _entity_refs(world_data(literal), "world") == set()
+
+
+def test_typed_filter_references_follow_schema_without_interpreting_literal_json():
+    from roboagent.context.world import _message_entities
+    from roboagent.world import World, create_world_tools
+
+    definitions = tuple(tool.definition for tool in create_world_tools(World("world")))
+    message = AssistantMessage(
+        tool_calls=(
+            ToolCall(
+                "find",
+                "world_find_entities",
+                {
+                    "filters": [
+                        {
+                            "predicate": "inside",
+                            "value_kind": "entity_ref",
+                            "entity_id": "basket",
+                        },
+                        {
+                            "predicate": "metadata",
+                            "value_kind": "json",
+                            "value": {
+                                "value_kind": "entity_ref",
+                                "entity_id": "literal",
+                            },
+                        },
+                    ]
+                },
+            ),
+        )
+    )
+    assert _message_entities(message, definitions, "world") == {"basket"}

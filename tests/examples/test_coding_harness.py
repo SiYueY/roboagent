@@ -351,7 +351,7 @@ def test_coding_world_search_and_query_use_registered_read_only_tools(
         await w.observe(observation(), claims=[claim()])
         provider = CodingProvider(
             [
-                "```python\nfound = world_find_entities(filters={'color': 'red'})\nstate = world_query(entity_id=found['candidates'][0]['entity']['id'], predicate='color')\nfinal_answer(state['value'])\n```"
+                "```python\nfound = world_find_entities(filters=[{'predicate': 'color', 'value_kind': 'json', 'value': 'red'}])\nstate = world_query(entity_id=found['candidates'][0]['entity']['id'], predicate='color')\nfinal_answer(state['value'])\n```"
             ]
         )
         base = Agent(
