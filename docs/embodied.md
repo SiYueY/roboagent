@@ -118,12 +118,13 @@ remain authoritative regardless of environmental text.
 ## Interaction
 
 Use `roboagent.interaction.vision` and `roboagent.interaction.speech`. No legacy
-imports or compatibility layers are provided. VisionFrame has no persistent ID;
-its `captured_at` is process-local monotonic time. VisionBuffer bounds count,
-bytes and age, performs latest/nearest lookup and deterministic drop-old retention.
-`image_content_from_frame()` validates MIME and media size and creates canonical
-ImageContent. World evidence identity and clock attribution are assigned separately
-by a Host adapter. Speech retains its ASR/Agent/TTS and streaming lifecycle.
+imports or compatibility layers are provided. Vision V1 replaces the old direct frame/buffer interfaces with immutable
+VisualCapture/CaptureRef, domain-bearing CaptureTime and VisualBuffer. ImageFrame
+validates actual JPEG/PNG raster dimensions before decoding, and image_content()
+uses the canonical ImageContent boundary. CPU dependencies stay optional through
+`--extra vision`; Core imports do not load NumPy/OpenCV. Semantic, spatial, tracking
+and World publication are separate primitives; specific sensor/controller mapping
+remains in the embodied reference. See [Vision V1](vision/vision_v1.0.md).
 
 ## Validation boundaries
 
@@ -153,13 +154,14 @@ No planner, source registry, second Runtime or automatic sensor-triggered Run is
 
 ## Local verification result
 
-Final World V1.1 local run: **471 passed, 4 skipped**. Three skips are gated
-Tongyi provider tests; one is the cloud Model tabletop acceptance test
-(`ROBOAGENT_EMBODIED_LIVE=1`). Cloud tests require explicit configuration and
+Final Vision V1 / World regression local run: **500 passed, 7 skipped**. Three skips
+are gated Tongyi provider tests; one is cloud Model tabletop acceptance
+(`ROBOAGENT_EMBODIED_LIVE=1`); three are real Vision Model resolution fixtures
+(`ROBOAGENT_VISION_LIVE=1`). Cloud tests require explicit configuration and
 credentials and are counted separately from deterministic / MuJoCo tests.
 The existing Python 3.12 `audioop` deprecation warning remains.
 
-`ruff check roboagent tests examples`, configured `mypy` (56 source files), Python
+`ruff check roboagent tests examples`, configured `mypy` (61 source files), Python
 compilation, offline dependency lock validation and `git diff --check` pass.
 The default `python -m examples.embodied.app` completed actuator-driven pick/place
 and independently verified inside, release and stability. This is Level 0–1

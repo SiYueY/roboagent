@@ -10,8 +10,9 @@ import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from time import time
+from time import monotonic_ns, time
 from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +26,10 @@ import gradio as gr
 from roboagent.agent import Agent, Session
 from roboagent.message import TextContent, UserMessage
 from roboagent.runtime import AgentEvent, RunStatus, modality
-from roboagent.interaction.vision import VisionBuffer, VisionFrame, image_content_from_frame
+from roboagent.interaction.vision import (
+    CaptureTime, ImageFrame, VisualBuffer, VisualCapture, VisionError, image_content,
+)
+from roboagent.interaction.vision.image import image_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,18 @@ def bind_browser_action(component: gr.components.Component, method: str) -> None
     )
 
 
+_CHAT_CLOCK_ID = "chat:" + uuid4().hex
+
+
+def _new_visual_buffer() -> VisualBuffer:
+    def clock(domain: str) -> CaptureTime | None:
+        return CaptureTime(_CHAT_CLOCK_ID, monotonic_ns()) if domain == _CHAT_CLOCK_ID else None
+
+    buffer = VisualBuffer(stream_id="browser-camera", clock=clock)
+    buffer.activate_epoch(_CHAT_CLOCK_ID)
+    return buffer
+
+
 @dataclass(slots=True)
 class BrowserConversation:
     """One browser-local conversation and its independent Agent transcript."""
@@ -73,7 +89,8 @@ class BrowserConversation:
     title: str = DEFAULT_TITLE
     updated_at: float = field(default_factory=time)
     voice_token: str = ""
-    vision_buffer: VisionBuffer = field(default_factory=VisionBuffer)
+    vision_buffer: VisualBuffer = field(default_factory=_new_visual_buffer)
+    visual_sequence: int = 0
 
 
 @dataclass(slots=True)
@@ -205,10 +222,11 @@ async def chat(
     if not conversation.history:
         conversation.title = conversation_title(text)
     contents = [TextContent(text)]
-    frame = _frame_from_data_url(camera_snapshot)
+    frame = _frame_from_data_url(camera_snapshot, sequence=conversation.visual_sequence)
+    conversation.visual_sequence += 1
     display_text = text
     if frame is not None:
-        image = image_content_from_frame(frame)
+        image = image_content(frame.image)
         capabilities = conversation.session.agent.model.capabilities
         if modality(image) in capabilities.input_modalities:
             conversation.vision_buffer.push(frame)
@@ -260,7 +278,7 @@ async def chat(
         yield view_update(conversation, state)
 
 
-def _frame_from_data_url(value: str) -> VisionFrame | None:
+def _frame_from_data_url(value: str, *, sequence: int = 0) -> VisualCapture | None:
     try:
         snapshot = json.loads(value)
         data_url, browser_width, browser_height = snapshot["data_url"], snapshot["width"], snapshot["height"]
@@ -279,49 +297,22 @@ def _frame_from_data_url(value: str) -> VisionFrame | None:
         return None
     if len(data) > MAX_CAMERA_SNAPSHOT_BYTES:
         return None
-    dimensions = _jpeg_dimensions(data)
-    if dimensions is None:
+    try:
+        width, height = image_dimensions(data, "image/jpeg")
+    except VisionError:
         return None
-    width, height = dimensions
     if width > MAX_CAMERA_SNAPSHOT_WIDTH or height > MAX_CAMERA_SNAPSHOT_HEIGHT or width * height > MAX_CAMERA_SNAPSHOT_PIXELS:
         return None
     if (width, height) != (browser_width, browser_height):
         return None
-    return VisionFrame(data=data, mime_type="image/jpeg", width=width, height=height, source="browser-camera")
-
-
-def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
-    if len(data) < 10 or not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
+    try:
+        image = ImageFrame(data, "image/jpeg", width, height)
+        return VisualCapture(
+            "browser-camera", uuid4().hex, sequence, image,
+            CaptureTime(_CHAT_CLOCK_ID, monotonic_ns()), datetime.now(timezone.utc),
+        )
+    except VisionError:
         return None
-    index = 2
-    sof_markers = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
-    while index < len(data):
-        while index < len(data) and data[index] == 0xFF:
-            index += 1
-        if index >= len(data):
-            return None
-        marker = data[index]
-        index += 1
-        if marker == 0xD9:
-            return None
-        if marker in {0x01, *range(0xD0, 0xD8)}:
-            continue
-        if index + 2 > len(data):
-            return None
-        length = int.from_bytes(data[index:index + 2], "big")
-        if length < 2 or index + length > len(data):
-            return None
-        if marker in sof_markers:
-            if length < 8:
-                return None
-            height = int.from_bytes(data[index + 3:index + 5], "big")
-            width = int.from_bytes(data[index + 5:index + 7], "big")
-            components = data[index + 7]
-            if not width or not height or not components or length != 8 + 3 * components:
-                return None
-            return width, height
-        index += length
-    return None
 
 
 def create_demo(agent: Agent, speech_registry=None) -> gr.Blocks:

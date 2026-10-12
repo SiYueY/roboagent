@@ -1,89 +1,120 @@
-"""Bounded temporal lookup for direct interaction, with no camera ownership."""
+"""Host-bound input retention; never runs inference or advances tracking."""
 
-from __future__ import annotations
-
-import math
-from collections import deque
 from collections.abc import Callable
-from time import monotonic
+from .types import (
+    CaptureTime,
+    SpatialCapture,
+    VisualCapture,
+    VisionError,
+    VisionLimits,
+    integer,
+    text_id,
+)
+from .image import capture_digest
 
-from roboagent.message import MediaLimits
-from .content import image_content_from_frame
-from .types import VisionFrame
 
-
-def _duration(value: float) -> None:
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-        raise ValueError("Age must be finite and non-negative.")
-
-
-class VisionBuffer:
+class VisualBuffer:
     def __init__(
         self,
         *,
-        max_frames: int = 16,
-        max_age: float = 5.0,
-        max_bytes: int = 32 * 1024 * 1024,
-        media_limits: MediaLimits | None = None,
-        clock: Callable[[], float] = monotonic,
-    ) -> None:
-        if any(
-            type(value) is not int or value < 1 for value in (max_frames, max_bytes)
-        ):
-            raise ValueError("Vision buffer limits must be positive integers.")
-        _duration(max_age)
-        self._frames: deque[VisionFrame] = deque(maxlen=max_frames)
-        self._max_age = max_age
-        self._max_bytes = max_bytes
-        self._limits = media_limits or MediaLimits()
-        self._clock = clock
+        stream_id: str,
+        clock: Callable[[str], CaptureTime | None],
+        limits: VisionLimits | None = None,
+    ):
+        text_id(stream_id)
+        if not callable(clock):
+            raise VisionError("vision_input_invalid")
+        self.stream_id = stream_id
+        self.clock = clock
+        self.limits = limits or VisionLimits()
+        self.clock_id: str | None = None
+        self._captures: dict[int, VisualCapture | SpatialCapture] = {}
 
-    def _prune(self) -> None:
-        now = self._clock()
-        self._frames = deque(
-            (
-                frame
-                for frame in self._frames
-                if 0 <= now - frame.captured_at <= self._max_age
-            ),
-            maxlen=self._frames.maxlen,
-        )
-
-    def push(self, frame: VisionFrame) -> None:
-        image_content_from_frame(frame, limits=self._limits)
-        if len(frame.data) > self._max_bytes:
-            raise ValueError("Frame exceeds buffer byte limit.")
-        self._prune()
-        self._frames = deque(
-            sorted((*self._frames, frame), key=lambda item: item.captured_at),
-            maxlen=self._frames.maxlen,
-        )
-        self._prune()
-        while sum(len(item.data) for item in self._frames) > self._max_bytes:
-            self._frames.popleft()
-
-    def latest(self) -> VisionFrame | None:
-        self._prune()
-        return max(self._frames, key=lambda frame: frame.captured_at, default=None)
-
-    def nearest(
-        self, timestamp: float, *, max_age: float | None = None
-    ) -> VisionFrame | None:
-        _duration(timestamp)
-        if max_age is not None:
-            _duration(max_age)
-        self._prune()
-        frame = min(
-            self._frames,
-            key=lambda item: (abs(item.captured_at - timestamp), -item.captured_at),
-            default=None,
-        )
-        return (
-            frame
-            if frame is not None
-            and (max_age is None or abs(frame.captured_at - timestamp) <= max_age)
-            else None
-        )
+    def activate_epoch(self, clock_id: str) -> None:
+        text_id(clock_id)
+        if self.clock_id != clock_id:
+            self.clear()
+            self.clock_id = clock_id
 
     def clear(self) -> None:
-        self._frames.clear()
+        self._captures.clear()
+
+    def _now(self) -> CaptureTime:
+        now = self.clock(self.clock_id or "")
+        if not isinstance(now, CaptureTime) or now.clock_id != self.clock_id:
+            raise VisionError("buffer_clock_unavailable")
+        return now
+
+    def _prune(self) -> None:
+        now = self._now().nanoseconds
+        self._captures = {
+            seq: c
+            for seq, c in self._captures.items()
+            if 0
+            <= now - self._visual(c).captured_at.nanoseconds
+            <= self.limits.max_buffer_age_ns
+        }
+
+    @staticmethod
+    def _visual(capture):
+        return capture.visual if isinstance(capture, SpatialCapture) else capture
+
+    def push(self, capture: VisualCapture | SpatialCapture) -> None:
+        visual = self._visual(capture)
+        if (
+            visual.stream_id != self.stream_id
+            or visual.captured_at.clock_id != self.clock_id
+        ):
+            raise VisionError("buffer_epoch_mismatch")
+        if visual.captured_at.nanoseconds > self._now().nanoseconds:
+            raise VisionError("buffer_future_capture")
+        self._prune()
+        existing = self._captures.get(visual.sequence)
+        if existing is not None:
+            if existing.ref != capture.ref or capture_digest(
+                existing
+            ) != capture_digest(capture):
+                raise VisionError("capture_content_conflict")
+            return
+
+        def size(c):
+            return len(self._visual(c).image.data) + (
+                c.depth.data.nbytes if isinstance(c, SpatialCapture) else 0
+            )
+
+        if size(capture) > self.limits.max_buffer_bytes:
+            raise VisionError("buffer_limit_exceeded")
+        self._captures[visual.sequence] = capture
+        self._prune()
+        while (
+            len(self._captures) > self.limits.max_buffer_frames
+            or sum(size(c) for c in self._captures.values())
+            > self.limits.max_buffer_bytes
+        ):
+            del self._captures[min(self._captures)]
+
+    def latest(self) -> VisualCapture | SpatialCapture | None:
+        self._prune()
+        return self._captures[max(self._captures)] if self._captures else None
+
+    def nearest(self, time: CaptureTime, *, max_delta_ns: int | None = None):
+        if time.clock_id != self.clock_id:
+            raise VisionError("buffer_epoch_mismatch")
+        if max_delta_ns is not None:
+            integer(max_delta_ns)
+        self._prune()
+        best = min(
+            self._captures.values(),
+            key=lambda c: (
+                abs(self._visual(c).captured_at.nanoseconds - time.nanoseconds),
+                -c.ref.sequence,
+            ),
+            default=None,
+        )
+        if best is not None and (
+            max_delta_ns is None
+            or abs(self._visual(best).captured_at.nanoseconds - time.nanoseconds)
+            <= max_delta_ns
+        ):
+            return best
+        return None

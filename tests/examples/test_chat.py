@@ -297,7 +297,10 @@ class ChatExampleTests(unittest.TestCase):
         )
 
     def test_camera_snapshot_becomes_verified_image_content(self) -> None:
-        jpeg = bytes.fromhex("ffd8ffc00011080002000303011100021100031100ffd9")
+        import cv2
+        import numpy as np
+
+        jpeg = cv2.imencode(".jpg", np.zeros((2, 3, 3), dtype=np.uint8))[1].tobytes()
         snapshot = json.dumps(
             {
                 "data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
@@ -316,15 +319,22 @@ class ChatExampleTests(unittest.TestCase):
         assert model.request is not None
         from roboagent.context import MessageSegment
 
-        contents = next(segment.message.content for segment in reversed(model.request.segments) if isinstance(segment, MessageSegment))
+        contents = next(
+            segment.message.content
+            for segment in reversed(model.request.segments)
+            if isinstance(segment, MessageSegment)
+        )
         self.assertEqual(contents[0].text, "what is this?")
         self.assertEqual(contents[1].source.data, jpeg)
         frame = self.app.active_conversation(state).vision_buffer.latest()
-        self.assertEqual((frame.width, frame.height), (3, 2))
+        self.assertEqual((frame.image.width, frame.image.height), (3, 2))
 
     def test_camera_snapshot_rejects_invalid_or_mismatched_input(self) -> None:
         self.assertIsNone(self.app._frame_from_data_url("not-json"))
-        jpeg = bytes.fromhex("ffd8ffc00011080002000303011100021100031100ffd9")
+        import cv2
+        import numpy as np
+
+        jpeg = cv2.imencode(".jpg", np.zeros((2, 3, 3), dtype=np.uint8))[1].tobytes()
         snapshot = json.dumps(
             {
                 "data_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),

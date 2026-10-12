@@ -18,7 +18,7 @@ jobs:
       - name: Install Python
         run: uv python install 3.12
       - name: Sync dependencies
-        run: uv sync --locked --dev --extra coding --extra gradio --extra embodied
+        run: uv sync --locked --dev --extra coding --extra gradio --extra embodied --extra vision
       - name: Lint
         run: uv run ruff check roboagent tests examples
       - name: Typecheck runtime foundations
@@ -27,3 +27,16 @@ jobs:
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: uv run pytest -q
+
+  core-import:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv python install 3.12
+      - run: uv sync --locked --no-dev
+      - name: Import without CPU Vision dependencies
+        run: >-
+          uv run --no-dev python -c "import importlib.util; import roboagent;
+          assert importlib.util.find_spec('numpy') is None;
+          assert importlib.util.find_spec('cv2') is None"

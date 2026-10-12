@@ -35,14 +35,13 @@ The original one-axis carriage remains available as
 
 Host integrations are explicit:
 
-- `perception.py`: `CloudSemantics` invokes the existing Model interface and validates
-  JSON against the original ObservationRef. Host association maps local detections
-  to stable EntityRefs. `RGBDAdapter` validates capture skew, depth and historical TF
-  before atomic World commit. A depth centroid establishes position, not orientation;
-  it does not invent a complete manipulation pose. Supply `pose_from_sample`
-  only when local geometry/tracking establishes the full world-frame object pose
-  (object origin and orientation) from that exact capture. A surface point plus
-  orientation does not establish an object pose.
+- `perception.py` is now an explicit application composition over first-party
+  `SemanticAnalyzer`, `SpatialAnalyzer`, `VisualTracker`, `VisionWorldAdapter` and
+  `create_vision_tools`. Install `--extra vision` for this optional sensor path.
+  Hosts supply capture/calibration, controller identity mapping, historical TF,
+  targeted query resolution and known-object PnP correspondences. Visible points
+  and PCA axes never become object poses. Only explicit category/color/full-pose
+  application mappings are provided; semantic spatial relations stay namespaced.
 - `mfr3duo_bridge.py`: `Mfr3duoBridge` uses roserver `/api/v1/robots/...` state, operations
   and stop endpoints. Manipulation Tools are registered only when the server advertises
   manipulation and the deployment supplies a trusted `pre_dispatch` callback for

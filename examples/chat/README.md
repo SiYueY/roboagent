@@ -49,7 +49,7 @@ DASHSCOPE_API_KEY=your-dashscope-api-key
 ## 启动
 
 ```bash
-uv sync --extra gradio --extra speech
+uv sync --extra gradio --extra vision --extra speech
 bash scripts/deploy_silero_vad.sh
 uv run python examples/chat/app.py
 ```

@@ -86,3 +86,15 @@ propagation; see the [generic World contract](docs/world/world_v1.1.md).
 The [embodied reference integration](docs/embodied.md) uses a CPU MuJoCo tabletop
 and explicit sensor/backend adapters. Its physical action policy and verification
 rules belong to the reference application, not the generic Core.
+
+## Visual perception
+
+The optional `vision` extra provides CPU geometry and cloud semantic analysis via
+existing Model interfaces. Capture/clock/calibration and source authorization are
+Host inputs. Results explicitly distinguish surface points, visible centroids,
+principal axes and validated object poses; temporal tracking and World publication
+remain separate. See [Vision V1](docs/vision/vision_v1.0.md).
+
+```bash
+uv sync --extra vision
+```
