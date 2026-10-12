@@ -28,6 +28,20 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: uv run pytest -q
 
+  vision-only:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked --dev --extra vision
+      - name: Test Vision dependency closure
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: uv run pytest -q tests/interaction/test_vision.py tests/vision
+
   core-import:
     runs-on: ubuntu-22.04
     steps:

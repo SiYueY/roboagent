@@ -233,8 +233,6 @@ class VisualTracker:
             previous.anchor.x - detection.anchor.x,
             previous.anchor.y - detection.anchor.y,
         )
-        if overlap < self.policy.min_iou or distance > self.policy.max_anchor_distance:
-            return None
         cost = (1 - overlap + distance) / 2
         if (
             position is not None
@@ -245,7 +243,11 @@ class VisualTracker:
             metric = math.dist(position.xyz, track.position.xyz)
             if metric > self.policy.max_position_distance:
                 return None
-            cost += metric
+            # Stable metric evidence survives camera motion. Image agreement is
+            # only a secondary cost and cannot veto this candidate.
+            return metric / max(self.policy.max_position_distance, 1e-12) + 0.05 * cost
+        if overlap < self.policy.min_iou or distance > self.policy.max_anchor_distance:
+            return None
         return cost
 
     def update(

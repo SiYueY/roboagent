@@ -38,7 +38,8 @@ Host integrations are explicit:
 - `perception.py` is now an explicit application composition over first-party
   `SemanticAnalyzer`, `SpatialAnalyzer`, `VisualTracker`, `VisionWorldAdapter` and
   `create_vision_tools`. Install `--extra vision` for this optional sensor path.
-  Hosts supply capture/calibration, controller identity mapping, historical TF,
+  Hosts supply capture/calibration, an explicitly activated Host-owned tracker,
+  controller identity mapping, historical TF,
   targeted query resolution and known-object PnP correspondences. Visible points
   and PCA axes never become object poses. Only explicit category/color/full-pose
   application mappings are provided; semantic spatial relations stay namespaced.

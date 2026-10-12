@@ -47,7 +47,8 @@ def create_vision_tools(
     """Compose one synchronous observation boundary without another Agent/Runtime.
 
     capture(target) returns immutable VisualCapture or SpatialCapture. Host capture
-    activates the epoch before any cloud await. resolve_entity validates a targeted
+    backend confirms and activates the tracker epoch before any cloud await; this
+    Tool never activates epochs from returned captures. resolve_entity validates a targeted
     identity; it never assigns Model-produced writer identity.
     """
 
@@ -110,8 +111,6 @@ def create_vision_tools(
                 raise VisionError("entity_resolution_unavailable")
             sample = await capture(target)
             visual = sample.visual if isinstance(sample, SpatialCapture) else sample
-            if tracker:
-                tracker.activate_epoch(visual.captured_at.clock_id)
             cancellation.raise_if_cancelled()
 
             def usage(value):

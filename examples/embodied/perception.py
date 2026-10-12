@@ -7,7 +7,6 @@ Host inputs. This module contains no geometry solver or separate perception stat
 from roboagent.interaction.vision import (
     SemanticAnalyzer,
     SpatialAnalyzer,
-    VisualTracker,
     VisionWorldAdapter,
     VisionWorldBinding,
     create_vision_tools,
@@ -19,8 +18,7 @@ def create_perception_tools(
     capture,
     model,
     world,
-    stream_id,
-    namespace,
+    tracker,
     observation_source,
     semantic_source,
     geometry_source,
@@ -37,6 +35,8 @@ def create_perception_tools(
     Full object pose is produced only by validated PnP correspondences. A robot
     deployment must bind tracker identity to its actual controller object IDs.
     Semantic spatial relations retain namespaced predicates, never task success.
+    Host supplies and activates the tracker when it confirms a device epoch;
+    delayed captures must never reactivate a retired epoch.
     """
 
     def encode(predicate, value):
@@ -68,7 +68,7 @@ def create_perception_tools(
         capture,
         SemanticAnalyzer(model),
         spatial=SpatialAnalyzer(),
-        tracker=VisualTracker(namespace=namespace, stream_id=stream_id),
+        tracker=tracker,
         world_adapter=VisionWorldAdapter(binding),
         transforms=transforms,
         target_frame=target_frame,

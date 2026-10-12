@@ -405,3 +405,63 @@ def test_direct_rgb_tool_and_targeted_observation_do_not_create_world():
             await session.close()
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("delay_stage", ["capture", "semantic"])
+def test_tool_delayed_epoch_cannot_reactivate_tracker_or_publish_claims(delay_stage):
+    async def check():
+        from roboagent.tool import ToolContext
+        from tests.vision.test_tracking_publication import analysis
+
+        stale = capture()
+        current = capture(clock="new-clock")
+        t = tracker()
+        entered, release = asyncio.Event(), asyncio.Event()
+        w, publisher = adapter()
+
+        async def delayed():
+            entered.set()
+            await release.wait()
+
+        async def source(target):
+            if delay_stage == "capture":
+                await delayed()
+            return stale
+
+        class DelayedModel(VisionModel):
+            async def stream(self, context, settings=None):
+                if delay_stage == "semantic":
+                    await delayed()
+                async for event in super().stream(context, settings):
+                    yield event
+
+        tool = create_vision_tools(
+            source,
+            SemanticAnalyzer(DelayedModel(payload(stale))),
+            tracker=t,
+            world_adapter=publisher,
+        )[0]
+        pending = asyncio.create_task(
+            tool.execute(
+                {},
+                ToolContext("run", "session", RuntimeCancellation()),
+            )
+        )
+        await entered.wait()
+        t.activate_epoch("new-clock")
+        a = analysis(current)
+        authoritative = t.update(current, a)
+        await publisher.publish(publisher.prepare(current, a, authoritative))
+        before = await w.snapshot()
+        release.set()
+        outcome = await pending
+        content = outcome.content[0].value
+        assert t.clock_id == "new-clock"
+        assert content["tracking"]["reason"] == "tracking_epoch_inactive"
+        assert content["tracking"]["associations"] == ()
+        assert content["scene"]["objects"]
+        after = await w.snapshot()
+        assert after.entries == before.entries
+        assert t.update(current, a).associations == authoritative.associations
+
+    asyncio.run(check())

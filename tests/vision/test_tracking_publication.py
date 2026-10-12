@@ -8,14 +8,20 @@ from roboagent.interaction.vision import (
     AssociationStatus,
     EstimateStatus,
     PoseResult,
+    PositionEstimate,
+    PositionResult,
+    PrincipalAxesEstimate,
+    OrientationResult,
     PublicationStatus,
     SemanticAnalysis,
     SpatialResults,
     TrackingStatus,
+    TrackingPolicy,
     VisionError,
     VisionLimits,
     VisionWorldAdapter,
     VisionWorldBinding,
+    VisionWorldPolicy,
     VisualRelation,
     VisualTracker,
 )
@@ -83,8 +89,10 @@ def test_bounded_cache_and_failed_capacity_do_not_advance():
 
 
 class Clock:
+    nanoseconds = 10_000_000
+
     def now(self, clock_id):
-        return ObservationTime(clock_id, 10_000_000)
+        return ObservationTime(clock_id, self.nanoseconds)
 
 
 def adapter(limits=None, **kwargs):
@@ -190,3 +198,143 @@ def test_mapping_collision_is_rejected_before_write():
     )
     with pytest.raises(VisionError, match="vision_predicate_mapping_conflict"):
         publisher.prepare(sample, a, tracker().update(sample, a))
+
+
+@pytest.mark.parametrize(
+    "current_frame,offset,stable,matched",
+    [
+        ("world", 0.02, True, True),
+        ("world", 0.3, True, False),
+        ("optical", 0.02, True, False),
+        ("world", 0.02, False, False),
+    ],
+)
+def test_stable_3d_gate_survives_camera_motion(current_frame, offset, stable, matched):
+    t = tracker(policy=TrackingPolicy(stable_frames={"world"} if stable else set()))
+    first, second = capture(), capture(sequence=1)
+
+    def positions(sample, frame, x):
+        return SpatialResults(
+            sample.ref,
+            positions=(
+                PositionResult(
+                    sample.ref,
+                    "a",
+                    EstimateStatus.AVAILABLE,
+                    PositionEstimate(sample.ref, "a", (x, 0, 1), frame),
+                ),
+            ),
+        )
+
+    original = t.update(
+        first,
+        analysis(first, [detection(x0=0.05, x1=0.15)]),
+        positions(first, "world", 0),
+    )
+    result = t.update(
+        second,
+        analysis(second, [detection(x0=0.75, x1=0.85)]),
+        positions(second, current_frame, offset),
+    )
+    assert (result.associations[0].status is AssociationStatus.MATCHED) == matched
+    assert (
+        result.associations[0].track_id == original.associations[0].track_id
+    ) == matched
+
+
+@pytest.mark.parametrize(
+    "ttl,expected", [(1_000_000_000, WorldStatus.STALE), (None, WorldStatus.KNOWN)]
+)
+def test_semantic_freshness_and_explicit_permanent_policy(ttl, expected):
+    async def check():
+        clock = Clock()
+        w = World(
+            "freshness",
+            clock_resolver=clock,
+            allowed_sources=("visual", "semantic", "geometry"),
+        )
+        policy = (
+            VisionWorldPolicy()
+            if ttl is not None
+            else VisionWorldPolicy(semantic_ttl_ns=None)
+        )
+        publisher = VisionWorldAdapter(
+            VisionWorldBinding(
+                w,
+                None,
+                "visual",
+                "semantic",
+                "geometry",
+                policy=policy,
+            )
+        )
+        sample = capture()
+        a = analysis(
+            sample,
+            [
+                replace(
+                    detection("a", x0=0.1, x1=0.4),
+                    attributes={"state": "open"},
+                    description="open box",
+                ),
+                detection("b", x0=0.6, x1=0.9),
+            ],
+            [VisualRelation("a", "near", "b")],
+        )
+        t = tracker()
+        pub = publisher.prepare(sample, a, t.update(sample, a), asserted_at=RECEIVED)
+        await publisher.publish(pub)
+        semantics = [
+            c
+            for c in pub.claims
+            if c.predicate.startswith("vision.semantic.")
+            and c.predicate != "vision.semantic.region"
+        ]
+        assert {c.predicate for c in semantics} >= {
+            "vision.semantic.category",
+            "vision.semantic.description",
+            "vision.semantic.state",
+            "vision.semantic.relation.near",
+        }
+        for c in semantics:
+            assert c.valid_for_ns == ttl
+            assert (await w.query(c.subject, c.predicate)).status is WorldStatus.KNOWN
+        # An omission adds no negative claims and does not refresh old semantics.
+        empty = capture(sequence=1)
+        absent = analysis(empty, [])
+        await publisher.publish(
+            publisher.prepare(empty, absent, t.update(empty, absent))
+        )
+        clock.nanoseconds = 1_000_000_001
+        for c in semantics:
+            assert (await w.query(c.subject, c.predicate)).status is expected
+
+    asyncio.run(check())
+
+
+def test_principal_axes_publication_keeps_pca_semantics():
+    sample = capture()
+    a = analysis(sample)
+    spatial = SpatialResults(
+        sample.ref,
+        orientations=(
+            OrientationResult(
+                sample.ref,
+                "a",
+                EstimateStatus.AVAILABLE,
+                PrincipalAxesEstimate(
+                    sample.ref,
+                    "a",
+                    "optical",
+                    ((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+                    (3, 2, 1),
+                ),
+            ),
+        ),
+    )
+    _, publisher = adapter()
+    pub = publisher.prepare(sample, a, tracker().update(sample, a, spatial), spatial)
+    geometry = [c for c in pub.claims if c.predicate.startswith("vision.geometry.")]
+    assert [c.predicate for c in geometry] == ["vision.geometry.principal_axes"]
+    assert geometry[0].value["frame_id"] == "optical"
+    assert "directions" in geometry[0].value

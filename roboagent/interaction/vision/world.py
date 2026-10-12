@@ -35,7 +35,7 @@ from .tracking import TrackingStatus, association_input_digest
 
 @dataclass(frozen=True, slots=True)
 class VisionWorldPolicy:
-    semantic_ttl_ns: int | None = None
+    semantic_ttl_ns: int | None = 1_000_000_000
     spatial_ttl_ns: int | None = 1_000_000_000
     visibility_ttl_ns: int | None = 1_000_000_000
 
@@ -262,7 +262,7 @@ class VisionWorldAdapter:
             for group, name in (
                 (spatial.surface, "surface_point"),
                 (spatial.positions, "position"),
-                (spatial.orientations, "orientation"),
+                (spatial.orientations, "principal_axes"),
                 (spatial.poses, "pose"),
             ):
                 for r in group:

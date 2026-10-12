@@ -1533,7 +1533,7 @@ Tracker 绑定一个 stream_id，active state 属于 `(stream_id, clock_id)`。H
 tracker.activate_epoch(clock_id)
 ```
 
-首次使用必须激活 epoch；同一 active clock_id 的重复激活是 no-op。确认 device/clock reset 后，Host 激活全新的 clock_id，清理 active tracks、last_sequence 和 retry cache。sequence 在新 epoch 内可以从零开始；同一 epoch 的采样时间必须随 sequence 非递减。
+create_vision_tools() 不调用 activate_epoch()，也不根据 capture 的 clock_id 推断 reset；capture backend/Host 必须先确认 epoch。embodied composition 接收 Host 持有的 tracker。首次使用必须激活 epoch；同一 active clock_id 的重复激活是 no-op。确认 device/clock reset 后，Host 激活全新的 clock_id，清理 active tracks、last_sequence 和 retry cache。sequence 在新 epoch 内可以从零开始；同一 epoch 的采样时间必须随 sequence 非递减。
 
 云端返回、World publication 或 retry **绝不调用 activate_epoch()**。update 先验证 stream 与 active clock_id：旧 epoch 返回 tracking_epoch_inactive、其他 stream 返回 tracking_stream_mismatch，不重置或修改 state，即使该返回的 sequence 更大。
 
@@ -1637,6 +1637,8 @@ MATCHED/NEW 的 track_id 必须存在；candidate_tracks 为空。AMBIGUOUS 的 
 
 CPU V1 使用 category compatibility、2D IoU、anchor displacement、可用且 frame/time 可比较的 3D distance，以及 configured stable semantic attributes。不能直接比较不同 frame 的 XYZ。candidate gating、cost threshold 和 ambiguity margin 均配置化。
 
+同一 Host 声明的 stable frame 中存在有效 3D positions 时，3D distance gate 独立决定候选是否可用，2D IoU/anchor displacement 只提供次级 cost；相机移动不能仅因 2D gate 失败而丢弃稳定 metric 候选。3D 不可用、frame 不同或未声明稳定时，使用 2D IoU + anchor displacement gate。category 与 stable attributes compatibility 仍适用于两条路径。
+
 每次 authoritative association MUST 为一对一：一个 detection 最多绑定一个 track，一个 existing track 最多绑定一个 detection。deterministic ordering 只决定选择顺序，不能替代 exclusivity。
 
 V1 使用保守、确定性的 matching：
@@ -1729,7 +1731,7 @@ vision.semantic.relation.inside
 
 vision.geometry.surface_point
 vision.geometry.position
-vision.geometry.orientation
+vision.geometry.principal_axes
 vision.geometry.pose
 
 vision.state.observed
@@ -1827,7 +1829,7 @@ PnP pose
 
 所有 Claim 必须引用本次 immutable capture evidence Observation。RGB-D publication 的 evidence metadata 同时记录 RGB、depth、各自 sampling time 与 calibration；不能只记录 RGB identity 却把 depth geometry 当作没有来源的数值。
 
-Claim.valid_at MUST 等于该 capture 的 visual.captured_at 转换得到的 ObservationTime（保持同 clock_id/nanoseconds）。RGB-D skew 已由 §2.8 验证；depth 原始采样时间另外保留在 evidence metadata 中。valid_for_ns 由 configured semantic/spatial TTL 决定，不能以 inference 完成、received_at 或 retry time 刷新 TTL。World 必须配置能解释这些 clock domains 的现有 ClockResolver；resolver 不可用时按 World 的 UNKNOWN 规则处理，不伪造 Host time。
+Claim.valid_at MUST 等于该 capture 的 visual.captured_at 转换得到的 ObservationTime（保持同 clock_id/nanoseconds）。RGB-D skew 已由 §2.8 验证；depth 原始采样时间另外保留在 evidence metadata 中。semantic、spatial、visibility TTL 默认均为 1_000_000_000 ns；category、description、开放 attributes 与 relations 都默认有 freshness。Host 明确需要长期事实时可显式配置 semantic_ttl_ns=None。valid_for_ns 由 configured semantic/spatial TTL 决定，不能以 inference 完成、received_at 或 retry time 刷新 TTL。World 必须配置能解释这些 clock domains 的现有 ClockResolver；resolver 不可用时按 World 的 UNKNOWN 规则处理，不伪造 Host time。
 
 asserted_at 在 logical analysis 被接受时由 Host/helper 赋值一次，并存入该 analysis 的 immutable publication 数据。所有时间、value、source/scope 和 evidence_refs 在 publication retry 中保持不变。
 
